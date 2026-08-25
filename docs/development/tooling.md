@@ -40,9 +40,10 @@ authoritative.
 If `.codegraph/` exists at the repository root, prefer CodeGraph over broad
 grep/find/source exploration when locating or understanding code:
 
-```bash
-codegraph explore "<question>"     # shell
-# MCP: codegraph_explore            # when connected
+```text
+MCP:   codegraph_explore "<question>"
+Shell: codegraph explore "<question>"  # versions that expose explore
+This CLI: codegraph context "<question>" / codegraph query "<symbol>"
 ```
 
 Locate symbols, ownership, dependency paths first; verify exact behavior

@@ -8,9 +8,11 @@ mechanisms, not prose.
 ## CodeGraph / Graphify (conditional tools)
 
 - If `.codegraph/` exists at the repo root, prefer
-  `codegraph explore "<question>"` (or MCP `codegraph_explore`) over broad
-  grep/find when locating or understanding code. Verify exact behavior
-  against current source before correctness claims. Missing `.codegraph/`
+  MCP `codegraph_explore` when connected; use shell `codegraph explore
+  "<question>"` when that CLI command exists. This checkout's CLI uses
+  `codegraph context "<question>"` and `codegraph query "<symbol>"`. Prefer
+  these over broad grep/find when locating or understanding code. Verify
+  exact behavior against current source before correctness claims. Missing `.codegraph/`
   → skip; never generate an index unprompted.
 - If `graphify-out/` exists: read `graphify-out/GRAPH_REPORT.md` before
   broad architecture exploration; use `graphify query/path/explain` for
