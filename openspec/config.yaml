@@ -1,0 +1,54 @@
+schema: spec-driven
+
+context: |
+  North - self-hosted requirement management: requesters collaborate
+  with an AI agent to turn ambiguous requests into structured,
+  reviewable requirements.
+
+  Stack (fixed for 0.1.0): Next.js (App Router, TypeScript, Tailwind
+  CSS, shadcn/ui) frontend; Rust backend server + local Rust daemon;
+  relational database (versioned SQL in migrations/); host git on the
+  daemon machine for repository access. Monorepo layout: apps/web,
+  crates/north-{domain,server,daemon,protocol,persistence},
+  crates/north-archtests (boundary enforcement), docs/, migrations/,
+  openspec/.
+
+  Hard boundaries (enforced by crates/north-archtests; never bypass):
+  - north-domain is pure business logic: no HTTP, DB, runtime,
+    agent SDK, or other north crates.
+  - north-protocol carries wire types only, no business behavior.
+  - north-server owns business state; reaches the daemon only
+    through north-protocol.
+  - north-daemon reports facts/events; no business rules, no storage.
+  - Browser-server traffic is HTTP + SSE only; server-daemon link is
+    a daemon-initiated persistent connection.
+
+  Product anchors (details in docs/product/): lifecycle Draft ->
+  Discussing -> Ready -> Accepted/Rejected with reopen; Ready is an
+  agent verdict bound to the exact requirement revision; edits demote
+  Ready -> Discussing; Accept/Reject/Request Changes are human
+  decisions gated by role (Manager/Admin/Owner); conversation is
+  context, not source of truth; execution health (Idle/Running/
+  Retrying/Failed) never mutates business state; repository
+  inspection is read-only via host git; delivery is at-least-once
+  with idempotent processing.
+
+rules:
+  proposal:
+    - State motivation, scope, and out-of-scope explicitly
+    - List dependencies on earlier changes
+    - Mark each requirement as invariant or implementation suggestion
+    - Name affected canonical docs in docs/
+  specs:
+    - One capability directory per bounded concept
+    - Scenarios must be concretely testable
+  design:
+    - Record only choices a later implementer could get wrong
+  tasks:
+    - Group tasks into independently verifiable slices
+    - End every slice with its validation commands
+
+operations:
+  apply:
+    guidance:
+      - Keep the full validation suite green before declaring done
