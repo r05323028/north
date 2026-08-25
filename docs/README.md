@@ -21,7 +21,10 @@ Read top-down; each doc stays small and links instead of duplicating.
 ## Development (working rules)
 
 - [development/invariants.md](development/invariants.md) — invariant ledger + where each is enforced
-- [development/testing.md](development/testing.md) — validation commands per area
+- [development/testing.md](development/testing.md) — normative layers, coverage, profiles
+- [development/ci.md](development/ci.md) — workflow jobs, stable gate, act parity
+- [development/git-workflow.md](development/git-workflow.md) — PRs and Conventional Commits
+- [development/tooling.md](development/tooling.md) — prek, act, CodeGraph, Graphify
 - [development/documentation.md](development/documentation.md) — where statements belong; update duties
 
 Change proposals and deltas live in `openspec/` (see `AGENTS.md`).

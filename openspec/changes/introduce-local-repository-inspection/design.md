@@ -8,9 +8,10 @@
 - All git invocation via host `git` binary with inherited environment
   (SSH agent, credential helpers). No bundled auth logic.
 - Inspection result = {repository_id, commit_sha, notes}; SHA from `git rev-parse HEAD`.
-- Read-only discipline: daemon issues only clone/fetch/rev-parse/log/grep-class
-  commands; a deny-by-default command allowlist makes mutation structurally
-  unlikely.
+- Mutation discipline: deny-by-default read-class Git allowlist PLUS a
+  disposable-checkout policy — post-task dirty-tree detection treats any
+  direct file mutation as an invariant violation (discard + report). Honest
+  scope: process-level enforcement, not kernel sandboxing.
 
 ## Open Questions
 

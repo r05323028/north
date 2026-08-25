@@ -10,7 +10,7 @@ records what it saw.
 
 - Daemon workspace management: clone-on-demand / fetch-existing using host
   `git`, SSH agent, and credential helpers; nothing custom.
-- Strictly read-only inspection commands (allowlist); default branch reading.
+- Read-class Git commands plus disposable-checkout enforcement: any dirty tree after clarification is a process-level invariant violation; default branch reading. The mechanism is not a kernel sandbox.
 - Inspections report repository id + resolved commit SHA back through events.
 
 No code modification, no push, no PR creation, no centralized credentials —

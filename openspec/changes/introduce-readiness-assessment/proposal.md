@@ -17,8 +17,11 @@ dedicated assessment concept, Ready decays into vibes.
 - Stale assessments are structurally impossible to promote: revision mismatch
   refuses; edits after Ready demote automatically (already enforced in domain,
   now exercised end-to-end).
-- Latest-valid-assessment payload powers the human review packet:
-  Goal/Scope/Criteria/Assumptions/Blocking Questions/Repositories Inspected.
+- The human review packet is a PROJECTION of the current Requirement plus the
+  latest valid ReadinessAssessment for exactly that revision — goal/scope/
+  criteria from the Requirement (source of truth), blockers/assumptions/repo
+  evidence from the assessment. Projection refuses revision mismatch, so a
+  stale packet is never reviewable.
 
 Out of scope: who runs the agent (runtime changes), assessment editing,
 multiple concurrent assessments.

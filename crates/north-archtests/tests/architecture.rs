@@ -1,12 +1,15 @@
 //! Structural architecture enforcement for North.
 //!
-//! Boring on purpose: these tests parse workspace manifests and frontend
-//! sources and assert forbidden edges are absent. They run with the normal
-//! `cargo test --workspace` gate and in CI. Rules mirror
-//! docs/architecture/dependency-boundaries.md; extend BOTH when boundaries change.
+//! Dependency rules resolve against the EFFECTIVE Cargo dependency graph via
+//! `cargo metadata --no-deps`: normal, dev, build, and target-specific
+//! dependencies all count. Rules mirror docs/architecture/dependency-boundaries.md;
+//! extend BOTH when boundaries change.
 
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -16,38 +19,52 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn manifest(crate_name: &str) -> String {
-    fs::read_to_string(
-        repo_root()
-            .join("crates")
-            .join(crate_name)
-            .join("Cargo.toml"),
-    )
-    .unwrap_or_else(|e| panic!("read Cargo.toml for {crate_name}: {e}"))
+fn cargo_bin() -> String {
+    std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
 }
 
-/// Extracts dependency keys from the `[dependencies]` section without pulling
-/// in a TOML parser. Handles `key = "x"`, `key.workspace = true`, and skips comments.
-fn declared_dependencies(manifest_text: &str) -> Vec<String> {
-    let mut deps = Vec::new();
-    let mut in_dependencies = false;
-    for raw in manifest_text.lines() {
-        let line = raw.trim();
-        if line.starts_with('[') {
-            in_dependencies = line == "[dependencies]";
-            continue;
-        }
-        if !in_dependencies || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(key) = line.split('=').next() {
-            let key = key.trim();
-            if !key.is_empty() {
-                deps.push(key.to_string());
+/// Workspace metadata without the resolve graph: package declarations are all
+/// we need, including every declared dependency kind.
+fn workspace_metadata() -> Value {
+    let output = Command::new(cargo_bin())
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(repo_root())
+        .output()
+        .expect("spawn cargo metadata");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("valid cargo metadata JSON")
+}
+
+/// Pure helper: every dependency name declared by one package object across
+/// ALL dependency kinds (normal `kind: null`, `dev`, `build`, target-scoped).
+/// Renamed dependencies still count under their real crate name (`name`).
+fn package_dependency_names(package: &Value) -> Vec<String> {
+    let empty = Vec::new();
+    let deps = package
+        .get("dependencies")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    deps.iter()
+        .filter_map(|dep| dep.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Map of workspace member name -> declared dependency names.
+fn member_dependencies(metadata: &Value) -> BTreeMap<String, Vec<String>> {
+    let mut map = BTreeMap::new();
+    if let Some(packages) = metadata.get("packages").and_then(Value::as_array) {
+        for package in packages {
+            if let Some(name) = package.get("name").and_then(Value::as_str) {
+                map.insert(name.to_string(), package_dependency_names(package));
             }
         }
     }
-    deps
+    map
 }
 
 struct BoundaryRule {
@@ -64,12 +81,13 @@ const RULES: &[BoundaryRule] = &[
             "tokio",
             "sqlx",
             "reqwest",
+            "serde_json",
             "north-server",
             "north-daemon",
             "north-persistence",
             "north-protocol",
         ],
-        reason: "domain is pure business logic: no HTTP/DB/runtime, no other north crates",
+        reason: "domain is pure business logic: no HTTP/DB/runtime/JSON, no other north crates",
     },
     BoundaryRule {
         crate_name: "north-protocol",
@@ -106,9 +124,17 @@ const RULES: &[BoundaryRule] = &[
 
 #[test]
 fn crate_dependency_boundaries_hold() {
+    let metadata = workspace_metadata();
+    let members = member_dependencies(&metadata);
     let mut violations = Vec::new();
     for rule in RULES {
-        let deps = declared_dependencies(&manifest(rule.crate_name));
+        let Some(deps) = members.get(rule.crate_name) else {
+            violations.push(format!(
+                "workspace member `{}` is missing from cargo metadata",
+                rule.crate_name
+            ));
+            continue;
+        };
         for dep in deps {
             if rule.forbidden.contains(&dep.as_str()) {
                 violations.push(format!(
@@ -123,6 +149,39 @@ fn crate_dependency_boundaries_hold() {
         "dependency boundary violations:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn dependency_parser_covers_all_dependency_kinds() {
+    // Meta-test: the parser must count normal, dev, build, and target-specific
+    // dependencies, and renamed deps under their real crate name.
+    let package: Value = serde_json::from_str(
+        r#"{
+            "name": "example",
+            "dependencies": [
+                { "name": "normal_dep", "kind": null, "optional": false },
+                { "name": "dev_dep", "kind": "dev", "optional": false },
+                { "name": "build_dep", "kind": "build", "optional": false },
+                { "name": "targeted_dep", "kind": null, "optional": false,
+                  "target": { "cfg": ["windows"] } },
+                { "name": "renamed_real_name", "rename": "alias", "kind": null, "optional": false }
+            ]
+        }"#,
+    )
+    .unwrap();
+    let names = package_dependency_names(&package);
+    for expected in [
+        "normal_dep",
+        "dev_dep",
+        "build_dep",
+        "targeted_dep",
+        "renamed_real_name",
+    ] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "parser missed dependency `{expected}`: {names:?}"
+        );
+    }
 }
 
 #[test]

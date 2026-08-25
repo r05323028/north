@@ -10,7 +10,7 @@ An assessment can move a requirement to Ready only if:
 - the assessment targets the requirement's **current revision**;
 - the verdict is Ready with **no unresolved blockers**;
 - meaningful acceptance criteria exist;
-- current state allows the transition (Discussing).
+- current state allows the transition (Discussing only).
 
 ## Semantic gates (agent judgment)
 
@@ -27,13 +27,27 @@ internal naming) does NOT block Ready unless it materially changes product behav
 latest_readiness_assessment.requirement_revision == requirement.revision
 ```
 
-Any edit to a Ready requirement bumps the revision; the old assessment goes stale
-and the requirement demotes Ready → Discussing automatically. The agent must
-re-assess before Ready again. This is enforced in domain logic — never left to the
-agent's memory.
+Any content-changing edit bumps the revision; the old assessment goes stale and
+the requirement demotes Ready → Discussing automatically. No-op edits (empty or
+same-value) change neither revision nor status and do not invalidate assessments.
+The agent must re-assess before Ready again — enforced in domain logic, never
+left to memory.
 
-## Assessment record
+## Review packet = projection, not source
 
-`ReadinessAssessment` keeps: requirement_revision, verdict, blockers[],
-assumptions[], repositories_reviewed[] (repository_id + inspected commit SHA),
-assessed_at. See `crates/north-domain/src/readiness.rs`.
+The human review packet is derived from TWO sources at read time:
+
+```text
+ReviewPacket := project(current Requirement, latest valid ReadinessAssessment)
+├── from Requirement : goal/title, scope/description, summary,
+│                     acceptance criteria, assumptions, open questions
+└── from Assessment  : blockers, assessment assumptions,
+                       repositories reviewed (+ inspected commit SHAs)
+```
+
+The structured Requirement remains the source of truth for content; the
+assessment is evidence about exactly one revision. Projection refuses revision
+mismatch, so a stale packet is structurally unreviewable. Conversation stays
+supporting context.
+
+See `crates/north-domain/src/{requirement,readiness}.rs`.

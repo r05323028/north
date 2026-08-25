@@ -12,8 +12,11 @@ and drifts across architectural lines.
 - Rust workspace with five boundary crates plus a structural architecture-test
   crate (`crates/north-archtests`) enforcing forbidden dependency edges.
 - Pure domain seed encoding 0.1.0 invariants: lifecycle transition table,
-  revision-bound readiness (`mark_ready` + stale-assessment refusal),
-  edit-demotion of Ready→Discussing, role/assignment permission rules.
+  operation-specific source states, revision-bound readiness (`mark_ready` +
+  stale refusal), no-op-edit semantics, edit-demotion of Ready→Discussing,
+  review-packet projection, role/assignment rules. Ownership model: the
+  foundation owns this seed; product changes COMPLETE and PERSIST it
+  (storage/API/UI) rather than re-inventing it.
 - Next.js app (`apps/web`) with App Router, TypeScript strict mode, Tailwind
   CSS v4, shadcn/ui scaffolding (components.json, `cn` util, Button), ESLint
   flat config, typecheck/build scripts.
@@ -36,7 +39,9 @@ and drifts across architectural lines.
 
 ## Impact
 
-- Creates every top-level directory used by later changes; no product behavior.
+- Creates every top-level directory used by later changes; the pure domain seed
+  is executable invariant scaffolding, not a persisted/user-facing product
+  workflow. Product changes complete its storage, API, and UI ownership.
 - Establishes CI contract later changes MUST keep green:
   `cargo fmt/clippy/test`, `npm lint/typecheck/build`, `openspec validate`.
 - Affected docs: all of `docs/` (initial authoring), `AGENTS.md`, `README.md`.

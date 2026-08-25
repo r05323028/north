@@ -4,10 +4,29 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  pr-title:
+    name: PR title (Conventional Commit)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: echo "$PR_TITLE" | ./scripts/check-commit-message.sh
+
   rust:
-    name: Rust (fmt, clippy, tests, architecture)
+    name: Rust (fmt, clippy, unit+architecture)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,5 +64,30 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install -g @fission-ai/openspec
+      - run: npm install -g @fission-ai/openspec@1
       - run: openspec validate --all --strict
+
+  gate:
+    name: merge gate
+    needs: [pr-title, rust, web, openspec]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every required job succeeded
+        run: |
+          # pr-title is intentionally skipped on push events; every
+          # actual validation job must succeed on every event.
+          if [ "${{ needs.pr-title.result }}" != "success" ] &&
+             ! { [ "${{ needs.pr-title.result }}" = "skipped" ] &&
+                 [ "${{ github.event_name }}" = "push" ]; }; then
+            echo "pr-title gate result: ${{ needs.pr-title.result }}"
+            exit 1
+          fi
+          for job in rust web openspec; do
+            result="${{ needs.rust.result }}"
+            [ "$job" = web ] && result="${{ needs.web.result }}"
+            [ "$job" = openspec ] && result="${{ needs.openspec.result }}"
+            echo "$job: $result"
+            [ "$result" = success ] || exit 1
+          done
+          echo 'gate: all required jobs succeeded'

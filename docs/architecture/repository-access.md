@@ -1,7 +1,5 @@
 # Repository access
 
-0.1.0 inspection is **read-only**.
-
 ## Model
 
 - Server stores metadata only: `id`, `name`, `url`, `description`
@@ -11,12 +9,34 @@
   permissions. If `git clone <url>` works in the daemon host shell, North works.
 - Inspections record the resolved commit SHA so assessments cite exact source.
 
-## Never
+## Read-only guarantee — stated honestly
+
+The invariant is:
+
+> Requirement clarification must never intentionally persist mutations to
+> configured source repositories.
+
+A Git **command allowlist alone does NOT provide this guarantee** — a
+coding-capable runtime can modify working-tree files directly without invoking
+Git. North 0.1.0 therefore states its actual enforcement level and uses the
+smallest credible mechanism:
+
+- Inspection tasks run against a **disposable checkout** managed by the daemon;
+- the daemon treats any **dirty working tree** detected after a clarification
+  task as an invariant violation: the workspace is discarded and the incident
+  reported;
+- mutation detection is process-level, NOT kernel/sandbox-enforced. North does
+  not claim OS-level read-only isolation in 0.1.0.
+
+If stronger isolation becomes necessary (read-only mounts, sandboxed runtimes),
+it can replace the disposable-checkout mechanism without changing product
+semantics.
+
+## Never (unchanged)
 
 - No centralized credential manager; no SSH keys/PATs sent to the server.
-- No mutation of configured source repositories; analysis is read-only.
-  (Requirement clarification must not modify source.)
-- Agent does not own repository credentials; server needs none for daemon git work.
+- Agent does not own repository credentials; server receives no Git credentials;
+  daemon uses the host's existing git/auth environment.
 
 ## Workspaces
 

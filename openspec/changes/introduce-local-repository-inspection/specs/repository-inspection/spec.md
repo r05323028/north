@@ -1,7 +1,7 @@
 ## Purpose
 
-Lets the daemon read configured repositories using nothing but the host's
-existing Git setup, strictly read-only, citing exact commits.
+Lets the daemon read configured repositories with the host's existing Git setup,
+while detecting and discarding clarification-task mutations and citing exact commits.
 
 ## ADDED Requirements
 
@@ -18,16 +18,23 @@ SHALL fail with the underlying git error surfaced.
 - **THEN** the daemon prepares a readable workspace for that URL with no
 additional credentials provided by North
 
-### Requirement: Strictly read-only inspection
+### Requirement: No persisted mutations to source repositories
 
-The daemon SHALL issue only read-class git operations (clone/fetch/rev-parse/
-log/diff-class reads) against configured repositories. It SHALL NOT push,
-commit, mutate refs, or modify working trees of configured sources.
+The invariant: requirement clarification must never intentionally persist
+mutations to configured source repositories. The Git command allowlist alone
+does NOT provide this guarantee (a runtime can modify working-tree files
+directly), so 0.1.0 enforcement is process-level: inspection tasks run in a
+daemon-managed DISPOSABLE checkout, and any dirty working tree detected after
+a clarification task SHALL be treated as an invariant violation — the
+workspace is discarded and the incident reported. This is NOT kernel/sandbox-
+enforced, and the documentation SHALL NOT claim OS-level read-only isolation.
+Git operations themselves stay read-class only (no push/commit/ref mutation).
 
-#### Scenario: Mutation attempt is impossible
+#### Scenario: Dirty tree after clarification is a violation
 
-- **WHEN** the command allowlist is consulted for any write operation
-- **THEN** no path exists for push/commit against inspected repositories
+- **WHEN** the daemon detects an unexpected working-tree change after a task
+- **THEN** the workspace is discarded and the violation recorded, so no
+mutation reaches the configured source checkout
 
 ### Requirement: Inspections cite exact commits
 

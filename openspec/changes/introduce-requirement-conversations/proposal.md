@@ -14,7 +14,7 @@ requirements and makes revision-bumping edits a first-class flow.
 - Message kinds requester/agent/system; raw tool output never becomes a
   message.
 - Structured requirement editing through the domain's apply_edit contract:
-  revision bump, Ready demotion honored end-to-end.
+  revision bumps only on real content change, Ready demotion honored end-to-end.
 - Conversation APIs paginate; structured state is always readable directly,
   independent of messages.
 

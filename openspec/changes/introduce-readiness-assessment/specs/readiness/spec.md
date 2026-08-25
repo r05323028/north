@@ -47,14 +47,24 @@ user memory.
 - **THEN** reading the requirement shows Discussing immediately and the old
 assessment cannot be reused
 
-### Requirement: Review packet projects the handoff
+### Requirement: Review packet projects Requirement plus assessment
 
-For a Ready requirement the system SHALL serve a concise packet containing
-goal, scope, acceptance criteria, assumptions, blocking questions, and
-repositories inspected — enough for review without replaying conversation.
+For a Ready requirement the system SHALL serve a concise packet that is a
+projection of TWO sources: goal/title, scope/description, summary, acceptance
+criteria, assumptions, and open questions from the canonical Requirement (source of truth
+for content); blockers, assessment assumptions, and repositories-inspected
+(commit SHAs) from the latest ReadinessAssessment bound to exactly that
+revision. Projection SHALL refuse any revision mismatch so a stale packet is
+never reviewable or acceptable. The packet SHALL NOT be stored as truth.
 
 #### Scenario: Reviewer skips the transcript
 
 - **WHEN** a Requirement Manager opens the review view
-- **THEN** all packet sections render from the latest valid assessment and
-structured fields alone
+- **THEN** all six sections render from the structured fields plus the
+revision-matched assessment alone
+
+#### Scenario: Stale pair cannot render a reviewable packet
+
+- **WHEN** the requirement revision no longer matches the assessment backing
+the packet request
+- **THEN** projection fails with staleness and no packet is served

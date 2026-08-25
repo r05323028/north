@@ -1,6 +1,6 @@
 # Dependency boundaries
 
-Boundaries are enforced by `crates/north-archtests` (`cargo test`); do not bypass.
+Boundaries are enforced by `crates/north-archtests` (`cargo test`), which resolves Cargo metadata across normal/dev/build/target dependency kinds; do not bypass.
 When a boundary changes, update the rule table AND the test together.
 
 ## Allowed dependency direction

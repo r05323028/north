@@ -8,14 +8,16 @@ illegal states.
 
 ## What Changes
 
-- Persist the 0.1.0 Requirement model: title, description, summary,
-  acceptance_criteria[], assumptions[], open_questions[], status, revision,
-  created_by, timestamps.
-- Server-side transition endpoints driven by domain transition table:
-  Draft→Discussing; human review transitions gated by role (Accept / Reject /
-  Request Changes from Ready; Reopen from Rejected).
-- Revision increments on every accepted content edit; terminal states refuse
-  edits; editing Ready demotes to Discussing (domain rule surfaced end-to-end).
+- Persist the 0.1.0 Requirement model behind the encapsulated domain aggregate
+  (private invariant-bearing state; mutation only through operations seeded by
+  the foundation): title, description, summary, acceptance_criteria[],
+  assumptions[], open_questions[], status, revision, created_by, timestamps.
+- Server-side transition endpoints driven by domain operations with pinned
+  source states: Draft→Discussing; human review transitions gated by role
+  (Accept / Reject / Request Changes from Ready; Reopen from Rejected only).
+- Revision increments ONLY when canonical content actually changes (no-op
+  edits are non-mutations); terminal states refuse edits; real edits while
+  Ready demote to Discussing (seeded rule surfaced end-to-end).
 - Minimal transition audit trail (actor, transition, timestamp).
 - List/get APIs with search/filter/sort primitives.
 

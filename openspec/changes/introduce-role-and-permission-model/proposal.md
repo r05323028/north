@@ -9,9 +9,9 @@ repositories, daemons, users).
 ## What Changes
 
 - Persist one role per user: Owner / Admin / Requirement Manager / Requester.
-- Central permission checks (domain helpers already seeded:
-  `Role::can_review`, `Role::can_administer`, `assign_role`) enforced again at
-  every API boundary.
+- Central permission checks completing the foundation-seeded domain helpers
+  (`Role::can_review`, `Role::can_administer`, `assign_role`), enforced again
+  at every API boundary.
 - Role assignment API: Owner grants any role; Admin grants everything except
   Owner; nobody modifies their own role; only Owner/Admin may assign.
 - Admin-only surfaces (repositories, daemon settings, instance settings, user

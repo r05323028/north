@@ -1,0 +1,40 @@
+# Hook runner: prek (github.com/j178/prek).
+# Install once:
+#   prek install --install-hooks -t pre-commit -t pre-push -t commit-msg
+#
+# Policy (docs/development/tooling.md):
+# - pre-commit: fast checks only — encourage frequent commits.
+# - pre-push: full local gate incl. act CI parity.
+# - commit-msg: Conventional Commit subject validation.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(\.pi/|apps/web/(node_modules|\.next)/)
+      - id: end-of-file-fixer
+        exclude: ^(\.pi/|apps/web/(node_modules|\.next)/)
+      - id: check-yaml
+        exclude: ^apps/web/(node_modules|\.next)/
+      - id: check-toml
+
+  - repo: local
+    hooks:
+      - id: rustfmt-check
+        name: rustfmt check
+        entry: cargo fmt --all --check
+        language: system
+        pass_filenames: false
+
+      - id: conventional-commit-msg
+        name: conventional commit subject
+        entry: scripts/check-commit-message.sh
+        language: system
+        stages: [commit-msg]
+
+      - id: pre-push-validation
+        name: pre-push full local gate (incl. act parity)
+        entry: scripts/pre-push-validation.sh
+        language: system
+        pass_filenames: false
+        stages: [push]
