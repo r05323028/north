@@ -10,3 +10,6 @@ next-env.d.ts
 # Agentic development
 graphify-out
 .pi
+
+# Local pi agent state (never publish)
+.pi/
