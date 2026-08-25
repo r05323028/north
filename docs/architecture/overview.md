@@ -6,41 +6,75 @@
 │  apps/web  │ ◀──────────── |  north-server  │ ────────────────▶ |  north-daemon  │
 └────────────┘   (browser)   └───────┬────────┘  (daemon dials)   └───────┬────────┘
                                      │                                    │
-                              relational DB                     local filesystem, host git,
-                          (north-persistence)                  agent runtime (local machine)
+                              relational DB                     local cache, disposable
+                          (north-persistence)                  checkouts, host git,
+                                                               runtime, transport journal
 ```
 
-- The browser talks **only** to the server (HTTP commands, SSE live updates).
-- The daemon always initiates the connection (NAT/firewall friendly).
-- The server owns all business state; the daemon reports facts/events.
+- Browser talks **only** to server over HTTP and SSE. SSE is notification; after
+  connect/reconnect UI refetches canonical API state.
+- Daemon always initiates persistent WebSocket connection.
+- Server owns durable business state, session ownership, command outbox, and
+  execution retry policy. Daemon reports execution facts and owns only local
+  transport/runtime recovery.
+- Server↔daemon command/event delivery is at-least-once. Stable ids prevent
+  duplicate effects; independent per-session sequence spaces detect gaps.
 
 ## Crates
 
 | Crate | Responsibility |
 | --- | --- |
 | north-domain | requirements, lifecycle, readiness, roles — pure logic |
-| north-server | HTTP/SSE API, auth/sessions, business transitions, daemon connection endpoint |
-| north-daemon | local git workspaces, agent runtime, event reporting, reconnect |
-| north-protocol | command/event envelopes shared by server and daemon |
-| north-persistence | SQL storage behind repository traits |
+| north-server | HTTP/SSE API, auth, sessions, business transitions, command outbox, daemon routing, execution policy |
+| north-daemon | daemon-initiated connection, durable transport journal, isolated local checkouts, agent runtime, fact/event reporting |
+| north-protocol | command/event/control envelopes and compatibility metadata only |
+| north-persistence | SQL storage and transactional row↔domain mapping |
+
+The daemon's local transport journal is not North business state and is not
+server database access. It records enough command/event delivery state to make
+reconnects idempotent.
 
 ## Repository validation
 
 Structural architecture validation lives outside production `crates/`, under
 `tests/architecture/`. It enforces dependency direction, repository layout,
-and transport restrictions; it does not prove product behavior.
+transport restrictions, and daemon retry-policy ownership; it does not prove
+runtime delivery, database concurrency, workspace isolation, or SSE behavior.
 
 | Validation surface | Responsibility |
 | --- | --- |
-| `tests/architecture/` | structural dependency, layout, and transport checks |
+| `tests/architecture/` | structural dependency, layout, transport, and ownership checks |
+| integration tests | protocol journals, outbox/ACK/replay, persistence transactions, daemon workspaces |
+| E2E tests | browser reconnect/refetch and user-visible lifecycle behavior |
 
-## Transports
+## Transport boundary
 
-| Edge | Transport |
-| --- | --- |
-| Browser → Server | HTTP |
-| Server → Browser (live) | SSE |
-| Server ↔ Daemon | daemon-initiated WebSocket (TLS in deployment) |
+```text
+Browser ── HTTP + SSE ──▶ north-server
+                             │
+                             └── Axum WebSocket transport
+                                      │ JSON text frames
+                                      ▼
+                               north-protocol
+                                      ▲
+                                      │
+                          tokio-tungstenite transport
+                                      │
+                                  north-daemon
+```
+
+| Edge | Transport | Owner |
+| --- | --- | --- |
+| Browser → Server | HTTP | Axum/server routes |
+| Server → Browser (live) | SSE notification hints; canonical state comes from HTTP | north-server |
+| Server ↔ Daemon | WebSocket over TLS in deployment | Axum on server; tokio-tungstenite on daemon |
+| WebSocket payload | JSON text, one North frame per WebSocket text message | north-protocol schema |
+
+Axum and tokio-tungstenite provide WebSocket upgrade, framing, ping/pong,
+close, socket I/O, limits, and TLS integration. `north-protocol` defines only
+the application wire contract. North coordination owns IDs, ordering,
+at-least-once delivery, outbox/journals, ACKs, reconciliation, idempotency,
+and recovery; WebSocket ping/pong never replaces North heartbeat.
 
 UI stack: Next.js App Router, TypeScript, Tailwind CSS, shadcn/ui components.
 

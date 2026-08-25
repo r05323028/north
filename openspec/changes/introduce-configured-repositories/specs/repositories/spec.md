@@ -1,37 +1,45 @@
 ## Purpose
 
-Gives admins a simple catalog of source repositories agents may consult —
-metadata only, credentials never.
+Gives administrators a credential-free repository catalog with soft-disable history, while daemon inspections use isolated disposable workspaces and exact source revisions.
 
 ## ADDED Requirements
 
-### Requirement: Admin-managed repository catalog
+### Requirement: Admin-managed, soft-disabled repository catalog
 
-Admins and Owners SHALL create, edit, list, and delete repositories described
-by id, name, url, and description. Non-admin actors SHALL be refused
-server-side. Names SHALL be unique.
+Admins and Owners SHALL create, edit, list, and remove repositories described
+by id, name, URL, description, timestamps, and nullable `disabled_at`.
+Non-admin actors SHALL be refused server-side. Names SHALL be unique. Normal
+Remove SHALL set `disabled_at` instead of deleting a repository row referenced
+by assessment evidence. Active lists SHALL exclude disabled rows.
 
-#### Scenario: Manager cannot add a repository
+#### Scenario: Manager cannot add or remove a repository
 
-- **WHEN** a Requirement Manager POSTs a new repository
-- **THEN** the request fails on permissions and nothing persists
+- **WHEN** a Requirement Manager attempts repository CRUD
+- **THEN** the request fails on permissions and no catalog lifecycle change persists
+
+#### Scenario: Remove disables rather than deletes
+
+- **WHEN** an Admin removes repository X after an assessment recorded X at commit `abc123`
+- **THEN** X remains durably addressable with `disabled_at`, active inspection selection excludes X, and history still resolves X and `abc123`
 
 ### Requirement: Metadata only — no credentials
 
-The repository model and its storage SHALL contain no credential material
-(no tokens, secrets, keys, or password fields); URLs are stored verbatim.
+The repository model and its storage SHALL contain no credential material (no
+tokens, secrets, keys, passwords, or credential-helper contents); URLs are
+stored as metadata and Git credentials remain on daemon hosts.
 
 #### Scenario: Schema rejects credential shapes
 
-- **WHEN** the persistence layer is inspected
-- **THEN** no column or field exists capable of holding Git credentials
+- **WHEN** the persistence schema for configured repositories is inspected
+- **THEN** it contains identity, metadata, and lifecycle fields only, with no Git credential field
 
-### Requirement: History outlives catalog entries
+### Requirement: History outlives active catalog state
 
-Inspection records referencing a repository (id + commit SHA) SHALL remain
-interpretable after the repository is deleted from the catalog.
+Inspection evidence SHALL retain repository id and exact full commit SHA. The
+retained disabled repository metadata SHALL keep that evidence human-readable;
+hard deletion of a referenced row is not the normal 0.1.0 removal path.
 
-#### Scenario: Delete does not orphan history
+#### Scenario: Historical assessment stays interpretable
 
-- **WHEN** an admin deletes a configured repository
-- **THEN** past assessments still name it with its inspected SHA
+- **WHEN** a repository is disabled after an assessment is recorded
+- **THEN** the assessment still names the repository and inspected SHA without requiring an active catalog entry

@@ -18,6 +18,9 @@ illegal states.
 - Revision increments ONLY when canonical content actually changes (no-op
   edits are non-mutations); terminal states refuse edits; real edits while
   Ready demote to Discussing (seeded rule surfaced end-to-end).
+- Every mutation of an existing Requirement carries `expected_revision`; the
+  server/persistence boundary uses an atomic compare-and-swap or row lock and
+  returns HTTP 409 with no side effects on stale callers.
 - Minimal transition audit trail (actor, transition, timestamp).
 - List/get APIs with search/filter/sort primitives.
 

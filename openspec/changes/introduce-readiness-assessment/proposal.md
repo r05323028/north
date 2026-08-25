@@ -14,6 +14,10 @@ dedicated assessment concept, Ready decays into vibes.
 - Agent verdicts arrive as `requirement.assessed` events; the server validates
   all hard gates through the domain (`mark_ready`) before any transition —
   Discussing→Ready becomes reachable for the first time.
+- `requirement.assessed` ingestion is one transaction: dedupe event, lock/current
+  revision check, run domain gates, persist immutable evidence and any valid
+  transition, commit, then ACK; stale/invalid facts get durable rejection
+  handling without promotion.
 - Stale assessments are structurally impossible to promote: revision mismatch
   refuses; edits after Ready demote automatically (already enforced in domain,
   now exercised end-to-end).

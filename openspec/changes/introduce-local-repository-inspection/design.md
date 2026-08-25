@@ -1,18 +1,30 @@
 # Design
 
+## Context
+
+A repository-local cache is useful for fetch/reuse but cannot be a mutable
+runtime workspace when two sessions inspect the same repository. The cache and
+checkout boundary is fixed by `harden-distributed-system-architecture`.
+
 ## Decisions
 
-- Workspace root under daemon config dir; one directory per repository id;
-  clone if missing, `git fetch` + fast-forward read otherwise. Plain clones
-  only in 0.1.0 (worktrees deferred until write features).
-- All git invocation via host `git` binary with inherited environment
-  (SSH agent, credential helpers). No bundled auth logic.
-- Inspection result = {repository_id, commit_sha, notes}; SHA from `git rev-parse HEAD`.
-- Mutation discipline: deny-by-default read-class Git allowlist PLUS a
-  disposable-checkout policy — post-task dirty-tree detection treats any
-  direct file mutation as an invariant violation (discard + report). Honest
-  scope: process-level enforcement, not kernel sandboxing.
+- Cache root under daemon config dir with one source cache per repository id;
+  clone if missing and refresh through host `git` when clean. The runtime never
+  receives this cache path as its working directory.
+- Each session/task creates a unique disposable plain checkout from the cache
+  (local copy/clone is sufficient). No Git worktrees in 0.1.0.
+- All Git invocation uses host `git` with inherited SSH/config/credential-helper
+  environment. No bundled auth logic and no credential serialization to North.
+- Before/after task checks use repository status; any dirty result is an
+  invariant violation, is reported, and the disposable checkout is discarded.
+  This is process-level enforcement, not kernel/sandbox isolation.
+- Inspection result = `{repository_id, commit_sha, notes}`; SHA comes from
+  `git rev-parse HEAD`. The server rejects disabled/unknown repository ids
+  before dispatch.
 
-## Open Questions
+## Risks / Trade-offs
 
-None.
+- **Copying a large repository costs local disk/time** → reuse the cache as
+  source material; optimize only after measurement.
+- **A process can still mutate files before detection** → discard and report
+  dirty checkouts, and keep the non-sandbox limit explicit.

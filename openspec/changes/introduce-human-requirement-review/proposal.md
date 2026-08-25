@@ -12,8 +12,9 @@ and structurally incapable of approving a stale assessment.
   Inspected.
 - Actions Accept / Request Changes (with feedback) / Reject for reviewers
   only; Reopen on Rejected requirements.
-- Stale protection: review actions validate the requirement revision hasn't
-  moved since load; a moved revision forces re-read and refuses blind approval.
+- Stale protection: review actions require `expected_revision` and validate the
+  requirement/assessment revision atomically; a moved revision returns HTTP 409,
+  forces re-read, and refuses blind approval.
 - Decisions recorded with reviewer identity and timestamp (audit trail).
 
 ## Capabilities

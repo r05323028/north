@@ -94,12 +94,16 @@ const RULES: &[BoundaryRule] = &[
     BoundaryRule {
         crate_name: "north-protocol",
         forbidden: &[
+            "axum",
+            "tokio",
+            "tokio-tungstenite",
+            "tungstenite",
             "north-domain",
             "north-server",
             "north-daemon",
             "north-persistence",
         ],
-        reason: "wire types carry no requirement business behavior",
+        reason: "JSON wire types stay independent from WebSocket, runtime, and business hosts",
     },
     BoundaryRule {
         crate_name: "north-server",
@@ -115,7 +119,7 @@ const RULES: &[BoundaryRule] = &[
             "north-server",
             "north-domain",
         ],
-        reason: "daemon reports facts/events: no business rules, no storage, no server internals",
+        reason: "daemon reports facts/events: no business database or server internals; local transport journal is allowed",
     },
     BoundaryRule {
         crate_name: "north-persistence",
@@ -151,6 +155,24 @@ fn crate_dependency_boundaries_hold() {
         "dependency boundary violations:\n{}",
         violations.join("\n")
     );
+}
+
+/// The transport adapters are the only host-side owners of WebSocket dependencies;
+/// both hosts cross the application boundary through north-protocol.
+#[test]
+fn transport_dependency_direction_is_explicit() {
+    let members = member_dependencies(&workspace_metadata());
+    for (crate_name, dependency) in [
+        ("north-server", "north-protocol"),
+        ("north-daemon", "north-protocol"),
+    ] {
+        assert!(
+            members
+                .get(crate_name)
+                .is_some_and(|dependencies| dependencies.iter().any(|dep| dep == dependency)),
+            "{crate_name} must depend on {dependency} for North application frames"
+        );
+    }
 }
 
 #[test]
@@ -273,6 +295,129 @@ fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+fn collect_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, out);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn daemon_does_not_own_business_retry_policy() {
+    // Local reconnect/backoff and runtime reattachment belong in the daemon;
+    // server-owned execution state and business retry budgets do not.
+    let daemon_src = repo_root().join("crates/north-daemon/src");
+    if !daemon_src.exists() {
+        return;
+    }
+    let mut sources = Vec::new();
+    collect_rust_sources(&daemon_src, &mut sources);
+    const FORBIDDEN_MARKERS: &[&str] = &[
+        "struct RetryPolicy",
+        "enum RetryPolicy",
+        "struct ExecutionState",
+        "enum ExecutionState",
+        "const MAX_ATTEMPTS",
+        "const MAX_RETRY_ATTEMPTS",
+        "retry_budget",
+        "ExecutionState::Retrying",
+    ];
+    let mut violations = Vec::new();
+    for path in sources {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for marker in FORBIDDEN_MARKERS {
+            if text.contains(marker) {
+                violations.push(format!("{} contains `{marker}`", path.display()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "daemon must not own server execution retry policy; keep only local transport recovery:\n{}",
+        violations.join("\n")
+    );
+}
+
+fn collect_sql_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_sql_sources(&path, out);
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("sql") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn repository_schema_never_stores_credentials() {
+    // Skip until repository migrations exist. Once they do, inspect only table
+    // definitions whose name contains repository; daemon credential tables are
+    // intentionally outside this rule.
+    let migrations = repo_root().join("migrations");
+    if !migrations.exists() {
+        return;
+    }
+    let mut sources = Vec::new();
+    collect_sql_sources(&migrations, &mut sources);
+    const FORBIDDEN_FIELDS: &[&str] = &[
+        "token",
+        "access_token",
+        "secret",
+        "secret_hash",
+        "password",
+        "credential",
+        "private_key",
+        "ssh_key",
+    ];
+    let mut in_repository_table = false;
+    let mut violations = Vec::new();
+    for path in sources {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("create table") && lower.contains("repository") {
+                in_repository_table = true;
+            }
+            if in_repository_table {
+                let field = line
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(|c| matches!(c, '"' | '`' | ','));
+                if FORBIDDEN_FIELDS.contains(&field) {
+                    violations.push(format!(
+                        "{} contains repository credential field `{field}`",
+                        path.display()
+                    ));
+                }
+                if lower.contains(");") {
+                    in_repository_table = false;
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "repository configuration must never store Git credentials:\n{}",
+        violations.join("\n")
+    );
 }
 
 #[test]

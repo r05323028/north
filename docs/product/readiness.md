@@ -33,6 +33,15 @@ same-value) change neither revision nor status and do not invalidate assessments
 The agent must re-assess before Ready again — enforced in domain logic, never
 left to memory.
 
+## Concurrent API and event handling
+
+Every mutation of an existing Requirement carries `expected_revision`. A stale
+caller receives HTTP `409 Conflict` and no content, lifecycle, audit, or
+assessment side effect. A `requirement.assessed` event is deduplicated,
+revision-checked, domain-validated, and persisted with evidence and any valid
+transition in one transaction. The server sends `event.accepted` or
+`event.rejected` only after that transaction commits.
+
 ## Review packet = projection, not source
 
 The human review packet is derived from TWO sources at read time:

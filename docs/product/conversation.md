@@ -16,4 +16,12 @@ Consequences:
 - Raw tool/runtime logs are activity telemetry, not conversation content and not
   specification content (see docs/architecture/persistence.md for retention).
 
+## Live updates and edits
+
+Structured edits carry `expected_revision`; stale saves return HTTP `409
+Conflict` and do not append a message or mutate Requirement state. Browser SSE
+is a notification hint only. After disconnect/reconnect, the detail view
+refetches canonical Requirement and conversation state over HTTP; it never
+reconstructs specification truth by replaying the stream.
+
 Related: docs/product/readiness.md, docs/architecture/server-daemon-protocol.md.

@@ -1,47 +1,56 @@
 ## Purpose
 
-Separates infrastructure health from business truth: executions retry
-deterministically, fail only on exhausted budgets, and never drag requirement
-lifecycle states along.
+Separates infrastructure health from business truth: the server persists execution state and retry policy, daemon recovery stays local, and Requirement lifecycle remains untouched.
 
 ## ADDED Requirements
 
-### Requirement: Independent execution state machine
+### Requirement: Server owns execution state and retry policy
 
-Each active session SHALL expose Idle/Running/Retrying/Failed independent of
-requirement lifecycle. Changing execution state MUST NOT change requirement
-status, and vice versa.
+For every active session, the server SHALL authoritatively persist execution
+state (`Idle`, `Running`, `Retrying`, or `Failed`), attempt count, retry budget,
+and failure reason. The server SHALL decide whether to issue `session.resume`
+and when an execution becomes `Failed`. The attempt count SHALL survive server
+and daemon restarts and SHALL increment only for a server-directed execution
+start/resume attempt, not for an Axum/`tokio-tungstenite` WebSocket reconnect,
+frame replay, North heartbeat, or local runtime transport recovery.
 
-#### Scenario: Failed run leaves requirement untouched
+#### Scenario: Daemon restart does not reset attempts
 
-- **WHEN** an execution exhausts retries and becomes Failed
-- **THEN** the related requirement's status/revision are byte-identical to
-before the run started
+- **WHEN** a daemon restarts after two server-directed attempts
+- **THEN** the server still reports attempt count 2 and applies the remaining budget
 
-### Requirement: Bounded retry with backoff before Failed
+#### Scenario: Exhaustion is decided by server
 
-Transient failures (disconnects, runtime crashes) SHALL retry up to a
-configured bound with exponential backoff; resumption SHOULD reuse
-session.resume where safe. Only exhaustion SHALL produce Failed, recorded
-with reason and attempt count.
+- **WHEN** recoverable failure facts exhaust the persisted server retry budget
+- **THEN** the server changes execution state to Failed and records the reason without changing Requirement lifecycle state
 
-#### Scenario: Single blip does not fail work
+### Requirement: Daemon owns only transport and local recovery mechanics
 
-- **WHEN** connectivity drops once and returns within the backoff window
-- **THEN** the session resumes Running and no Failed state ever appears
+The daemon MAY reconnect its `tokio-tungstenite` WebSocket with backoff, replay
+buffered events, reattach a local runtime transport when instructed, and report
+recoverability or
+failure facts. It MUST NOT own a separate business retry budget, decide
+permanent execution failure, or mutate Requirement lifecycle state. A daemon
+`session.failed` frame is a fact report, not an authoritative server state
+transition.
 
-#### Scenario: Exhaustion fails honestly
+#### Scenario: Socket backoff is not a business attempt
 
-- **WHEN** every retry attempt fails
-- **THEN** execution becomes Failed with the last error and attempt count
-visible
+- **WHEN** the daemon performs five WebSocket reconnects before one successful server-directed resume
+- **THEN** the server attempt count increases only for that resume attempt
 
-### Requirement: Configurable, documented policy
+#### Scenario: Failure fact leaves business state alone
 
-Retry bounds and delays SHALL be configuration (not hard-coded magic), with
-defaults documented so operators can tune them.
+- **WHEN** the daemon reports a non-recoverable runtime failure
+- **THEN** the server applies its own execution policy and the Requirement status, revision, and assessment remain unchanged
 
-#### Scenario: Operator tunes patience
+### Requirement: Retry policy is server configuration and durable state
 
-- **WHEN** max_attempts is lowered in config and a flaky run occurs
-- **THEN** behavior matches the new bound without code changes
+Retry bounds and delays SHALL be server configuration with documented defaults,
+and the current budget/attempt state SHALL survive process restarts. The daemon
+MUST NOT receive or independently exhaust a second business-level budget.
+
+#### Scenario: Operator tunes server patience
+
+- **WHEN** the server's configured max attempts is lowered before a flaky run
+- **THEN** server behavior follows the new bound while daemon transport backoff remains independent

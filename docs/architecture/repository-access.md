@@ -2,46 +2,50 @@
 
 ## Model
 
-- Server stores metadata only: `id`, `name`, `url`, `description`
-  (Admin/Owner manage these in Repository Settings).
+- Server stores metadata only: `id`, `name`, `url`, `description`, timestamps,
+  and nullable `disabled_at` (Admin/Owner manage these in Repository Settings).
+- Normal Remove means **soft-disable**: set `disabled_at`; keep the row and
+  identity available to historical assessments. Disabled repositories are
+  excluded from normal catalog and new-inspection selection.
 - The daemon clones/reads using the **host's normal Git environment**: system
-  `git`, SSH config/agent, credential helpers, authenticated `gh`, file
+  `git`, SSH config/agent, credential helpers, authenticated `gh`, and file
   permissions. If `git clone <url>` works in the daemon host shell, North works.
-- Inspections record the resolved commit SHA so assessments cite exact source.
+- Inspections record repository id and the full resolved commit SHA so
+  assessments cite exact source.
 
-## Read-only guarantee — stated honestly
+## Credentials stay local
 
-The invariant is:
+- No centralized credential manager; no SSH keys, PATs, tokens, or passwords
+  sent to or stored by the server.
+- Daemon uses host Git/auth environment. Repository configuration schemas must
+  contain metadata and lifecycle fields only.
 
-> Requirement clarification must never intentionally persist mutations to
-> configured source repositories.
+## Workspace model
 
-A Git **command allowlist alone does NOT provide this guarantee** — a
-coding-capable runtime can modify working-tree files directly without invoking
-Git. North 0.1.0 therefore states its actual enforcement level and uses the
-smallest credible mechanism:
+```text
+daemon repository cache (per repository, never runtime working tree)
+        ├── disposable checkout: session A / task A
+        └── disposable checkout: session B / task B
+```
 
-- Inspection tasks run against a **disposable checkout** managed by the daemon;
-- the daemon treats any **dirty working tree** detected after a clarification
-  task as an invariant violation: the workspace is discarded and the incident
-  reported;
-- mutation detection is process-level, NOT kernel/sandbox-enforced. North does
-  not claim OS-level read-only isolation in 0.1.0.
+The cache is reusable source material. Each clarification execution receives a
+unique mutable checkout scoped by session/task and repository id. A plain local
+copy/clone-from-cache is sufficient; North 0.1.0 does not require Git
+worktrees. Concurrent sessions inspecting one repository never share a mutable
+directory, and runtime changes cannot contaminate the cache or another session.
 
-If stronger isolation becomes necessary (read-only mounts, sandboxed runtimes),
-it can replace the disposable-checkout mechanism without changing product
-semantics.
+After every task, the daemon checks the checkout for unexpected dirty changes.
+A dirty result is an invariant violation: report it and discard the checkout
+before reuse. Clean checkouts are disposable too. This is process-level
+protection, NOT kernel or sandbox isolation; North does not claim OS-level
+read-only enforcement in 0.1.0.
 
-## Never (unchanged)
+## Source and history
 
-- No centralized credential manager; no SSH keys/PATs sent to the server.
-- Agent does not own repository credentials; server receives no Git credentials;
-  daemon uses the host's existing git/auth environment.
+Inspection must resolve the checked-out commit and report the full SHA in its
+assessment evidence. Unknown or disabled repositories fail before a new
+inspection starts. Historical rows remain readable after a repository is
+removed from the active catalog because normal removal does not delete them.
 
-## Workspaces
-
-The daemon owns local workspace management. Prefer the simplest safe approach;
-do not introduce git worktrees until coding/modification features require them.
-The design leaves room to adopt worktree isolation later without protocol breaks.
-
-Out of scope for 0.1.0: push, PR creation, branch selection UI, arbitrary sync.
+Out of scope for 0.1.0: push, PR creation, branch-selection UI, arbitrary sync,
+and intentional source-repository mutation.

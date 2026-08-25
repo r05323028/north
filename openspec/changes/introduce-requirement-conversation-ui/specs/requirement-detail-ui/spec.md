@@ -48,3 +48,15 @@ detail surface; Activity shows coarse entries only.
 - **WHEN** activity payloads contain internal diagnostics
 - **THEN** they render as generic activity summaries or are dropped, never
 verbatim
+
+### Requirement: Detail reconnect refetches canonical state
+
+The detail view SHALL treat SSE as notification only. After a disconnect,
+reload, or reconnect it SHALL refetch Requirement, conversation, assessment, and
+execution state from HTTP APIs. Missed or duplicate hints SHALL not duplicate
+messages, transitions, or edits; the frontend SHALL never use WebSocket.
+
+#### Scenario: Stream loss repairs the detail view
+
+- **WHEN** the detail view misses agent activity and a status hint during an SSE disconnect
+- **THEN** reconnect/refetch shows current canonical state without replaying an SSE event history

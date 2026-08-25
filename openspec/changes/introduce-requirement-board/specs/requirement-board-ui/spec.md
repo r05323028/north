@@ -49,3 +49,20 @@ enforced).
 - **WHEN** another user's action changes a visible requirement's status
 - **THEN** open board views reflect the change via their SSE subscription
 without reload
+
+### Requirement: SSE reconnect refetches canonical state
+
+Board and list SSE payloads SHALL be lightweight notifications, not a durable
+state log. After disconnect, reload, or reconnect the UI SHALL refetch the
+canonical server API state. Missed or duplicate notifications SHALL be harmless;
+frontend code SHALL never open a WebSocket.
+
+#### Scenario: Missed update is repaired
+
+- **WHEN** the browser misses an SSE status hint while offline
+- **THEN** reconnect/refetch returns the current server state without replaying the entire stream
+
+#### Scenario: Duplicate hint does not duplicate state
+
+- **WHEN** the same SSE hint arrives twice
+- **THEN** the UI performs at most a harmless refetch and never duplicates a Requirement transition or message

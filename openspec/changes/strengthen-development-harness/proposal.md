@@ -17,7 +17,9 @@ change keeps every later change cheap to verify.
   as a projection of Requirement + revision-matched assessment.
 - Protocol docs/types: three disjoint frame groups (control / commands /
   events); explicit server→daemon acknowledgement; resume reconciliation via
-  control frames; session.resume stays command-only.
+  control frames; session.resume stays command-only. North 0.1 uses JSON text
+  over Axum WebSocket on the server and tokio-tungstenite on the daemon; those
+  libraries remain transport-only.
 - Repository access: honest read-only statement (disposable checkout +
   dirty-tree violation detection; process-level, not sandbox-enforced).
 - Architecture tests resolve the EFFECTIVE cargo dependency graph

@@ -68,3 +68,19 @@ revision-matched assessment alone
 - **WHEN** the requirement revision no longer matches the assessment backing
 the packet request
 - **THEN** projection fails with staleness and no packet is served
+
+### Requirement: Assessment ingestion acknowledges only a committed result
+
+For `requirement.assessed`, the server SHALL deduplicate the event, load/lock
+the current Requirement, validate the event revision, run domain readiness
+gates, persist immutable evidence with its accepted/rejected result, apply any
+valid transition, persist the resulting row, and commit as one transaction.
+Only after commit SHALL it send `event.accepted` for a valid effect or
+`event.rejected` for a durable rejection. A stale/invalid event SHALL not
+change Requirement state; a duplicate of a committed event SHALL not repeat
+its effect.
+
+#### Scenario: Event ACK follows durable assessment handling
+
+- **WHEN** the server receives a current-revision assessment or a stale assessment
+- **THEN** it commits the corresponding effect or rejection/dedupe record before sending the matching event ACK

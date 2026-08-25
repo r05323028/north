@@ -3,28 +3,42 @@
 ## Why
 
 Agent runtimes live on developer machines behind NAT. A daemon-initiated
-connection with Multica-like CLI login lets any machine join without inbound
-ports or a pairing bureaucracy.
+connection with browser-assisted CLI login lets a user-owned machine join
+without inbound ports or a pairing bureaucracy, while sessions still need an
+explicit durable owner when multiple daemons exist.
 
 ## What Changes
 
 - `north setup --server-url …`: browser completes normal North login, then the
-  server issues a dedicated CLI/daemon credential stored locally (never a
-  reused verification code).
-- Daemon connects outbound (persistent WebSocket over TLS), authenticates
-  with the local credential, registers identity + capabilities.
-- Heartbeat/liveness tracking (last_seen_at); revocation support.
-- Settings > Daemon Status shows connected/offline daemons without internals.
+  server issues a dedicated user-owned CLI/daemon credential stored locally
+  (never a reused verification code).
+- Daemon connects outbound using one `tokio-tungstenite` connection
+  supervisor (persistent WebSocket over TLS), authenticates with the local
+  credential, registers one durable daemon identity + capabilities, and reports
+  heartbeat/liveness. The server endpoint is an Axum WebSocket adapter.
+- The supervisor owns hello, reader/writer tasks, ping/pong, bounded outbound
+  buffering, disconnect, and transport backoff/reconnect; session/runtime code
+  does not own a second reconnect loop.
+- The server selects an eligible daemon before the first command and persists
+  `session.daemon_id`; reconnect resumes only sessions pinned to that identity.
+  North 0.1.0 performs no automatic live migration or multi-user sharing.
+- Credential owner may revoke its credential; Admin/Owner may revoke any.
+  Revocation closes live access, refuses future handshakes, and leaves pinned
+  sessions to server retry/failure handling.
+- Settings > Daemon Status shows connected/offline daemons without runtime
+  internals.
 
-Out of scope: manual pairing codes, multi-user daemon sharing, remote daemon
-administration beyond revoke.
+Out of scope: manual pairing codes, transferable credentials, multi-user
+sharing, live session migration, and remote daemon administration beyond
+revocation/status.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `daemon-runtime`: setup/login flow, credential model, connection lifecycle,
-  capability registration, liveness visibility.
+- `daemon-runtime`: setup/login flow, user-owned credential model, daemon
+  identity, connection lifecycle, capability registration, liveness, and
+  session-owner routing.
 
 ### Modified Capabilities
 
@@ -33,8 +47,9 @@ administration beyond revoke.
 ## Impact
 
 - New crate code in north-daemon (connection client); server gains WS endpoint
-  (axum upgrade).
-- Affected docs: docs/architecture/daemon.md, server-daemon-protocol.md
-  (transport section reference).
+  (axum upgrade) and durable daemon/session ownership fields.
+- Affected docs: docs/architecture/daemon.md,
+  docs/architecture/server-daemon-protocol.md, and the canonical
+  `harden-distributed-system-architecture` ownership contract.
 - Dependencies on earlier changes: introduce-email-auth-and-owner-bootstrap
   (login), introduce-role-and-permission-model (revocation is admin-gated).

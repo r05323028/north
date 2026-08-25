@@ -7,8 +7,12 @@ enforced by domain code that already exists (`mark_ready`, `apply_edit`).
 
 ## Decisions
 
-- Assessments stored immutably keyed by (requirement_id, revision, sequence);
-  "latest" = highest sequence for current revision.
+- `requirement.assessed` events carry stable id/sequence. Server handling is
+  one transaction: dedupe, lock the current Requirement, validate the event
+  revision, run domain gates, persist immutable evidence with accepted/rejected
+  result, apply a valid transition, persist the row, commit, then send
+  `event.accepted` or `event.rejected`. A duplicate committed event repeats
+  only its ACK; a rollback emits no ACK.
 - `requirement.assessed` events carry the full assessment payload; server
   re-validates every gate via domain before persisting/transitioning — daemon
   verdicts are claims, never commits.
