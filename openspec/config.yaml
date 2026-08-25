@@ -10,10 +10,11 @@ context: |
   relational database (versioned SQL in migrations/); host git on the
   daemon machine for repository access. Monorepo layout: apps/web,
   crates/north-{domain,server,daemon,protocol,persistence},
-  crates/north-archtests (boundary enforcement), docs/, migrations/,
-  openspec/.
+  tests/architecture (boundary enforcement), docs/, migrations/,
+  openspec/. Repository layout: `crates/` is reserved for production
+  components; structural validation belongs under `tests/`.
 
-  Hard boundaries (enforced by crates/north-archtests; never bypass):
+  Hard boundaries (enforced by tests/architecture; never bypass):
   - north-domain is pure business logic: no HTTP, DB, runtime,
     agent SDK, or other north crates.
   - north-protocol carries wire types only, no business behavior.

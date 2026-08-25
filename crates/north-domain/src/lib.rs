@@ -2,7 +2,7 @@
 //!
 //! This crate MUST stay free of infrastructure concerns (HTTP, database,
 //! agent SDKs, daemons). See docs/architecture/dependency-boundaries.md and
-//! the structural tests in crates/north-archtests.
+//! the structural tests in tests/architecture.
 //!
 //! Seed surface encodes 0.1.0 invariants before any host layer exists:
 //! - requirement lifecycle transitions ([`status`]),

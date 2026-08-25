@@ -39,15 +39,41 @@ reach the server. Shallow and fast by design.
 Classification rules: do not promote integration tests to E2E because Docker
 is involved; do not call a test smoke merely because it is quick.
 
-## Current coverage (truthful)
+## Structural validation
+
+Architecture tests are repository-level structural validation, not one of the
+functional behavior layers. They verify dependency direction, forbidden edges,
+layer boundaries, repository layout, and transport restrictions; they do not
+prove product behavior.
+
+```text
+Functional behavior validation
+├── Unit
+├── Integration
+├── E2E
+└── Smoke
+
+Structural validation
+└── Architecture
+```
+
+The architecture crate lives at `tests/architecture/` and remains a workspace
+member so `cargo test --workspace` executes it.
+
+## Functional coverage (truthful)
 
 | Layer | Status |
 | --- | --- |
-| Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants), plus archtests meta-tests |
-| Architecture checks | Implemented — `cargo test -p north-archtests` (effective cargo metadata graph, dumping grounds, frontend WebSocket ban) |
+| Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
 | Integration | Not implemented — arrives with introduce-email-auth-and-owner-bootstrap (real DB) |
 | E2E | Not implemented — arrives with UI surface (introduce-requirement-board establishes pattern) |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
+
+## Structural coverage
+
+| Surface | Status |
+| --- | --- |
+| Architecture | Implemented — `cargo test -p north-architecture-tests` (effective cargo metadata graph, dumping grounds, layout, frontend WebSocket ban) |
 
 Unsupported profiles exit explicitly (`validate.sh` exit 3) rather than
 pretending to pass.
@@ -55,7 +81,7 @@ pretending to pass.
 ## Profiles
 
 ```bash
-./scripts/validate.sh fast   # fmt, clippy, unit+archtests, web lint/typecheck, openspec
+./scripts/validate.sh fast   # fmt, clippy, unit + architecture, web lint/typecheck, openspec
 ./scripts/validate.sh unit   # unit + architecture
 ./scripts/validate.sh ci     # full workspace gate + web build + specs
 ./scripts/validate.sh integration | e2e | smoke   # explicit 'not yet' until real

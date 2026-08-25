@@ -84,8 +84,12 @@ docs/development/invariants.md. Headlines (see ledger for enforcement):
   Ready → Discussing.
 - Requirement state mutates only through domain operations.
 - Clarification never intentionally persists mutations to sources.
-- Do not weaken or bypass crates/north-archtests; extend it when adding
-  boundaries.
+- `crates/` is reserved for production Rust architectural components.
+- Repository-level validation belongs under `tests/` or the appropriate tooling
+  surface; do not add architecture, integration, E2E, smoke, benchmark-only, or
+  validation-only crates under `crates/`.
+- Do not weaken or bypass `tests/architecture`; extend it when adding boundaries.
+  Canonical layout rule: `docs/architecture/dependency-boundaries.md`.
 
 ## Task completion rules
 

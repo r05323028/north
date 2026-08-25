@@ -23,6 +23,8 @@ change keeps every later change cheap to verify.
 - Architecture tests resolve the EFFECTIVE cargo dependency graph
   (normal/dev/build/target kinds, renamed deps) via cargo metadata, with a
   parser meta-test.
+- Repository layout: `crates/` is production-only; structural validation lives
+  in `tests/architecture/` and remains a workspace member.
 - Harness: scripts/validate.sh profiles (fast/unit/integration/e2e/smoke/ci),
   prek hooks (hygiene, fmt, commit-msg Conventional Commit validation,
   pre-push full gate incl. act CI parity), CI pr-title job + stable `gate`
@@ -59,7 +61,7 @@ integration/E2E/smoke suites; kernel-enforced sandboxes.
 ## Impact
 
 - Affected code: crates/north-domain (encapsulation + ops + packet),
-  crates/north-archtests (metadata-based checks), crates/north-protocol (docs),
+  tests/architecture (metadata-based checks), crates/north-protocol (docs),
   scripts/*, .pre-commit-config.yaml, .github/workflows/ci.yml, AGENTS.md,
   docs/development/*.
 - New local tool expectations: prek, act (+Docker) — both optional-with-

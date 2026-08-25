@@ -105,3 +105,24 @@ meta-test.
 
 - **WHEN** sqlx appears under [dev-dependencies] of north-domain
 - **THEN** the boundary test fails
+
+### Requirement: Production crate tree stays production-only
+
+The repository SHALL reserve `crates/` for production Rust architectural
+components. Repository-level structural validation, integration harnesses, E2E,
+smoke, benchmark-only, and validation-only crates SHALL live outside `crates/`.
+The architecture test package SHALL live at `tests/architecture/`, remain a
+workspace member, and production crates SHALL NOT depend on it. Architecture
+validation SHALL reject obvious validation-only crate names under `crates/`.
+
+#### Scenario: Architecture tests remain outside production crates
+
+- **WHEN** the workspace is inspected after the move
+- **THEN** production packages are under `crates/`, the architecture package is
+  `tests/architecture/`, and `cargo test --workspace` still executes it
+
+#### Scenario: Accidental validation crate placement fails
+
+- **WHEN** a crate named with `-archtests`, `-architecture-tests`,
+  `-integration-tests`, `-e2e-tests`, or `-smoke-tests` is added under `crates/`
+- **THEN** the architecture test fails with the repository-layout violation

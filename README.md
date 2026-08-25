@@ -15,7 +15,8 @@ crates/
   north-daemon/      local execution host; reports facts/events
   north-protocol/    wire types shared by server and daemon
   north-persistence/ durable storage implementation
-  north-archtests/   structural architecture enforcement (runs in cargo test)
+tests/
+  architecture/    structural architecture enforcement (runs in cargo test)
 docs/                canonical product/architecture/development documentation
 migrations/          versioned SQL migrations
 openspec/            change management (proposal → specs → design → tasks)

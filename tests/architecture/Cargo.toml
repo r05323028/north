@@ -1,5 +1,5 @@
 [package]
-name = "north-archtests"
+name = "north-architecture-tests"
 version.workspace = true
 edition.workspace = true
 publish = false

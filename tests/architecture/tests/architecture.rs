@@ -15,7 +15,7 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
-        .expect("archtests crate sits at <root>/crates/north-archtests")
+        .expect("architecture tests crate sits at <root>/tests/architecture")
         .to_path_buf()
 }
 
@@ -66,6 +66,8 @@ fn member_dependencies(metadata: &Value) -> BTreeMap<String, Vec<String>> {
     }
     map
 }
+
+const ARCHITECTURE_TEST_CRATE: &str = "north-architecture-tests";
 
 struct BoundaryRule {
     crate_name: &'static str,
@@ -152,6 +154,22 @@ fn crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn production_crates_do_not_depend_on_architecture_tests() {
+    let members = member_dependencies(&workspace_metadata());
+    let mut violations = Vec::new();
+    for (name, deps) in members {
+        if name != ARCHITECTURE_TEST_CRATE && deps.iter().any(|dep| dep == ARCHITECTURE_TEST_CRATE)
+        {
+            violations.push(name);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "production crates must not depend on `{ARCHITECTURE_TEST_CRATE}`: {violations:?}"
+    );
+}
+
+#[test]
 fn dependency_parser_covers_all_dependency_kinds() {
     // Meta-test: the parser must count normal, dev, build, and target-specific
     // dependencies, and renamed deps under their real crate name.
@@ -182,6 +200,40 @@ fn dependency_parser_covers_all_dependency_kinds() {
             "parser missed dependency `{expected}`: {names:?}"
         );
     }
+}
+
+fn is_repository_validation_crate(name: &str) -> bool {
+    [
+        "-archtests",
+        "-architecture-tests",
+        "-integration-tests",
+        "-e2e-tests",
+        "-smoke-tests",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+}
+
+#[test]
+fn validation_crates_stay_outside_production_crates_tree() {
+    let crates_dir = repo_root().join("crates");
+    let mut violations = Vec::new();
+    let entries = fs::read_dir(&crates_dir).expect("read crates/");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if is_repository_validation_crate(name) {
+                violations.push(name.to_string());
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "repository validation crates must live outside crates/: {violations:?}"
+    );
 }
 
 #[test]

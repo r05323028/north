@@ -10,7 +10,7 @@
 
 - [x] 2.1 archtests parse cargo metadata --no-deps; all dependency kinds count; renamed deps attributed correctly
 - [x] 2.2 Parser meta-test covering dev/build/target/rename cases
-- Evidence: cargo test -p north-archtests = 4 passed including meta-test.
+- Evidence: cargo test -p north-architecture-tests = 6 passed including meta-test and layout/dependency guards.
 
 ## 3. Protocol & repo-access truth
 
@@ -23,7 +23,7 @@
 - [x] 4.1 scripts/validate.sh (fast/unit/integration/e2e/smoke/ci; unsupported exit 3)
 - [x] 4.2 scripts/pre-push-validation.sh (native gate + web build + act job replay, escape hatch)
 - [x] 4.3 scripts/check-commit-message.sh (--self-test covers accept/reject matrix)
-- [x] 4.4 .pre-commit-config.yaml: hygiene + rustfmt + openspec strict (pre-commit); commit-msg validator; pre-push entrypoint
+- [x] 4.4 .pre-commit-config.yaml: hygiene + rustfmt (pre-commit); commit-msg validator; pre-push entrypoint; strict OpenSpec validation stays in shared gates
 - [x] 4.5 ci.yml: pr-title job, split rust/web/openspec jobs, stable gate job
 - [x] 4.6 docs/development/{testing,ci,git-workflow,tooling,invariants}.md rewritten/new; AGENTS.md navigation map with conditional CodeGraph/Graphify + completion rules
 - Evidence: ./scripts/validate.sh fast OK; unit OK; integration/e2e/smoke exit 3 with explicit message; check-commit-message --self-test 8/8; ci.yml gate logic reviewed against needs.*.results.
@@ -35,6 +35,16 @@
 - [x] 5.3 openspec validate --all --strict green at task close (rerun before archive)
 - Evidence: 17/17 changes pass strict validation; act openspec job also passes.
 
-## 6. Owner actions (outside repo)
+## 6. Repository layout invariant
 
-- [ ] 6.1 Apply branch protection on main requiring the `gate` check (steps: docs/development/ci.md)
+- [x] 6.1 Move architecture validation crate to `tests/architecture/`; rename
+  package to `north-architecture-tests`; keep it in the Cargo workspace.
+- [x] 6.2 Add mechanical guard for validation-only crate names under `crates/`
+  and forbid production dependencies on the architecture-test package.
+- [x] 6.3 Update canonical architecture/testing docs, AGENTS.md, README.md,
+  OpenSpec context, and active change references.
+- Evidence: 6 architecture tests pass; layout and dependency negative fixtures fail as expected; `validate.sh fast/ci`, strict OpenSpec (17/17), prek, and act pre-push pass; stale-reference sweep is empty.
+
+## 7. Owner actions (outside repo)
+
+- [ ] 7.1 Apply branch protection on main requiring the `gate` check (steps: docs/development/ci.md)

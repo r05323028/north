@@ -23,7 +23,16 @@
 | north-daemon | local git workspaces, agent runtime, event reporting, reconnect |
 | north-protocol | command/event envelopes shared by server and daemon |
 | north-persistence | SQL storage behind repository traits |
-| north-archtests | structural tests enforcing dependency boundaries |
+
+## Repository validation
+
+Structural architecture validation lives outside production `crates/`, under
+`tests/architecture/`. It enforces dependency direction, repository layout,
+and transport restrictions; it does not prove product behavior.
+
+| Validation surface | Responsibility |
+| --- | --- |
+| `tests/architecture/` | structural dependency, layout, and transport checks |
 
 ## Transports
 

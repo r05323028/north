@@ -26,7 +26,10 @@ The harness must fix these and prevent recurrence without heavyweight tooling.
   documented as process-level enforcement, not sandbox guarantees.
 - **archtests on cargo metadata**: effective graph across normal/dev/build/
   target kinds; pure parser helper covered by a meta-test; serde_json allowed
-  only in north-archtests (enforcer crate).
+  only in north-architecture-tests (enforcer crate).
+- **Production crate tree boundary**: `crates/` contains runtime components
+  only; structural validation and future non-production harnesses live under
+  `tests/`, with architecture tests remaining in the workspace.
 - **Chronicle-inspired, simplified**: one validate.sh entrypoint, one pre-push
   script, prek consuming standard .pre-commit-config.yaml (prek has no
   prek.toml format), act against real ci.yml jobs, single stable gate job.

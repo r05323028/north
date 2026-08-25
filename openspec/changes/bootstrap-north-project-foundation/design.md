@@ -9,7 +9,7 @@ business logic in convenient-but-wrong places.
 ## Decisions
 
 - **Structural tests over frameworks**: dependency rules live in
-  `crates/north-archtests` as plain Rust tests that parse manifests and frontend
+  `tests/architecture` as plain Rust tests that parse manifests and frontend
   sources. No arch-lint DSL until rules outgrow grep-level checks (they are six
   crates today).
 - **Dependency-free stubs**: host crates (`north-server`, `north-daemon`,

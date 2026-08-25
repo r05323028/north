@@ -6,7 +6,7 @@ members = [
     "crates/north-persistence",
     "crates/north-server",
     "crates/north-daemon",
-    "crates/north-archtests",
+    "tests/architecture",
 ]
 
 [workspace.package]

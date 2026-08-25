@@ -10,7 +10,7 @@ and drifts across architectural lines.
 ## What Changes
 
 - Rust workspace with five boundary crates plus a structural architecture-test
-  crate (`crates/north-archtests`) enforcing forbidden dependency edges.
+  crate (`tests/architecture`) enforcing forbidden dependency edges.
 - Pure domain seed encoding 0.1.0 invariants: lifecycle transition table,
   operation-specific source states, revision-bound readiness (`mark_ready` +
   stale refusal), no-op-edit semantics, edit-demotion of Ready→Discussing,

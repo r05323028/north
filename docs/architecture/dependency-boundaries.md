@@ -1,7 +1,28 @@
 # Dependency boundaries
 
-Boundaries are enforced by `crates/north-archtests` (`cargo test`), which resolves Cargo metadata across normal/dev/build/target dependency kinds; do not bypass.
+Boundaries are enforced by `tests/architecture` (`cargo test`), which resolves Cargo metadata across normal/dev/build/target dependency kinds; do not bypass.
 When a boundary changes, update the rule table AND the test together.
+
+## Repository layout boundary
+
+`crates/` contains production Rust components that participate in North's
+runtime/application architecture. Repository-level structural validation,
+architecture tests, integration harnesses, E2E tests, smoke tests, and similar
+non-production verification code live outside the production crate tree.
+
+```text
+Production architecture:
+apps/
+crates/
+
+Repository validation/testing:
+tests/
+scripts/
+.github/
+```
+
+Validation crates must not live under `crates/`; keeping them outside preserves
+the production dependency graph and component ownership model.
 
 ## Allowed dependency direction
 
@@ -34,4 +55,4 @@ the surface exists.
 
 1. Justify it against the founding brief (invalid edges hard to introduce).
 2. Prefer Cargo crate edges over lint frameworks.
-3. Add the rule to `crates/north-archtests/tests/architecture.rs` and this table.
+3. Add the rule to `tests/architecture/tests/architecture.rs` and this table.

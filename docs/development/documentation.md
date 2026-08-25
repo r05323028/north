@@ -11,6 +11,7 @@ OpenSpec carries changes until they land.
 | Durable architecture truths (boundaries, transport, persistence) | `docs/architecture/*` |
 | Invariant ledger (what must always hold, how enforced) | `docs/development/invariants.md` |
 | Change proposals/deltas/tasks | `openspec/changes/<name>/` |
+| Repository layout and validation placement | `docs/architecture/dependency-boundaries.md` |
 | Accepted long-term behavior after archive | promoted into `docs/` |
 
 ## Rules

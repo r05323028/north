@@ -1,12 +1,12 @@
 ## 1. Workspace and crates
 
-- [x] 1.1 Root `Cargo.toml` with members north-{domain,protocol,persistence,server,daemon} + north-archtests, shared lints (`unsafe_code = forbid`, clippy all)
+- [x] 1.1 Root `Cargo.toml` with members north-{domain,protocol,persistence,server,daemon} + north-architecture-tests, shared lints (`unsafe_code = forbid`, clippy all)
 - [x] 1.2 Dependency-free stub crates for hosts/protocol/persistence with doc anchors to owning changes
 - [x] 1.3 Domain seed: status transition table, readiness model, requirement aggregate (`mark_ready`, `apply_edit` demotion), role matrix + unit tests
 
 ## 2. Architecture enforcement
 
-- [x] 2.1 `north-archtests` structural tests: forbidden dependency edges per crate manifest
+- [x] 2.1 `north-architecture-tests` structural tests: forbidden dependency edges per crate manifest
 - [x] 2.2 Dumping-ground crate ban; frontend WebSocket ban (HTTP + SSE only)
 - [ ] 2.3 Verify: intentionally add `sqlx` to north-domain, confirm test failure message, revert
 

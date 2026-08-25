@@ -17,8 +17,8 @@ unsupported() {
 rust_fast() {
   cargo fmt --all --check
   cargo clippy --workspace --all-targets -- -D warnings
-  cargo test --workspace --lib  # Unit layer (north-domain et al.)
-  cargo test -p north-archtests # Architecture checks
+  cargo test --workspace --lib           # Unit layer (north-domain et al.)
+  cargo test -p north-architecture-tests # Architecture checks
 }
 
 web_lint_tc() {
@@ -41,7 +41,7 @@ unit)
   # Unit layer: small units, minimal externals. Frontend unit tests do not
   # exist yet; they arrive with introduce-requirement-board.
   cargo test --workspace --lib
-  cargo test -p north-archtests
+  cargo test -p north-architecture-tests
   printf '(frontend unit layer: not yet implemented — see testing.md)\n'
   ;;
 integration)
