@@ -87,26 +87,31 @@ describe the target durable-delivery contract; those mechanisms remain pending.
 
 ## Ownership and reconnect
 
-The server selects and persists `session.daemon_id` before the first command.
-Every command/event is authenticated and routed against that identity. A
-reconnect may reconcile only sessions pinned to that daemon; North 0.1.0 does
-not perform automatic live migration. If the daemon is unavailable, the server
-applies its persisted execution retry policy while retaining ownership.
+The target session-routing flow pins each active session to one daemon identity.
+It will select an eligible daemon and persist `session.daemon_id` before the first
+command. Commands/events will be authenticated and routed against that identity.
+Reconnect will resume against the same identity; North 0.1.0 will not perform
+automatic live migration. If the daemon is unavailable, server-owned retry/failure
+policy will retain ownership and handle the pinned session.
 
 Daemon registrations are instance-scoped identities with credentials owned by
 the account recorded in `created_by`. The owner may revoke its own credential;
 Admin/Owner may revoke any. Revocation closes current access and refuses future
-connections; pinned sessions remain pinned and follow normal retry/failure
-handling.
+connections; target session-routing policy retains affected ownership and
+follows normal retry/failure handling.
 
 ## Failure posture
 
-WebSocket reconnect/backoff, event replay, and local runtime transport recovery
-are daemon mechanics. They do not consume the server's business attempt
-budget. The server persists `Idle`, `Running`, `Retrying`, or `Failed`, the
-attempt count, budget, and reason; only the server decides when to send
-`session.resume` and when exhaustion becomes `Failed`. Execution failure never
-mutates Requirement lifecycle state.
+WebSocket reconnect/backoff and local runtime transport recovery are current
+daemon mechanics. They do not consume the server's business attempt budget. The
+target durable-delivery model will handle event replay separately and will not
+consume that business retry budget.
+
+The target server execution model will persist `Idle`, `Running`, `Retrying`, or
+`Failed` together with attempt count, retry budget, and failure reason. Only the
+server will decide when to send `session.resume` and when retry exhaustion becomes
+`Failed`. The target execution model will keep execution failure separate from
+Requirement lifecycle state.
 
 Setup/login follows the browser-assisted CLI flow: see
 `docs/architecture/server-daemon-protocol.md` and change
