@@ -11,11 +11,15 @@ enforced by domain code that already exists (`mark_ready`, `apply_edit`).
   one transaction: dedupe, lock the current Requirement, validate the event
   revision, run domain gates, persist immutable evidence with accepted/rejected
   result, apply a valid transition, persist the row, commit, then send
-  `event.accepted` or `event.rejected`. A duplicate committed event repeats
+  `event_ack(status=accepted)` or `event_ack(status=rejected)`. A duplicate committed event repeats
   only its ACK; a rollback emits no ACK.
-- `requirement.assessed` events carry the full assessment payload; server
+- `requirement.assessed` events carry typed wire fields:
+  `ReadinessVerdictWire`, blockers, assumptions, and
+  `ReviewedRepositoryWire { repository_id, commit_sha }`. `north-server`
+  explicitly converts these DTOs to `north-domain::ReadinessAssessment` and
   re-validates every gate via domain before persisting/transitioning — daemon
-  verdicts are claims, never commits.
+  verdicts are claims, never commits. `north-protocol` never depends on the
+  domain crate.
 - Review packet is a read-time projection of the current Requirement plus the
   latest valid assessment for exactly that revision: Goal/Scope/Criteria/Open
   Questions come from Requirement; Blockers/assessment assumptions/repos from

@@ -10,9 +10,10 @@ run to one selected daemon.
 ## What Changes
 
 - Session orchestration: server selects and persists `session.daemon_id`, then
-  sends durable `session.start` with structured requirement context,
-  conversation context, and repository catalog; `message.send`, `cancel`, and
-  `resume` use the durable command contract with stable ids.
+  sends durable `session.start` with typed requirement fields, a bounded/relevant
+  conversation excerpt, and enabled repository metadata only; `message.send`,
+  `cancel`, and execution-only `resume` use the durable command contract with
+  stable ids. Credentials and domain types never cross the wire.
 - Daemon invokes the local agent runtime behind an internal boundary (one
   concrete implementation allowed; domain stays SDK-free).
 - Agent output flows back as `agent.message` / `agent.activity` events with

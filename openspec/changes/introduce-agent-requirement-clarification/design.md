@@ -14,9 +14,13 @@ semantics, and server retry authority are canonical in
   executes and reports facts.
 - Runtime trait inside daemon: `prepare(context) → run(session) → stream`
   events. One impl initially; no plugin registry.
-- Context assembly is server-side: structured requirement + recent conversation
-  - enabled repository catalog metadata only. The runtime receives a
-  session/task-specific disposable checkout when inspection is needed.
+- Context assembly is server-side and explicit: `session.start` carries a
+  transport `RequirementContext` with id, revision, title, description, summary,
+  acceptance criteria, assumptions, and open questions; a bounded/relevant
+  `ConversationContext` excerpt; and enabled `RepositoryContext` metadata
+  (repository id, name, URL, description). The runtime receives no credentials,
+  checkout paths, database handles, or domain types. The runtime receives a
+  session/task-specific disposable checkout only when inspection is needed.
 - The server selects an eligible daemon before `session.start`; all subsequent
   commands retain command id/sequence on retry and all events retain event
   id/sequence on replay. A different daemon cannot resume the session.

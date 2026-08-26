@@ -40,6 +40,13 @@ apps/web ──▶ server HTTP/SSE API only
 isolated checkouts. That is transport/local-host recovery, not server database
 access or durable Requirement state.
 
+## Pure-crate positive allowlists
+
+`north-domain` declares no dependencies. `north-protocol` declares only
+`serde` and `serde_json`, across normal, dev, build, and target-specific Cargo
+dependency kinds. Architecture tests use positive allowlists for these two
+crates; the broader forbidden-edge rules below remain defense in depth.
+
 ## Forbidden edges (mechanically enforced)
 
 | Crate | Must not depend on | Why |

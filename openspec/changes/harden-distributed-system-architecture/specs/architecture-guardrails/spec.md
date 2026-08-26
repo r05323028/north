@@ -6,8 +6,10 @@ Makes North's current architectural boundaries mechanically visible while leavin
 
 ### Requirement: Structural dependency and transport boundaries remain enforced
 
-Architecture tests SHALL reject forbidden dependency edges across all Cargo
-dependency kinds, reject browser WebSocket clients, and preserve the fixed
+Architecture tests SHALL enforce positive dependency allowlists for pure
+`north-domain` (no dependencies) and `north-protocol` (`serde` and
+`serde_json` only) across all Cargo dependency kinds. They SHALL also reject
+forbidden host edges, reject browser WebSocket clients, and preserve the fixed
 North topology: protocol has no business/host dependencies, daemon has no
 persistence/domain/server dependencies, server has no daemon dependency, and
 persistence has no host dependency.

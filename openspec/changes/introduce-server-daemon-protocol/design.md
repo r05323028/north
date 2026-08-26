@@ -24,12 +24,12 @@ implementation choices that must match it.
 - Commands, events, and control frames are disjoint exhaustive enums in
   `north-protocol`. `session.resume` is a server command only.
 - Server command rows are persisted before dispatch and retried with the same
-  id/sequence until daemon `command.accepted`. Daemon command inbox and event
+  id/sequence until daemon `command_ack(status=accepted)`. Daemon command inbox and event
   replay use a flushed local append-only journal. A duplicate command returns
   its known ACK and never invokes the runtime twice.
 - Server event handling deduplicates inside the same transaction as validation,
-  immutable evidence, and any business transition. `event.accepted` follows a
-  committed effect; `event.rejected` follows a committed durable rejection
+  immutable evidence, and any business transition. `event_ack(status=accepted)` follows a
+  committed effect; `event_ack(status=rejected)` follows a committed durable rejection
   record for a well-formed fact that cannot apply. No ACK follows a rollback.
 - Reconciliation carries contiguous `ack_through_seq` plus sparse sequences
   when processing is non-contiguous. Valid out-of-order frames can be buffered
@@ -40,6 +40,20 @@ implementation choices that must match it.
   mismatch is rejected before session traffic. No plugin/range negotiation.
 - The protocol crate remains serde-only; domain conversions, durable outbox,
   runtime idempotency, and persistence transactions live in hosts.
+
+## Context DTO and validation decisions
+
+- `SessionStart` carries `RequirementContext`, a bounded/relevant
+  `ConversationContext` excerpt, and enabled `RepositoryContext` metadata.
+  `north-server` assembles and converts snapshots; `north-protocol` owns only
+  transport DTO validation. Credentials, checkout paths, and domain types do
+  not cross the boundary.
+- `RequirementAssessed` carries `ReadinessVerdictWire`, blockers, assumptions,
+  and `ReviewedRepositoryWire { repository_id, commit_sha }`; it never embeds
+  a serialized domain assessment string. Server/domain conversion remains
+  explicit and server-authoritative.
+- `SessionResume` is an empty execution-recovery command in 0.1.0. Transport
+  replay cursors live only in `ReconcileState` watermarks and sparse ACKs.
 
 ## Risks / Trade-offs
 

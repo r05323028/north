@@ -39,8 +39,8 @@ Every mutation of an existing Requirement carries `expected_revision`. A stale
 caller receives HTTP `409 Conflict` and no content, lifecycle, audit, or
 assessment side effect. A `requirement.assessed` event is deduplicated,
 revision-checked, domain-validated, and persisted with evidence and any valid
-transition in one transaction. The server sends `event.accepted` or
-`event.rejected` only after that transaction commits.
+transition in one transaction. The server sends `event_ack(status=accepted)` or
+`event_ack(status=rejected)` only after that transaction commits.
 
 ## Review packet = projection, not source
 

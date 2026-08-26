@@ -74,6 +74,11 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Server daemon transport is Axum WebSocket + JSON text; daemon transport is tokio-tungstenite | Enforced | adapter modules and dependency metadata; full endpoint/runtime integration pending |
 | WebSocket ping/pong does not replace North heartbeat | Partially Enforced | adapter tests and protocol/docs; authenticated liveness persistence pending |
 | Transport errors stay distinct from North protocol errors | Enforced | `TransportError`/`ConnectionError` variants and adapter tests |
+| `session.start` carries server-assembled requirement, bounded conversation, and enabled repository metadata | Partially Enforced | `north-server::assemble_session_start` + unit test; persistence/session coordinator pending |
+| `requirement.assessed` carries typed verdict/evidence, not opaque assessment text | Enforced | `north-protocol` validation and round-trip tests; domain conversion pending |
+| Daemon application traffic waits for welcome and reconciliation | Partially Enforced | explicit supervisor phases and tests; live connection integration pending |
+| Fatal protocol/auth failures stop daemon reconnect | Partially Enforced | failure classification and supervisor tests; auth persistence pending |
+| `north-domain` and `north-protocol` obey positive dependency allowlists | Enforced | Cargo metadata allowlist tests |
 | Axum/tokio-tungstenite do not provide North reliability | Specified | server-daemon protocol contract; outbox/journal/reconciliation implementation pending |
 | Browser communication remains HTTP + SSE; browser opens no WebSocket | Enforced | `browser_never_opens_websockets` architecture test |
 

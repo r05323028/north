@@ -56,7 +56,7 @@ again after reconnect; it never allocates a new id for a retry.
 
 The daemon keeps a local append-only transport journal for command inbox and
 event replay records. A journal append is flushed before the daemon sends
-`command.accepted`. This is transport durability, not a business database.
+`command_ack(status=accepted)`. This is transport durability, not a business database.
 The command ledger records `accepted`, `dispatch_started`, and terminal outcome
 states. A unique command id makes duplicate frames return the existing
 acceptance/outcome. The daemon writes `dispatch_started` before invoking the
@@ -67,7 +67,7 @@ reconciled, the daemon reports an explicit unknown outcome and the server's
 policy handles it; side-effecting `message.send` is not automatically resent
 under a new id.
 
-`command.accepted` is the only command delivery ACK in 0.1.0. It means durable
+`command_ack(status=accepted)` is the only command delivery ACK in 0.1.0. It means durable
 inbox acceptance, not runtime completion. Runtime completion/failure remains
 represented by session/event facts and server execution state. Thus the server
 may remove the command payload from its active outbox after accepted ACK while
@@ -81,9 +81,9 @@ above it. No time-based expiry is allowed for that tombstone in 0.1.0.
 Daemon event handling mirrors this boundary in the other direction. The daemon
 journals an event and assigns `daemon_event_seq` before sending it. The server
 processes an event in the same persistence transaction as its dedupe marker and
-business effect. Valid effects receive an `event.accepted` ACK after commit.
+business effect. Valid effects receive an `event_ack(status=accepted)` ACK after commit.
 Well-formed but permanently rejected facts (for example a stale assessment)
-commit a durable rejection/dedupe record and receive `event.rejected`; this is
+commit a durable rejection/dedupe record and receive `event_ack(status=rejected)`; this is
 an acknowledgement of handled rejection, not successful business mutation.
 Crashes or transient failures before either commit produce no ACK, so replay is
 safe.
@@ -123,7 +123,7 @@ claim, compare event revision, run domain gates, write immutable evidence and
 its accepted/rejected validation result, apply a valid transition, persist the
 Requirement, commit, then emit the event ACK. A duplicate committed event
 repeats only its ACK. A stale or invalid event commits a rejection/dedupe
-record with no Requirement transition, then emits `event.rejected`; a crash
+record with no Requirement transition, then emits `event_ack(status=rejected)`; a crash
 before that commit emits no ACK.
 
 ### Session ownership and retry authority
@@ -160,6 +160,17 @@ copy/clone-from-cache is sufficient; Git worktrees are not needed. Every
 checkout gets dirty-tree validation and is deleted after the task. A dirty
 result is an invariant violation and is reported after disposal. This is
 process-level defense only; it does not claim kernel isolation.
+
+### Transport/application contract
+
+The transport slice keeps `north-protocol` as pure JSON DTOs. Server-owned
+`session.start` context includes requirement snapshot, bounded conversation
+excerpt, and enabled repository metadata; typed readiness evidence crosses back
+as explicit wire fields. `session.resume` is execution recovery only; replay
+cursors stay in reconciliation. Daemon handshake phases gate normal traffic,
+and fatal protocol/auth failures stop reconnect while socket interruption uses
+transport backoff. These mechanics do not change server-owned outbox, journal,
+ordering, pinning, expected-revision, retry, or SSE canonical-refetch contracts.
 
 ### SSE reconnect
 

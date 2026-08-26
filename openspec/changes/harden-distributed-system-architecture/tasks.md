@@ -5,7 +5,7 @@
 
 ## 2. Architecture and persistence documentation
 
-- [x] 2.1 Update `docs/architecture/server-daemon-protocol.md` with durable command outbox/inbox, `command.accepted`, directional sequence spaces, reconciliation, duplicate/gap behavior, and 0.1.x compatibility.
+- [x] 2.1 Update `docs/architecture/server-daemon-protocol.md` with durable command outbox/inbox, `command_ack(status=accepted)`, directional sequence spaces, reconciliation, duplicate/gap behavior, and 0.1.x compatibility.
 - [x] 2.2 Update `docs/architecture/{overview,daemon,persistence,repository-access}.md` with session pinning, server retry authority, disposable checkout isolation, `disabled_at`, credential ownership, and durable/ephemeral classes.
 - [x] 2.3 Update `docs/architecture/dependency-boundaries.md` and `docs/development/testing.md` with structural limits and the later integration/E2E proof plan.
 - [x] 2.4 Update `docs/development/invariants.md` so every new guarantee is honestly `Specified` or `Partially Enforced` until a running mechanism exists.
@@ -27,5 +27,5 @@
 ## 5. Validation and consistency
 
 - [x] 5.1 Run architecture tests and targeted domain tests after mechanical changes.
-- [x] 5.2 Search docs and OpenSpec artifacts for stale claims about hard deletion, shared workspaces, daemon retry ownership, event-only ACKs, or SSE replay.
+- [x] 5.2 Search docs and OpenSpec artifacts for stale claims about hard deletion, shared workspaces, daemon retry ownership, legacy ACK names, opaque assessment payloads, resume event cursors, or SSE replay.
 - [x] 5.3 Run `openspec validate --all --strict` and the repository standard validation profiles; record runtime suites that are not yet executable rather than claiming them passed.

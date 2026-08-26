@@ -76,6 +76,12 @@ the application wire contract. North coordination owns IDs, ordering,
 at-least-once delivery, outbox/journals, ACKs, reconciliation, idempotency,
 and recovery; WebSocket ping/pong never replaces North heartbeat.
 
+Before `session.start`, server coordination assembles the requirement snapshot,
+bounded conversation excerpt, and enabled repository metadata. The daemon sees
+only these North DTOs and has no database or credential access. Daemon connection
+phases are `Connecting → AwaitingWelcome → Authenticated → Reconciling → Active`;
+normal application traffic begins only at `Active`.
+
 UI stack: Next.js App Router, TypeScript, Tailwind CSS, shadcn/ui components.
 
 Details: dependency-boundaries.md, server-daemon-protocol.md, daemon.md,

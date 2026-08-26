@@ -1,7 +1,7 @@
 ## 1. Orchestration
 
 - [ ] 1.1 Server session store selects/persists `daemon_id` before first durable command and wires state transitions to start/cancel/resume/message.send
-- [ ] 1.2 Context assembly service (structured req + thread + enabled repo catalog) and session/task checkout allocation
+- [ ] 1.2 Context assembly service converts server snapshots into typed `session.start` DTOs (full requirement fields, bounded conversation excerpt, enabled repository metadata) and allocates session/task checkouts; credentials and domain types never cross the wire
 
 ## 2. Runtime
 

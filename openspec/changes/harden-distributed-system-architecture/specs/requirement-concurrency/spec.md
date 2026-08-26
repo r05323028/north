@@ -47,7 +47,7 @@ committed event SHALL produce an acknowledgement without repeating steps 4–7.
 #### Scenario: Stale assessment has no partial evidence
 
 - **WHEN** an assessment event targets revision 12 while the locked Requirement is revision 13
-- **THEN** the server commits rejected assessment/dedupe evidence without a Requirement transition, then sends `event.rejected` after commit
+- **THEN** the server commits rejected assessment/dedupe evidence without a Requirement transition, then sends `event_ack(status=rejected)` after commit
 
 ### Requirement: Durable ACKs never claim an uncommitted effect
 

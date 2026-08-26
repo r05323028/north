@@ -76,6 +76,13 @@ fn sequence(field: &str, value: u64) -> Result<(), FrameError> {
     Ok(())
 }
 
+fn non_empty_list(field: &str, values: &[String]) -> Result<(), FrameError> {
+    for value in values {
+        non_empty(field, value)?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     pub protocol_version: String,
@@ -157,8 +164,98 @@ impl Heartbeat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequirementContext {
+    pub id: String,
+    pub revision: u64,
+    pub title: String,
+    pub description: String,
+    pub summary: String,
+    pub acceptance_criteria: Vec<String>,
+    pub assumptions: Vec<String>,
+    pub open_questions: Vec<String>,
+}
+
+impl RequirementContext {
+    fn validate(&self) -> Result<(), FrameError> {
+        non_empty("requirement.id", &self.id)?;
+        sequence("requirement.revision", self.revision)?;
+        non_empty("requirement.title", &self.title)?;
+        non_empty("requirement.description", &self.description)?;
+        non_empty_list("requirement.acceptance_criteria", &self.acceptance_criteria)?;
+        non_empty_list("requirement.assumptions", &self.assumptions)?;
+        non_empty_list("requirement.open_questions", &self.open_questions)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationRoleWire {
+    Requester,
+    Agent,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationMessageContext {
+    pub message_id: String,
+    pub role: ConversationRoleWire,
+    pub content: String,
+}
+
+impl ConversationMessageContext {
+    fn validate(&self) -> Result<(), FrameError> {
+        non_empty("conversation.message_id", &self.message_id)?;
+        non_empty("conversation.content", &self.content)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationContext {
+    /// Server-assembled bounded/relevant excerpt, not durable full history.
+    pub excerpt: Vec<ConversationMessageContext>,
+}
+
+impl ConversationContext {
+    fn validate(&self) -> Result<(), FrameError> {
+        for message in &self.excerpt {
+            message.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryContext {
+    pub repository_id: String,
+    pub name: String,
+    pub url: String,
+    pub description: String,
+}
+
+impl RepositoryContext {
+    fn validate(&self) -> Result<(), FrameError> {
+        non_empty("repository.repository_id", &self.repository_id)?;
+        non_empty("repository.name", &self.name)?;
+        non_empty("repository.url", &self.url)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionStart {
-    pub requirement_id: String,
+    pub requirement: RequirementContext,
+    pub conversation: ConversationContext,
+    pub repositories: Vec<RepositoryContext>,
+}
+
+impl SessionStart {
+    pub fn validate(&self) -> Result<(), FrameError> {
+        self.requirement.validate()?;
+        self.conversation.validate()?;
+        for repository in &self.repositories {
+            repository.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,9 +264,7 @@ pub struct SessionCancel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionResume {
-    pub last_event_seq: u64,
-}
+pub struct SessionResume {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageSend {
@@ -208,7 +303,7 @@ impl CommandEnvelope {
         non_empty("sent_at", &self.sent_at)?;
         sequence("server_command_seq", self.server_command_seq)?;
         match &self.command {
-            Command::SessionStart(payload) => non_empty("requirement_id", &payload.requirement_id),
+            Command::SessionStart(payload) => payload.validate(),
             Command::SessionCancel(payload) => non_empty("reason", &payload.reason),
             Command::SessionResume(_) => Ok(()),
             Command::MessageSend(payload) => {
@@ -235,11 +330,47 @@ pub struct AgentActivity {
     pub activity: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessVerdictWire {
+    Ready,
+    NeedsClarification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewedRepositoryWire {
+    pub repository_id: String,
+    pub commit_sha: String,
+}
+
+impl ReviewedRepositoryWire {
+    fn validate(&self) -> Result<(), FrameError> {
+        non_empty("repositories_reviewed.repository_id", &self.repository_id)?;
+        non_empty("repositories_reviewed.commit_sha", &self.commit_sha)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequirementAssessed {
     pub requirement_id: String,
     pub requirement_revision: u64,
-    pub assessment: String,
+    pub verdict: ReadinessVerdictWire,
+    pub blockers: Vec<String>,
+    pub assumptions: Vec<String>,
+    pub repositories_reviewed: Vec<ReviewedRepositoryWire>,
+}
+
+impl RequirementAssessed {
+    pub fn validate(&self) -> Result<(), FrameError> {
+        non_empty("requirement_id", &self.requirement_id)?;
+        sequence("requirement_revision", self.requirement_revision)?;
+        non_empty_list("blockers", &self.blockers)?;
+        non_empty_list("assumptions", &self.assumptions)?;
+        for repository in &self.repositories_reviewed {
+            repository.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,11 +425,7 @@ impl EventEnvelope {
                 non_empty("content", &payload.content)
             }
             Event::AgentActivity(payload) => non_empty("activity", &payload.activity),
-            Event::RequirementAssessed(payload) => {
-                non_empty("requirement_id", &payload.requirement_id)?;
-                sequence("requirement_revision", payload.requirement_revision)?;
-                non_empty("assessment", &payload.assessment)
-            }
+            Event::RequirementAssessed(payload) => payload.validate(),
             Event::SessionCompleted(payload) => non_empty("summary", &payload.summary),
             Event::SessionFailed(payload) => non_empty("reason", &payload.reason),
         }
@@ -399,6 +526,8 @@ impl ProtocolErrorFrame {
     }
 }
 
+// Complete session.start context makes Command the intentionally large wire variant.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "frame", content = "payload")]
 pub enum ServerFrame {
@@ -510,6 +639,34 @@ mod tests {
         }
     }
 
+    fn session_start() -> SessionStart {
+        SessionStart {
+            requirement: RequirementContext {
+                id: "requirement-1".into(),
+                revision: 3,
+                title: "Login flow".into(),
+                description: "Clarify login behavior".into(),
+                summary: "Email-code login".into(),
+                acceptance_criteria: vec!["Code expires".into()],
+                assumptions: vec!["One account".into()],
+                open_questions: vec!["Which provider?".into()],
+            },
+            conversation: ConversationContext {
+                excerpt: vec![ConversationMessageContext {
+                    message_id: "message-1".into(),
+                    role: ConversationRoleWire::Requester,
+                    content: "Need login clarification".into(),
+                }],
+            },
+            repositories: vec![RepositoryContext {
+                repository_id: "north".into(),
+                name: "North".into(),
+                url: "https://example.test/north".into(),
+                description: "Requirement service".into(),
+            }],
+        }
+    }
+
     fn event() -> EventEnvelope {
         EventEnvelope {
             event_id: "event-1".into(),
@@ -519,6 +676,27 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             event: Event::AgentActivity(AgentActivity {
                 activity: "thinking".into(),
+            }),
+        }
+    }
+
+    fn assessment_event() -> EventEnvelope {
+        EventEnvelope {
+            event_id: "event-assessment".into(),
+            session_id: "session-1".into(),
+            daemon_event_seq: 2,
+            sent_at: "2026-01-01T00:00:00Z".into(),
+            schema_version: SCHEMA_VERSION,
+            event: Event::RequirementAssessed(RequirementAssessed {
+                requirement_id: "requirement-1".into(),
+                requirement_revision: 3,
+                verdict: ReadinessVerdictWire::NeedsClarification,
+                blockers: vec!["Scope unclear".into()],
+                assumptions: vec!["One repository".into()],
+                repositories_reviewed: vec![ReviewedRepositoryWire {
+                    repository_id: "north".into(),
+                    commit_sha: "abc123".into(),
+                }],
             }),
         }
     }
@@ -533,6 +711,14 @@ mod tests {
                 server_time: "2026-01-01T00:00:00Z".into(),
             }),
             ServerFrame::Command(command()),
+            ServerFrame::Command(CommandEnvelope {
+                command_id: "command-start".into(),
+                session_id: "session-1".into(),
+                server_command_seq: 2,
+                sent_at: "2026-01-01T00:00:00Z".into(),
+                schema_version: SCHEMA_VERSION,
+                command: Command::SessionStart(session_start()),
+            }),
             ServerFrame::EventAck(EventAck {
                 event_id: "event-1".into(),
                 session_id: "session-1".into(),
@@ -580,6 +766,80 @@ mod tests {
             let json = frame.to_json().expect("valid daemon frame");
             assert_eq!(DaemonFrame::from_json(&json).expect("round trip"), frame);
         }
+    }
+
+    #[test]
+    fn typed_assessment_round_trips_and_rejects_structural_gaps() {
+        let frame = DaemonFrame::Event(assessment_event());
+        let json = frame.to_json().expect("typed assessment is valid");
+        assert_eq!(DaemonFrame::from_json(&json).expect("round trip"), frame);
+
+        let mut invalid = assessment_event();
+        let Event::RequirementAssessed(payload) = &mut invalid.event else {
+            unreachable!();
+        };
+        payload.repositories_reviewed[0].commit_sha.clear();
+        assert!(DaemonFrame::Event(invalid).to_json().is_err());
+
+        let mut invalid_repository = assessment_event();
+        let Event::RequirementAssessed(payload) = &mut invalid_repository.event else {
+            unreachable!();
+        };
+        payload.repositories_reviewed[0].repository_id.clear();
+        assert!(DaemonFrame::Event(invalid_repository).to_json().is_err());
+
+        let mut invalid_blocker = assessment_event();
+        let Event::RequirementAssessed(payload) = &mut invalid_blocker.event else {
+            unreachable!();
+        };
+        payload.blockers = vec![String::new()];
+        assert!(DaemonFrame::Event(invalid_blocker).to_json().is_err());
+
+        let mut invalid_revision = assessment_event();
+        let Event::RequirementAssessed(payload) = &mut invalid_revision.event else {
+            unreachable!();
+        };
+        payload.requirement_revision = 0;
+        assert!(DaemonFrame::Event(invalid_revision).to_json().is_err());
+    }
+
+    #[test]
+    fn session_resume_is_execution_only_and_ack_names_are_canonical() {
+        let resume = CommandEnvelope {
+            command_id: "resume-1".into(),
+            session_id: "session-1".into(),
+            server_command_seq: 1,
+            sent_at: "2026-01-01T00:00:00Z".into(),
+            schema_version: SCHEMA_VERSION,
+            command: Command::SessionResume(SessionResume {}),
+        };
+        let resume_json = ServerFrame::Command(resume).to_json().expect("resume");
+        assert!(!resume_json.contains("event_seq"));
+
+        let event_ack = ServerFrame::EventAck(EventAck {
+            event_id: "event-1".into(),
+            session_id: "session-1".into(),
+            daemon_event_seq: 1,
+            schema_version: SCHEMA_VERSION,
+            status: EventAckStatus::Accepted,
+            reason: None,
+        })
+        .to_json()
+        .expect("event ACK");
+        assert!(event_ack.contains("event_ack"));
+        assert!(event_ack.contains("accepted"));
+        assert!(!event_ack.contains("event_ack(status=accepted)"));
+
+        let command_ack = DaemonFrame::CommandAck(CommandAck {
+            command_id: "command-1".into(),
+            session_id: "session-1".into(),
+            server_command_seq: 1,
+            schema_version: SCHEMA_VERSION,
+        })
+        .to_json()
+        .expect("command ACK");
+        assert!(command_ack.contains("command_ack"));
+        assert!(!command_ack.contains("command_ack(status=accepted)"));
     }
 
     #[test]

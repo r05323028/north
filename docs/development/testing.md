@@ -108,10 +108,13 @@ fork them casually. Frontend unit tests arrive with the board change.
 ## Server↔daemon transport checks
 
 Unit tests cover every `north-protocol` frame family, JSON text round trips,
+assembled `session.start` context, typed readiness evidence, canonical
+`command_ack`/`event_ack` serialization, execution-only `session.resume`,
 unsupported schema/unknown frame rejection, Axum text-frame conversion, binary
-frame rejection, transport ping/pong handling, bounded queue constants, and
-reconnect backoff. Architecture tests mechanically confirm that
-`north-protocol` has no Axum/Tokio/Tungstenite dependency, both hosts depend on
-`north-protocol`, the server does not depend on the daemon, and `apps/web` has no
-WebSocket client. Durable outbox, journal replay, authentication persistence,
-reconciliation, and browser SSE behavior remain integration/E2E obligations.
+frame rejection, transport ping/pong handling, handshake phases/timeouts,
+fatal protocol classification, bounded queues, and reconnect backoff.
+Architecture tests mechanically confirm pure-crate allowlists, both hosts'
+`north-protocol` dependency, server/daemon separation, and the browser
+WebSocket ban. Durable outbox, journal replay, authentication persistence,
+real socket reconnects, reconciliation persistence, and browser SSE behavior
+remain integration/E2E obligations.

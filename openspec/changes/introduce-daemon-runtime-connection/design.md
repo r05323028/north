@@ -18,6 +18,16 @@ cross-cutting ownership contract lives in
   ping/pong as transport control, forwards JSON text frames to coordination, and
   applies only local bounded reconnect backoff. North execution retry budgets
   remain server-owned.
+- The daemon supervisor uses explicit phases `Connecting → AwaitingWelcome →
+  Authenticated → Reconciling → Active`. It does not drain normal outbound
+  frames, replay local events, or send application heartbeat before `Active`;
+  WebSocket ping/pong remains available in every phase.
+- Handshake timeouts for hello, welcome/authentication, and reconciliation are
+  configuration, separate from execution timeout and server retry budget.
+- `ConnectionError` classifies socket/connect interruption and handshake timeout
+  as retryable, while malformed/unsupported protocol, authentication/revocation,
+  and fatal `protocol.error` as terminal. Terminal failures return to the host
+  and stop automatic reconnect.
 - `north setup --server-url <url>` uses a short-lived browser request token;
   approval returns one random secret shown once and stored by the CLI with
   owner-only permissions. Email verification codes are never reused.

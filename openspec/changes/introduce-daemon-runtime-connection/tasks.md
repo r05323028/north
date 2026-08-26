@@ -8,6 +8,7 @@
 
 - [ ] 2.1 Server WS endpoint: credential/protocol auth, register identity/capabilities, heartbeat updates `last_seen_at`
 - [x] 2.2 Add the single `tokio-tungstenite` connection supervisor with bounded transport backoff; no daemon-owned business retry budget. Runtime/session code has no separate reconnect loop.
+- [x] 2.5 Add explicit Connecting/AwaitingWelcome/Authenticated/Reconciling/Active gating, handshake timeouts, and terminal-vs-retryable connection failure classification.
 - [ ] 2.3 Session start selects an eligible daemon, persists `session.daemon_id` with the first command, and rejects frames from other identities
 - [ ] 2.4 Revocation drops live connections, refuses new ones, and leaves pinned sessions to server retry/failure without migration
 

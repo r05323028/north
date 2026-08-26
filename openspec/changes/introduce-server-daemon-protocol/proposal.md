@@ -20,8 +20,8 @@ business effects.
   bounded limits. North coordination, not either WebSocket library, owns
   durability, idempotency, ordering, replay, acknowledgement, and recovery.
 - Server commands use durable outbox rows and daemon commands use a durable
-  inbox/processed ledger. `command.accepted` means durable daemon receipt, not
-  runtime completion; `event.accepted`/`event.rejected` follow server commit.
+  inbox/processed ledger. `command_ack(status=accepted)` means durable daemon receipt, not
+  runtime completion; `event_ack(status=accepted)`/`event_ack(status=rejected)` follow server commit.
 - Every direction has an independent monotonic per-session sequence:
   `server_command_seq` and `daemon_event_seq`. Reconnect reconciliation detects
   gaps and replays deterministically; ids remain idempotency keys.
@@ -31,6 +31,16 @@ business effects.
 Repository preparation events stay out unless later changes prove genuine
 protocol value. Cross-cutting semantics are canonical in
 `harden-distributed-system-architecture`.
+
+## Context assembly and typed evidence
+
+`session.start` SHALL carry server-assembled `RequirementContext`, bounded
+`ConversationContext`, and enabled repository metadata DTOs. Credentials,
+checkout paths, persistence handles, and domain types stay out of the wire
+crate. `requirement.assessed` SHALL carry typed readiness verdict/evidence;
+`session.resume` SHALL contain execution recovery only and never a transport
+sequence cursor. The canonical ACK wire names are `command_ack` and
+`event_ack(status = accepted | rejected)`.
 
 ## Capabilities
 

@@ -128,6 +128,65 @@ const RULES: &[BoundaryRule] = &[
     },
 ];
 
+struct DependencyAllowlist {
+    crate_name: &'static str,
+    allowed: &'static [&'static str],
+    reason: &'static str,
+}
+
+const PURE_CRATE_ALLOWLISTS: &[DependencyAllowlist] = &[
+    DependencyAllowlist {
+        crate_name: "north-domain",
+        allowed: &[],
+        reason: "domain is pure business logic",
+    },
+    DependencyAllowlist {
+        crate_name: "north-protocol",
+        allowed: &["serde", "serde_json"],
+        reason: "protocol is pure JSON wire data",
+    },
+];
+
+fn disallowed_dependencies(dependencies: &[String], allowed: &[&str]) -> Vec<String> {
+    dependencies
+        .iter()
+        .filter(|dependency| !allowed.contains(&dependency.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn pure_crate_dependency_allowlists_hold() {
+    let members = member_dependencies(&workspace_metadata());
+    let mut violations = Vec::new();
+    for rule in PURE_CRATE_ALLOWLISTS {
+        let Some(dependencies) = members.get(rule.crate_name) else {
+            violations.push(format!("missing pure crate `{}`", rule.crate_name));
+            continue;
+        };
+        for dependency in disallowed_dependencies(dependencies, rule.allowed) {
+            violations.push(format!(
+                "{} depends on `{dependency}` — forbidden: {}",
+                rule.crate_name, rule.reason
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "pure crate dependency allowlist violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn dependency_allowlist_helper_rejects_unapproved_dependencies() {
+    let dependencies = vec!["serde".to_string(), "reqwest".to_string()];
+    assert_eq!(
+        disallowed_dependencies(&dependencies, &["serde"]),
+        vec!["reqwest".to_string()]
+    );
+}
+
 #[test]
 fn crate_dependency_boundaries_hold() {
     let metadata = workspace_metadata();

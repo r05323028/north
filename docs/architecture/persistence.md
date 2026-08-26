@@ -23,13 +23,13 @@ Invariants:
   execution policy state.
 - TTL/GC deletes only ephemeral records; retention window is configuration.
 - Server command outbox rows are inserted before dispatch and remain eligible
-  for resend until `command.accepted` is durably recorded.
+  for resend until `command_ack(status=accepted)` is durably recorded.
 - Every mutation of an existing Requirement uses an atomic `expected_revision`
   check; stale callers receive a conflict with no side effects.
 - `requirement.assessed` dedupe, revision validation, domain gates, immutable
   evidence, lifecycle transition, and resulting row update share one
   transaction. Event ACK follows commit; invalid/stale facts commit a durable
-  rejection record before `event.rejected`.
+  rejection record before `event_ack(status=rejected)`.
 
 ## First-owner bootstrap
 

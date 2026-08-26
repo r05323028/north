@@ -8,12 +8,12 @@ Defines reconnect-safe server-to-daemon command delivery and daemon-to-server ev
 
 Every server command SHALL carry a stable `command_id`, `session_id`, and
 monotonic `server_command_seq`. The server SHALL durably persist a command
-before dispatching it and SHALL retain it until a daemon `command.accepted`
+before dispatching it and SHALL retain it until a daemon `command_ack(status=accepted)`
 acknowledges durable receipt. Delivery SHALL be at least once. The daemon SHALL
 persist an inbox/processed-command record keyed by daemon identity and
-`command_id` before sending `command.accepted`.
+`command_id` before sending `command_ack(status=accepted)`.
 
-`command.accepted` means the command is durably recorded for processing; it
+`command_ack(status=accepted)` means the command is durably recorded for processing; it
 MUST NOT be interpreted as runtime completion. Runtime completion and failure
 remain facts/events handled by server execution policy. A duplicate command
 MUST return the same acceptance outcome and MUST NOT invoke the runtime again

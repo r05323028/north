@@ -83,6 +83,10 @@ docs/development/invariants.md. Headlines (see ledger for enforcement):
 - Server ↔ daemon uses Axum WebSocket + North JSON text protocol +
   tokio-tungstenite; transport libraries provide transport only, while North
   coordination owns reliability, idempotency, replay, ordering, and recovery.
+- Server assembles complete `session.start` context; daemon enters Active only
+  after hello/welcome/reconciliation. Retryable socket failures back off;
+  fatal protocol/auth failures stop reconnect. `command_ack` and `event_ack`
+  are canonical ACK names.
 - Ready is valid only for the exact revision assessed; edits demote
   Ready → Discussing.
 - Requirement state mutates only through domain operations.

@@ -9,15 +9,30 @@ The daemon uses `tokio-tungstenite` directly; no Socket.IO-style framework or
 custom WebSocket implementation. One connection supervisor owns the lifecycle:
 
 ```text
-connect → send hello/auth → receive welcome/reconcile → connected
-       → reader task + single writer task → disconnect → bounded backoff → reconnect
+Disconnected → Connecting → AwaitingWelcome → Authenticated
+                                      ↓
+                                Reconciling → Active
+                                      ↓
+                                  disconnect
+                                      ↓
+                         bounded transport backoff → reconnect
 ```
 
+The supervisor sends `hello`, waits for `welcome`, waits for reconciliation,
+and opens normal application traffic only in `Active`. Runtime events,
+application heartbeat, and local journal replay remain queued before `Active`;
+ping/pong remains enabled as transport control. Handshake stages have
+configurable hello, welcome, and reconciliation timeouts.
+
+Retryable socket/connect failures enter transport backoff. Protocol/schema
+mismatch, rejected credentials, revoked identity, and fatal protocol errors are
+terminal and surface to the daemon host; they never reconnect forever.
+
 Runtime/session coordination sends `north-protocol::DaemonFrame` values through
-a bounded channel. Only the supervisor's writer task converts them to JSON text
-WebSocket messages. The reader decodes server text messages and forwards
-`ServerFrame` values independently. Ping/pong is transport liveness; `heartbeat`
-is authenticated North application liveness.
+a bounded channel. Only the supervisor's single writer task converts them to
+JSON text WebSocket messages. The reader decodes server text messages and
+forwards `ServerFrame` values independently. Ping/pong is transport liveness;
+`heartbeat` is authenticated North application liveness.
 
 Transport defaults: 8 MiB message, 1 MiB frame, 256 outbound frames. Cargo
 enables tokio-tungstenite's `rustls-tls-native-roots` feature for WSS; no
@@ -32,7 +47,7 @@ Socket.IO or native-tls stack is introduced.
   ledger and unacknowledged event replay buffer. This is not a business
   database and never grants database access.
 - Acknowledge a server command only after its inbox record is flushed durably
-  (`command.accepted`). This means durable receipt, not runtime completion.
+  (`command_ack(status=accepted)`). This means durable receipt, not runtime completion.
 - Invoke the local runtime once per `command_id`; pass that id as its operation
   id and reattach after restart when possible. Never re-invoke a
   `dispatch_started` command automatically.
@@ -40,8 +55,8 @@ Socket.IO or native-tls stack is introduced.
   checkouts; report dirty-checkout violations and exact commit SHAs.
 - Convert runtime output into typed facts/events, replay them in
   `daemon_event_seq` order, and report recoverability/failure.
-- Reconnect the WebSocket with local backoff and resume transport buffers when
-  instructed by the server.
+- Reconnect the WebSocket with local backoff and replay eligible journal
+  buffers after reconciliation; execution recovery remains a server `session.resume` command.
 
 ## Non-responsibilities
 

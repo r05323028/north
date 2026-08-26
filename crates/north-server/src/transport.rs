@@ -17,7 +17,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use north_protocol::{DaemonFrame, FrameError, ServerFrame};
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, time::Duration};
 use tokio::sync::mpsc;
 
 pub const MAX_MESSAGE_SIZE: usize = 8 * 1024 * 1024;
@@ -26,12 +26,34 @@ pub const INBOUND_QUEUE_CAPACITY: usize = 256;
 pub const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 pub const CONNECTION_QUEUE_CAPACITY: usize = 64;
 
+#[derive(Debug, Clone, Copy)]
+pub struct HandshakeTimeouts {
+    /// Time allowed for the first application `hello` after upgrade.
+    pub hello: Duration,
+    /// Reserved for the server coordinator's auth result.
+    pub welcome: Duration,
+    /// Reserved for the server coordinator's reconciliation result.
+    pub reconcile: Duration,
+}
+
+impl Default for HandshakeTimeouts {
+    fn default() -> Self {
+        Self {
+            hello: Duration::from_secs(5),
+            welcome: Duration::from_secs(10),
+            reconcile: Duration::from_secs(10),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum TransportError {
     Socket(String),
     Protocol(FrameError),
     BinaryFrame,
     ExpectedHello,
+    HandshakeTimeout(&'static str),
+    PeerClosed,
     ChannelClosed,
     Task(String),
 }
@@ -43,6 +65,8 @@ impl fmt::Display for TransportError {
             Self::Protocol(error) => write!(f, "North protocol error: {error}"),
             Self::BinaryFrame => write!(f, "North 0.1 accepts JSON text frames only"),
             Self::ExpectedHello => write!(f, "first daemon frame must be hello"),
+            Self::HandshakeTimeout(stage) => write!(f, "handshake timed out waiting for {stage}"),
+            Self::PeerClosed => write!(f, "daemon WebSocket closed"),
             Self::ChannelClosed => write!(f, "daemon connection channel closed"),
             Self::Task(reason) => write!(f, "WebSocket task failed: {reason}"),
         }
@@ -69,11 +93,22 @@ pub struct DaemonConnection {
 #[derive(Clone)]
 pub struct DaemonTransportState {
     connections: mpsc::Sender<DaemonConnection>,
+    handshake_timeouts: HandshakeTimeouts,
 }
 
 impl DaemonTransportState {
     pub fn new(connections: mpsc::Sender<DaemonConnection>) -> Self {
-        Self { connections }
+        Self::with_handshake_timeouts(connections, HandshakeTimeouts::default())
+    }
+
+    pub fn with_handshake_timeouts(
+        connections: mpsc::Sender<DaemonConnection>,
+        handshake_timeouts: HandshakeTimeouts,
+    ) -> Self {
+        Self {
+            connections,
+            handshake_timeouts,
+        }
     }
 
     pub fn channel() -> (Self, mpsc::Receiver<DaemonConnection>) {
@@ -96,6 +131,7 @@ pub async fn daemon_websocket_handler(
     State(state): State<DaemonTransportState>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let handshake_timeouts = state.handshake_timeouts;
     ws.max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_FRAME_SIZE)
         .on_upgrade(move |socket| async move {
@@ -105,39 +141,59 @@ pub async fn daemon_websocket_handler(
             if state.connections.send(connection).await.is_err() {
                 return;
             }
-            let _ = serve_websocket(socket, inbound_sender, outbound_receiver).await;
+            let _ = serve_websocket(
+                socket,
+                inbound_sender,
+                outbound_receiver,
+                handshake_timeouts,
+            )
+            .await;
         })
 }
 
-/// Runs one upgraded connection. Axum owns WebSocket protocol behavior; this
-/// adapter only maps text messages to/from North protocol frames and forwards
-/// them through bounded channels.
+/// Runs one upgraded connection. The first application frame is bounded by the
+/// hello timeout; Axum owns WebSocket control behavior and this adapter maps
+/// text messages to/from North frames through bounded channels.
 pub async fn serve_websocket(
     socket: WebSocket,
     inbound: mpsc::Sender<DaemonFrame>,
     outbound: mpsc::Receiver<ServerFrame>,
+    handshake_timeouts: HandshakeTimeouts,
 ) -> Result<(), TransportError> {
     let (mut writer, mut reader) = socket.split();
 
     let mut reader_task = tokio::spawn(async move {
-        let mut first_application_frame = true;
+        let hello = tokio::time::timeout(handshake_timeouts.hello, async {
+            loop {
+                let message = reader.next().await.ok_or(TransportError::PeerClosed)?;
+                let message = message.map_err(|error| TransportError::Socket(error.to_string()))?;
+                if let Some(frame) = decode_daemon_message(message)? {
+                    return Ok::<DaemonFrame, TransportError>(frame);
+                }
+            }
+        })
+        .await
+        .map_err(|_| TransportError::HandshakeTimeout("hello"))??;
+
+        if !matches!(hello, DaemonFrame::Hello(_)) {
+            return Err(TransportError::ExpectedHello);
+        }
+        inbound
+            .send(hello)
+            .await
+            .map_err(|_| TransportError::ChannelClosed)?;
+
         while let Some(message) = reader.next().await {
             let message = message.map_err(|error| TransportError::Socket(error.to_string()))?;
             let Some(frame) = decode_daemon_message(message)? else {
                 continue;
             };
-            if first_application_frame {
-                if !matches!(frame, DaemonFrame::Hello(_)) {
-                    return Err(TransportError::ExpectedHello);
-                }
-                first_application_frame = false;
-            }
             inbound
                 .send(frame)
                 .await
                 .map_err(|_| TransportError::ChannelClosed)?;
         }
-        Ok::<(), TransportError>(())
+        Err(TransportError::PeerClosed)
     });
 
     let mut writer_task = tokio::spawn(async move {
@@ -218,5 +274,12 @@ mod tests {
             sent_at: "2026-01-01T00:00:00Z".into(),
             application_state: "connected".into(),
         };
+    }
+
+    #[test]
+    fn handshake_timeouts_have_explicit_stages() {
+        let timeouts = HandshakeTimeouts::default();
+        assert!(timeouts.hello < timeouts.welcome);
+        assert_eq!(timeouts.welcome, timeouts.reconcile);
     }
 }

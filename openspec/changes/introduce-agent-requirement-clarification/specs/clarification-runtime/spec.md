@@ -6,11 +6,14 @@ Runs the clarify-assess loop: agent sessions grounded in structured requirements
 
 ### Requirement: Sessions carry complete business context and one owner
 
-Starting a session SHALL provide the agent the current structured requirement,
-relevant conversation context, and the enabled configured repository catalog
-(metadata only). The server SHALL persist the selected `daemon_id` before
-`session.start`; the agent SHALL NOT receive database access or business write
-paths.
+Starting a session SHALL provide the agent a server-assembled wire
+`RequirementContext` containing id, revision, title, description, summary,
+acceptance criteria, assumptions, and open questions; a bounded/relevant
+`ConversationContext` excerpt; and enabled configured `RepositoryContext`
+metadata containing repository id, name, URL, and description only. The server
+SHALL persist the selected `daemon_id` before `session.start`; the agent SHALL
+NOT receive credentials, checkout paths, database access, domain types, or
+business write paths.
 
 #### Scenario: Agent sees the spec, not the schema
 

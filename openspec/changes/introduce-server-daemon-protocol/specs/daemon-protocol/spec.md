@@ -24,7 +24,7 @@ crate, which SHALL NOT depend on business crates.
 ### Requirement: Server commands cross a durable daemon idempotency boundary
 
 The server SHALL persist every command before dispatch and retry it with the
-same id and sequence until the daemon sends `command.accepted`. The daemon
+same id and sequence until the daemon sends `command_ack(status=accepted)`. The daemon
 SHALL persist a command inbox/processed record before that ACK. The ACK means
 durable receipt for processing, not runtime completion. A duplicate command
 SHALL repeat its known ACK without invoking the runtime twice or duplicating a
@@ -40,7 +40,7 @@ side effect; one `message.send` id SHALL submit one user message at most once.
 The daemon SHALL journal unacknowledged events before transmission and replay
 them in `daemon_event_seq` order. The server SHALL process each event id at
 most once inside the transaction that commits its business effect or a durable
-rejection record. `event.accepted` or `event.rejected` SHALL be sent only after
+rejection record. `event_ack(status=accepted)` or `event_ack(status=rejected)` SHALL be sent only after
 that commit; a rollback produces no success ACK. The daemon MAY compact
 processed command records only to a durable contiguous per-session watermark
 that remains for the session.
@@ -48,12 +48,12 @@ that remains for the session.
 #### Scenario: Assessment ACK follows commit
 
 - **WHEN** a valid `requirement.assessed` event is received
-- **THEN** evidence and any lifecycle transition commit before `event.accepted`, and a duplicate produces no second promotion
+- **THEN** evidence and any lifecycle transition commit before `event_ack(status=accepted)`, and a duplicate produces no second promotion
 
 #### Scenario: Stale fact is handled without promotion
 
 - **WHEN** an otherwise well-formed assessment targets an older Requirement revision
-- **THEN** the server commits a durable rejection/dedupe record, sends `event.rejected`, and leaves Requirement state unchanged
+- **THEN** the server commits a durable rejection/dedupe record, sends `event_ack(status=rejected)`, and leaves Requirement state unchanged
 
 ### Requirement: Directional sequences detect gaps and preserve order
 
@@ -83,6 +83,36 @@ payloads.
 
 - **WHEN** a compatible peer sends an unknown type or unsupported schema
 - **THEN** the receiver sends a protocol error, performs no effect, closes the connection, and retains unacknowledged durable work
+
+### Requirement: Session start carries server-assembled runtime context
+
+`session.start` SHALL carry a complete `RequirementContext`, a bounded/relevant
+`ConversationContext` excerpt, and enabled `RepositoryContext` metadata. The
+DTOs SHALL contain no credentials, tokens, checkout paths, persistence handles,
+or `north-domain` types. `session.resume` SHALL carry no daemon-event cursor;
+transport replay state SHALL remain in reconciliation watermarks.
+
+#### Scenario: Context is assembled before dispatch
+
+- **WHEN** the server dispatches `session.start`
+- **THEN** the daemon receives requirement fields, recent/relevant conversation messages, and enabled repository id/name/url/description metadata without database access
+
+#### Scenario: Resume does not duplicate transport replay
+
+- **WHEN** the server sends `session.resume`
+- **THEN** its payload contains only execution-recovery data and no `daemon_event_seq` or event-stream cursor
+
+### Requirement: Readiness assessment evidence is typed
+
+`requirement.assessed` SHALL carry a typed readiness verdict, blockers,
+assumptions, and reviewed repositories with non-empty repository ids and
+commit SHAs. The wire crate SHALL validate structural fields without depending
+on `north-domain`; server conversion SHALL apply domain policy separately.
+
+#### Scenario: Invalid typed evidence is rejected structurally
+
+- **WHEN** an assessment contains an empty blocker, repository id, commit SHA, or zero requirement revision
+- **THEN** protocol validation rejects it before business coordination
 
 ### Requirement: WebSocket transport remains outside the North wire contract
 

@@ -54,8 +54,8 @@ under the same name.
 
 ```text
 Connection/control frames
-  daemon → server : hello/registration, heartbeat, command.accepted
-  server → daemon : welcome, event.accepted, event.rejected,
+  daemon → server : hello/registration, heartbeat, command_ack(status=accepted)
+  server → daemon : welcome, event_ack(status=accepted), event_ack(status=rejected),
                     reconciliation/watermarks, protocol.error
 
 Server commands (server → daemon ONLY)
@@ -66,15 +66,32 @@ Daemon events (daemon → server ONLY)
   session.completed · session.failed
 ```
 
-`command.accepted` means the daemon's durable inbox has recorded the command;
-it is not runtime completion. `event.accepted` means the server committed the
-business effect. `event.rejected` means the server durably recorded a
+`command_ack(status=accepted)` means the daemon's durable inbox has recorded the command;
+it is not runtime completion. `event_ack(status=accepted)` means the server committed the
+business effect. `event_ack(status=rejected)` means the server durably recorded a
 well-formed fact as rejected (for example stale assessment) and will not retry
 its business effect. No success ACK is sent before its relevant commit.
 
-`session.resume` is a server COMMAND that tells the daemon to resume work; it
-is never a daemon→server event. Reconnect reconciliation uses control frames,
-not a duplicated event name.
+`session.resume` is a server COMMAND for execution recovery only; it carries
+no daemon-event cursor. Transport replay state belongs exclusively to
+`ReconcileState` ACK watermarks and sparse sequence fields. It is never a
+daemon→server event.
+
+## `session.start` runtime context
+
+The server assembles complete runtime context before dispatching `session.start`.
+The North wire DTO contains:
+
+- `requirement`: id, revision, title, description, summary,
+  acceptance criteria, assumptions, and open questions;
+- `conversation`: bounded/relevant message excerpt only, never full durable
+  history by default;
+- `repositories`: enabled repository metadata (`repository_id`, name, URL,
+  description) only.
+
+Repository credentials, tokens, SSH keys, local checkout paths, persistence
+handles, and `north-domain` types never cross this boundary. Server conversion
+builds these DTOs and filters disabled repositories.
 
 ## Envelope and delivery contract
 
@@ -88,7 +105,7 @@ Every command/event carries:
 The server persists a command outbox row before dispatch. Retries reuse the
 same `command_id` and sequence, and the outbox retains unaccepted commands.
 The daemon persists a local command inbox/processed ledger before sending
-`command.accepted`. Duplicate delivery repeats the known ACK and never invokes
+`command_ack(status=accepted)`. Duplicate delivery repeats the known ACK and never invokes
 the runtime twice. `message.send` is submitted to the agent at most once for
 one command id, including reconnect and daemon restart recovery.
 
@@ -161,6 +178,7 @@ handles the pinned session.
 
 Agent produces a readiness assessment → daemon emits `requirement.assessed` →
 server deduplicates and locks the current Requirement → validates event revision
-and domain gates → persists assessment evidence and any valid transition →
-commits → sends `event.accepted` (or commits a rejection and sends
-`event.rejected`). The daemon never writes Requirement state directly.
+and domain gates → persists typed verdict, blockers, assumptions, and reviewed
+repository SHAs plus any valid transition → commits → sends
+`event_ack(status=accepted)` (or commits a rejection and sends
+`event_ack(status=rejected)`). The daemon never writes Requirement state directly.

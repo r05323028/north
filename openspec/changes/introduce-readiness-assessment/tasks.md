@@ -4,7 +4,7 @@
 
 ## 2. Ingest + validate
 
-- [ ] 2.1 Handler accepting assessment payloads (from protocol events later; direct service call now): dedupe event, lock/current revision, run domain mark_ready gates, persist evidence/transition atomically, and ACK only after commit
+- [ ] 2.1 Handler accepting typed `requirement.assessed` payloads (from protocol events later; direct service call now): convert wire evidence to domain assessment, dedupe event, lock/current revision, run domain mark_ready gates, persist evidence/transition atomically, and send `event_ack(status=...)` only after commit
 - [ ] 2.2 Refusals map to explicit errors/rejection ACKs (stale/blockers/no-criteria/verdict) without Requirement state change
 - [ ] 2.3 Integration: duplicate and stale `requirement.assessed` events produce one effect or durable rejection, ACK only after commit, and never partial evidence/state
 

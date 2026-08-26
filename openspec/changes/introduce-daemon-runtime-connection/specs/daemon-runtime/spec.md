@@ -32,6 +32,34 @@ capabilities; the server SHALL track liveness via North heartbeats
 - **WHEN** a daemon starts on a host with no reachable inbound ports
 - **THEN** it connects, registers, and appears live in daemon status
 
+### Requirement: Connection handshake gates application traffic
+
+The daemon SHALL use one supervisor with explicit phases
+`Connecting`, `AwaitingWelcome`, `Authenticated`, `Reconciling`, and `Active`.
+It SHALL send `hello`, wait for `welcome`, wait for reconciliation state, and
+only then transmit ordinary commands, events, replayed journal frames, or North
+heartbeat. WebSocket ping/pong SHALL remain available before `Active`.
+Handshake hello, welcome/authentication, and reconciliation stages SHALL have
+configurable timeouts distinct from execution retry policy.
+
+#### Scenario: Runtime traffic cannot race authentication
+
+- **WHEN** a daemon has sent hello but has not received welcome and reconciliation
+- **THEN** normal application frames remain queued and are not written to the WebSocket
+
+### Requirement: Terminal protocol failures stop reconnect
+
+Retryable socket/connect interruption and temporary peer absence MAY enter
+transport backoff. Unsupported protocol/schema, authentication or credential
+revocation failure, invalid daemon identity, fatal `protocol.error`, and
+non-recoverable reconciliation violations SHALL surface as terminal connection
+errors and SHALL NOT reconnect automatically.
+
+#### Scenario: Fatal protocol error does not loop
+
+- **WHEN** the server sends `protocol.error` with `fatal: true`
+- **THEN** the supervisor returns a terminal error to the daemon host without another reconnect attempt
+
 ### Requirement: Active sessions are pinned to their daemon
 
 Before the first command for an active session, the server SHALL select an
