@@ -21,7 +21,9 @@ The harness must fix these and prevent recurrence without heavyweight tooling.
   matched assessment; never stored as truth; stale pairs unrepresentable.
 - **Protocol clarity via frame groups**: control frames vs commands vs events;
   server→daemon ACK closes the replay-buffer trimming gap; `session.resume`
-  stays command-only.
+  stays command-only. Axum WebSocket and tokio-tungstenite are transport
+  adapters; JSON North frames and reliability semantics stay host/protocol
+  owned.
 - **Read-only honesty**: disposable checkout + dirty-tree violation detection;
   documented as process-level enforcement, not sandbox guarantees.
 - **archtests on cargo metadata**: effective graph across normal/dev/build/

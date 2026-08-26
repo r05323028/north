@@ -5,6 +5,10 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+north-protocol = { path = "../north-protocol" }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 
 [lints]
 workspace = true

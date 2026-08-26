@@ -80,6 +80,14 @@ docs/development/invariants.md. Headlines (see ledger for enforcement):
 
 - Daemon reports facts/events; the server owns business state.
 - Browser ↔ daemon direct communication never happens (HTTP + SSE only).
+- Server ↔ daemon uses Axum WebSocket + North JSON text protocol +
+  tokio-tungstenite; transport libraries provide transport only, while North
+  coordination owns reliability, idempotency, replay, ordering, and recovery.
+- Server assembles complete `session.start` context; daemon enters Active only
+  after hello/welcome, one reconciliation snapshot, and coordination readiness.
+  Retryable socket failures back off; protocol/auth failures stop reconnect.
+  `command_ack` and `event_ack`
+  are canonical ACK names.
 - Ready is valid only for the exact revision assessed; edits demote
   Ready → Discussing.
 - Requirement state mutates only through domain operations.

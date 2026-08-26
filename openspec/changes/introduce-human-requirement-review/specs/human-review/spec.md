@@ -14,7 +14,7 @@ the reviewer to read the conversation.
 #### Scenario: Five-minute review is possible
 
 - **WHEN** a reviewer opens a Ready requirement's review view
-- **THEN** all six sections render from the latest valid assessment alone
+- **THEN** all six sections render from the current Requirement plus the latest revision-matched assessment
 
 ### Requirement: Reviewer-only decisions with preserved feedback
 
@@ -50,3 +50,16 @@ the requirement history.
 
 - **WHEN** anyone inspects an Accepted requirement later
 - **THEN** the accepting reviewer and timestamp are retrievable
+
+### Requirement: Review mutations require expected_revision
+
+Accept, Reject, Request Changes, and Reopen SHALL require `expected_revision`.
+The server SHALL atomically compare it with the current Requirement and the
+revision-matched assessment before applying the domain operation. A mismatch
+SHALL return HTTP 409 and SHALL write no decision, feedback, audit row, or
+lifecycle transition.
+
+#### Scenario: Review race loses safely
+
+- **WHEN** a reviewer submits Accept for revision 12 after an edit committed revision 13
+- **THEN** the server returns HTTP 409 and no approval or audit row is written

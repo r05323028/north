@@ -5,6 +5,11 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+north-domain = { path = "../north-domain" }
+axum = { version = "0.8.4", default-features = false, features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+north-protocol = { path = "../north-protocol" }
+tokio = { version = "1", features = ["rt", "sync"] }
 
 [lints]
 workspace = true

@@ -39,5 +39,6 @@ Illegal transitions must be unrepresentable through domain APIs
 ## Execution state is separate
 
 Runtime health (Idle / Running / Retrying / Failed) never mutates business state.
-A failed agent run leaves the requirement exactly where it was. See
-docs/architecture/daemon.md for retry/failure policy.
+A failed agent run leaves the requirement exactly where it was. The server
+persists execution attempts and owns retry/resume/Failed decisions; the daemon
+only reconnects, replays, and reports facts. See docs/architecture/daemon.md.

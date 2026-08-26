@@ -21,7 +21,7 @@ appropriate.
 Real interaction across meaningful component boundaries, preferring real
 infrastructure over mocks that re-implement behavior. Examples: north-server +
 north-persistence against a real test DB; HTTP endpoint → persistence;
-protocol serialization round-trips; daemon workspace + host git.
+protocol serialization/replay; daemon journal + host git + disposable checkout.
 
 ### E2E
 
@@ -43,8 +43,8 @@ is involved; do not call a test smoke merely because it is quick.
 
 Architecture tests are repository-level structural validation, not one of the
 functional behavior layers. They verify dependency direction, forbidden edges,
-layer boundaries, repository layout, and transport restrictions; they do not
-prove product behavior.
+layer boundaries, repository layout, transport restrictions, and ownership
+markers; they do not prove product behavior.
 
 ```text
 Functional behavior validation
@@ -65,18 +65,27 @@ member so `cargo test --workspace` executes it.
 | Layer | Status |
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
-| Integration | Not implemented — arrives with introduce-email-auth-and-owner-bootstrap (real DB) |
-| E2E | Not implemented — arrives with UI surface (introduce-requirement-board establishes pattern) |
+| Integration | Partially implemented — real Axum↔tokio-tungstenite transport coverage; durable coordination proofs remain pending |
+| E2E | Not implemented — arrives with UI surface changes |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
-## Structural coverage
+## Required future proofs
 
-| Surface | Status |
-| --- | --- |
-| Architecture | Implemented — `cargo test -p north-architecture-tests` (effective cargo metadata graph, dumping grounds, layout, frontend WebSocket ban) |
+| Contract | Primary layer | Owning change |
+| --- | --- | --- |
+| command outbox, daemon inbox, duplicate `message.send`, restart recovery | Integration | introduce-server-daemon-protocol + daemon connection |
+| sequence gaps, late/out-of-order replay, protocol errors | Integration | introduce-server-daemon-protocol |
+| expected_revision HTTP 409 and no side effects | Integration | requirement-domain/conversations/human-review |
+| atomic assessment evidence/transition/dedupe before event ACK | Integration | readiness-assessment |
+| daemon selection, pinned reconnect, credential revocation | Integration | daemon-runtime-connection |
+| server retry authority and restart-persistent attempts | Integration | runtime-retry-and-failure-state |
+| concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
+| soft-disable history and disabled-repo rejection | Integration | configured-repositories |
+| SSE disconnect/missed hint/duplicate hint refetch | E2E | requirement-board + requirement-conversation-ui |
 
-Unsupported profiles exit explicitly (`validate.sh` exit 3) rather than
-pretending to pass.
+Documentation, OpenSpec checkboxes, and architecture tests do not prove these
+runtime guarantees. Do not mark their implementation tasks complete until the
+runnable test exists and passes.
 
 ## Profiles
 
@@ -95,3 +104,20 @@ fork them casually. Frontend unit tests arrive with the board change.
 ## Specs
 
 `openspec validate --all --strict` runs inside `fast`, `ci`, and pre-push.
+
+## Server↔daemon transport checks
+
+Unit tests cover every `north-protocol` frame family, JSON text round trips,
+assembled `session.start` context, typed readiness evidence, canonical
+`command_ack`/`event_ack` serialization, execution-only `session.resume`,
+unsupported schema/unknown frame rejection, Axum text-frame conversion, binary
+frame rejection, transport ping/pong handling, handshake phases/timeouts,
+terminal protocol classification, bounded queues, admission deadlines, reconciliation activation, and reconnect backoff reset.
+Architecture tests mechanically confirm pure-crate allowlists, both hosts'
+`north-protocol` dependency, server/daemon separation, and the browser
+WebSocket ban. The real transport integration test is
+`tests/transport/tests/websocket.rs` and runs with
+`cargo test -p north-transport-integration --test websocket`. Durable outbox,
+journal replay, authentication persistence, socket reconnect sequencing, durable
+reconciliation application, and browser SSE behavior remain integration/E2E
+obligations.

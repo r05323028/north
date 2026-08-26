@@ -47,3 +47,15 @@ Archiving or pruning messages SHALL NOT alter any structured field.
 - **WHEN** all messages are removed in a test fixture
 - **THEN** the requirement's fields, status, and revision are unchanged and
 fully served by the structured endpoint
+
+### Requirement: Structured edits reject stale revisions
+
+The structured-edit endpoint SHALL require `expected_revision` and use the
+same atomic revision check as direct Requirement edits. A stale edit SHALL
+return HTTP 409 and SHALL NOT append a message, bump revision, demote status,
+or write an audit row.
+
+#### Scenario: Conversation edit loses a revision race
+
+- **WHEN** the detail view sends an edit for revision 12 after another actor committed revision 13
+- **THEN** the endpoint returns HTTP 409 and structured state plus conversation history remain unchanged

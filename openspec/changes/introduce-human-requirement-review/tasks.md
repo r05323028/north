@@ -5,8 +5,8 @@
 
 ## 2. Guards
 
-- [ ] 2.1 Revision-match check wired into all three decisions (server authoritative)
-- [ ] 2.2 E2E-ish test: edit-between-load-and-decide refused with staleness error
+- [ ] 2.1 Revision-match/`expected_revision` check wired into all four decisions (server authoritative; stale maps to HTTP 409)
+- [ ] 2.2 Integration/E2E test: edit-between-load-and-decide refused with 409 and no audit/transition; fresh read succeeds
 - [ ] 2.3 Audit rows asserted on every decision path
 
 ## 3. Validation

@@ -7,7 +7,8 @@
 
 - [ ] 2.1 Board columns/cards/create dialog (shadcn/ui Card, Dialog, Badge)
 - [ ] 2.2 List table w/ search+filter+sort params mapped to API
-- [ ] 2.3 SSE-driven refresh on both views
+- [ ] 2.3 SSE-driven notification refresh on both views; reconnect/refocus refetches canonical API state
+- [ ] 2.4 E2E: missed/duplicated SSE hints recover via HTTP refetch without replay-derived lifecycle truth
 
 ## 3. Validation
 

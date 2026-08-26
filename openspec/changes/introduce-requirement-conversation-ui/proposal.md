@@ -8,7 +8,9 @@ evolve, see honest execution health, without ever staring at raw model output.
 ## What Changes
 
 - Detail route with Conversation / Overview / Activity tabs.
-- Conversation pane: post messages, watch agent replies arrive via SSE.
+- Conversation pane: post messages, watch agent replies arrive via SSE; after
+  disconnect/reconnect it refetches canonical conversation/Requirement state,
+  not a durable stream replay.
 - Overview pane: structured fields (summary, criteria, assumptions, open
   questions), lifecycle + execution badges, inline editing where allowed
   (revision bump visible).

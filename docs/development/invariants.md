@@ -23,7 +23,9 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Review packet is projection(Requirement, revision-matched assessment); stale packet unreviewable | Enforced | `ReviewPacket::project` + unit tests |
 | Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Specified | pending introduce-role-and-permission-model (domain helpers seeded) |
 | First account atomically Owner; later accounts Requester | Specified | pending introduce-email-auth-and-owner-bootstrap |
-| Conversation is context, not source of truth | Specified | product doc; enforceable once persistence lands |
+| Conversation is context, not source of truth | Specified | pending introduce-requirement-conversations; persistence/API test required |
+| Every existing-Requirement mutation requires expected_revision | Specified | harden-distributed-system-architecture; server/persistence CAS + HTTP 409 test pending |
+| `requirement.assessed` evidence, transition, dedupe, and ACK share one commit boundary | Specified | harden-distributed-system-architecture; readiness integration test pending |
 
 ## Architecture & runtime
 
@@ -32,17 +34,28 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Forbidden crate dependency edges absent (normal/dev/build/target kinds) | Enforced | archtests via effective cargo metadata graph |
 | No dumping-ground crates | Enforced | archtests directory scan |
 | Browser never opens WebSockets | Enforced | `browser_never_opens_websockets` structural test |
+| Browser SSE is notification; reconnect refetches canonical API state | Specified | harden-distributed-system-architecture; board/detail E2E pending |
 | Daemon reports facts/events; server owns business transitions | Partially Enforced | crate edges now; server-side transition validation lands with requirement-domain change |
-| Stable ids on every command/event; at-least-once + idempotent processing; server ACKs processed event ids | Specified | pending introduce-server-daemon-protocol |
-| Daemon-initiated connection; heartbeat liveness | Specified | pending introduce-daemon-runtime-connection |
-| Execution failure ≠ requirement failure; Failed only after retry budget exhausted | Specified | pending introduce-runtime-retry-and-failure-state |
+| Server is sole owner of durable business state | Partially Enforced | dependency boundaries; server/persistence implementation and integration tests pending |
+| Every server command is durable before dispatch and idempotent at daemon boundary | Specified | harden-distributed-system-architecture; protocol integration test pending |
+| Command ACK means durable daemon acceptance, not runtime completion | Specified | harden-distributed-system-architecture; protocol integration test pending |
+| Command/event ids and independent directional sequences detect gaps and harmless duplicates | Specified | harden-distributed-system-architecture; protocol replay/gap tests pending |
+| Protocol 0.1.x rejects incompatible/unknown frames deterministically | Partially Enforced | codec validation, terminal supervisor handling, and real protocol-failure test; production coordinator error/replay handling pending |
+| Active session is durably pinned to one daemon; no automatic live migration | Specified | harden-distributed-system-architecture; session routing/reconnect tests pending |
+| Daemon credentials are user-owned; Admin/Owner revocation cuts access | Specified | introduce-daemon-runtime-connection + hardening; connection/revocation tests pending |
+| Server owns execution state, retry budget, attempt count, and terminal Failed | Specified | introduce-runtime-retry-and-failure-state + hardening; restart/retry tests pending |
+| Daemon has no business retry policy authority | Partially Enforced | architecture source guard; runtime implementation must keep policy in server |
+| Execution failure never mutates Requirement lifecycle state | Specified | runtime retry change; isolation integration test pending |
 
 ## Repository access
 
 | Invariant | Status | Enforcement |
 | --- | --- | --- |
-| Clarification never intentionally persists mutations to source repos | Partially Enforced | specified mechanism: disposable checkout + dirty-tree violation detection (introduce-local-repository-inspection); process-level, NOT sandbox-enforced |
-| Git credentials never centralized in the server | Specified | schemas will carry no credential fields; daemon uses host git env |
+| Clarification never intentionally persists mutations to source repos | Specified | hardening + local-inspection contract; disposable-workspace integration test pending; process-level, NOT sandbox-enforced |
+| Concurrent sessions never share a mutable inspection checkout | Specified | hardening/local-inspection tasks; concurrent workspace test pending |
+| Git credentials never centralized in the server | Specified | repository schema task must omit credential fields; architecture schema check when schema exists |
+| Configured repositories are soft-disabled, not normally hard-deleted | Specified | configured-repositories task; migration/API/history test pending |
+| Disabled repositories are excluded from new inspections | Specified | configured-repositories/local-inspection tasks; integration test pending |
 | Inspections cite exact commit SHAs | Specified | pending introduce-local-repository-inspection |
 
 ## Persistence & retention
@@ -50,4 +63,36 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Invariant | Status | Enforcement |
 | --- | --- | --- |
 | Ephemeral runtime data never sole source of truth; TTL GC touches ephemeral tables only | Specified | pending introduce-runtime-event-retention |
-| Durable vs ephemeral class split | Specified | docs/architecture/persistence.md |
+| Durable vs ephemeral class split | Specified | docs/architecture/persistence.md; retention implementation pending |
+| Durable command/event sequence watermarks survive daemon restart and safe command compaction | Specified | hardening; daemon journal/restart integration test pending |
+
+## Transport and protocol
+
+| Invariant | Status | Enforcement |
+| --- | --- | --- |
+| `north-protocol` is independent from Axum/Tokio/Tungstenite and host crates | Enforced | Cargo metadata rules in `tests/architecture`; pure JSON codec tests |
+| Server daemon transport is Axum WebSocket + JSON text; daemon transport is tokio-tungstenite | Enforced | adapter modules, dependency metadata, and real Axum↔tokio-tungstenite integration tests |
+| WebSocket ping/pong does not replace North heartbeat | Partially Enforced | adapter tests and protocol/docs; authenticated liveness persistence pending |
+| Transport errors stay distinct from North protocol errors | Enforced | `TransportError`/`ConnectionError` variants and adapter tests |
+| `session.start` carries server-assembled requirement, bounded conversation, and enabled repository metadata | Partially Enforced | `north-server::assemble_session_start` + unit test; persistence/session coordinator pending |
+| `requirement.assessed` carries typed verdict/evidence, not opaque assessment text | Enforced | `north-protocol` validation/round-trip tests and explicit server/domain conversion; persistence transaction pending |
+| Daemon application traffic waits for welcome, reconciliation, and coordination readiness | Enforced | explicit supervisor phases plus real transport gating integration test |
+| Protocol/auth failures stop daemon reconnect | Partially Enforced | terminal failure classification and real protocol-failure test; auth persistence pending |
+| `north-domain` and `north-protocol` obey positive dependency allowlists | Enforced | Cargo metadata allowlist tests |
+| Connection reconciliation is one validated snapshot delivered to coordination before Active | Partially Enforced | typed snapshot, canonical sparse ACK validation, handshake result, activation gate, and real empty/multi-session tests; journal application pending |
+| Axum/tokio-tungstenite do not provide North reliability | Specified | server-daemon protocol contract; outbox/journal/reconciliation implementation pending |
+| Browser communication remains HTTP + SSE; browser opens no WebSocket | Enforced | `browser_never_opens_websockets` architecture test |
+
+## Existing good architecture preserved
+
+- Requirement lifecycle remains distinct from execution state.
+- Ready remains valid only for the exact assessed Requirement revision; edits
+  demote Ready → Discussing.
+- Human review remains server-authorized; conversation/history remains context,
+  never Requirement truth.
+- Raw chain-of-thought and raw runtime/tool logs remain excluded from product
+  messages and subject to runtime TTL.
+- Daemon initiates the server connection; browser never connects to daemon and
+  never uses WebSocket.
+- Repository credentials remain on daemon hosts; no object storage or external
+  broker is required for 0.1.0.

@@ -11,7 +11,9 @@ deriving requirement state by replaying messages.
   kind (requester|agent|system), body, created_at. No message ever carries
   lifecycle authority.
 - Structured edits are a separate endpoint applying domain `apply_edit`; the
-  response returns the new revision so UIs can show staleness.
+  request includes `expected_revision` and the response returns the new
+  revision. Persistence performs the atomic match before invoking the domain;
+  stale edits return HTTP 409 with no message or requirement side effect.
 - Agent messages arrive exclusively via protocol events (later change); this
   change defines their persistence shape only.
 

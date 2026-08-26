@@ -1,5 +1,4 @@
-//! north-daemon: see the crate-level plan in docs/architecture/.
-//!
-//! Implementation lands with the OpenSpec change `introduce-daemon-runtime-connection`.
-//! Deliberately dependency-free until then so the workspace builds fast and
-//! architecture boundaries stay trivially auditable.
+//! north-daemon owns local execution-host coordination. Its server link is
+//! one `tokio-tungstenite` connection supervised outside session/runtime code.
+
+pub mod transport;

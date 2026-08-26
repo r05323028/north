@@ -12,7 +12,9 @@ list are the smallest complete surface for that.
 - List view: search, filters (status, creator), sorting (updated), status and
   ownership columns.
 - New-requirement dialog limited to title + description.
-- Live updates via SSE; no polling storms, no WebSockets.
+- Live updates via SSE; no polling storms, no WebSockets. SSE is a
+  notification hint only: reconnect/refetch uses canonical HTTP state and
+  never reconstructs Requirement truth from stream replay.
 - First frontend test pattern established.
 
 Out of scope: labels/tags, priorities beyond column order, attachments,
