@@ -23,7 +23,9 @@ reconciliation snapshot, delivers it to coordination, and waits for coordination
 readiness before opening normal application traffic in `Active`. Runtime events,
 application heartbeat, and local journal replay remain queued before `Active`;
 ping/pong remains enabled as transport control. Handshake stages have
-configurable hello, welcome, reconciliation, and coordination timeouts.
+configurable hello, welcome, and reconciliation timeouts. Coordination uses one
+whole-stage timeout covering event delivery, reconciliation application, and
+readiness.
 A healthy Active connection resets transport reconnect backoff.
 
 Retryable socket/connect failures enter transport backoff. Protocol/schema
@@ -35,6 +37,9 @@ a bounded channel. Only the supervisor's single writer task converts them to
 JSON text WebSocket messages. The supervisor delivers `HandshakeResult`
 (welcome plus the complete reconciliation snapshot) through `ConnectionEvent`
 and forwards application frames only after coordination signals readiness.
+Each `SessionReconcileState` carries contiguous command/event ACK watermarks
+plus a canonical `event_ack_sparse` list: strictly ascending, unique, and above
+`event_ack_through_seq`. Transport validates wire shape; coordination owns meaning.
 Ping/pong is transport liveness;
 `heartbeat` is authenticated North application liveness.
 

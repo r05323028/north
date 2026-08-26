@@ -35,7 +35,8 @@ implementation choices that must match it.
   record for a well-formed fact that cannot apply. No ACK follows a rollback.
 - Reconciliation is one finite connection-level `ReconcileSnapshot` with zero
   or more unique `SessionReconcileState` entries. Each entry carries contiguous
-  command/event watermarks plus sparse event sequences above the event watermark.
+  command/event watermarks plus a strictly ascending, unique `event_ack_sparse`
+  list whose values are above `event_ack_through_seq`.
   Valid out-of-order frames can be buffered but are not applied until gaps close.
   Same id+sequence is harmless; same sequence with another id is a protocol error.
 - Unknown frame types and unsupported schema versions receive
@@ -61,7 +62,8 @@ implementation choices that must match it.
   a serialized domain assessment string. Server/domain conversion remains
   explicit and server-authoritative.
 - `SessionResume` is an empty execution-recovery command in 0.1.0. Transport
-  replay cursors live only in `ReconcileSnapshot` watermarks and sparse ACKs.
+  replay cursors live only in `ReconcileSnapshot` watermarks and canonical
+  `event_ack_sparse` lists.
 
 ## Risks / Trade-offs
 

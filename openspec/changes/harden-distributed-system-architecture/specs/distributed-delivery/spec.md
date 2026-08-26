@@ -54,8 +54,10 @@ replay buffered events in `daemon_event_seq` order. The server SHALL process
 events in contiguous order, buffer or request replay for a gap, and commit
 business effects before acknowledging the event sequence. Each
 `SessionReconcileState` in the connection-level snapshot SHALL carry command and
-event contiguous watermarks and MAY carry sparse acknowledged event sequences
-when processing is non-contiguous.
+event contiguous watermarks and MAY carry a canonical `event_ack_sparse` list
+when processing is non-contiguous. When present, the list SHALL contain only
+values above `event_ack_through_seq`, contain no duplicates, and be strictly
+ascending.
 
 An id identifies one delivery for idempotency; a sequence orders deliveries
 and detects gaps. A duplicate with the same id and sequence SHALL be harmless
@@ -79,9 +81,10 @@ NOT be applied to business state until its gap is reconciled.
 The server SHALL send one finite `ReconcileSnapshot` per authenticated daemon
 connection. The snapshot MAY contain zero sessions or SHALL contain one unique
 `SessionReconcileState` for each session pinned to that daemon. Each state SHALL
-carry command/event contiguous ACK watermarks and sparse event ACKs. The wire
-contract SHALL reject empty session IDs, sparse values at or below the event
-watermark, and duplicate session IDs.
+carry command/event contiguous ACK watermarks and a canonical `event_ack_sparse`
+list. The wire contract SHALL reject empty session IDs, sparse values at or below
+`event_ack_through_seq`, duplicate sparse values, non-ascending sparse values,
+and duplicate session IDs.
 
 #### Scenario: Empty reconciliation is explicit
 

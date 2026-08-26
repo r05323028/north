@@ -109,7 +109,7 @@ pub struct HandshakeTimeouts {
     pub welcome: Duration,
     /// Time allowed to receive reconciliation state.
     pub reconcile: Duration,
-    /// Time allowed for coordination to apply reconciliation and signal ready.
+    /// Single total duration for coordination to apply reconciliation and signal ready.
     pub coordination: Duration,
 }
 
@@ -354,24 +354,15 @@ impl ConnectionSupervisor {
             };
             phase = phase.reconciliation_received()?;
 
-            let (ready, coordination) = oneshot::channel();
-            tokio::time::timeout(
+            await_coordination_ready(
+                inbound.clone(),
+                HandshakeResult {
+                    welcome,
+                    reconciliation,
+                },
                 self.config.handshake.coordination,
-                inbound.send(ConnectionEvent::HandshakeComplete {
-                    result: HandshakeResult {
-                        welcome,
-                        reconciliation,
-                    },
-                    ready,
-                }),
             )
-            .await
-            .map_err(|_| ConnectionError::HandshakeTimeout("coordination"))?
-            .map_err(|_| ConnectionError::ChannelClosed("inbound"))?;
-            tokio::time::timeout(self.config.handshake.coordination, coordination)
-                .await
-                .map_err(|_| ConnectionError::HandshakeTimeout("coordination"))?
-                .map_err(|_| ConnectionError::ChannelClosed("coordination"))?;
+            .await?;
             phase = phase.coordination_ready()?;
             reset_transport_backoff(attempt);
             debug_assert!(phase.allows_application_traffic());
@@ -431,6 +422,26 @@ enum WriterCommand {
 
 async fn next_outbound(outbound: &SharedOutbound) -> Option<DaemonFrame> {
     outbound.lock().await.recv().await
+}
+
+async fn await_coordination_ready(
+    inbound: mpsc::Sender<ConnectionEvent>,
+    result: HandshakeResult,
+    duration: Duration,
+) -> Result<(), ConnectionError> {
+    let (ready, coordination) = oneshot::channel();
+    tokio::time::timeout(duration, async {
+        inbound
+            .send(ConnectionEvent::HandshakeComplete { result, ready })
+            .await
+            .map_err(|_| ConnectionError::ChannelClosed("inbound"))?;
+        coordination
+            .await
+            .map_err(|_| ConnectionError::ChannelClosed("coordination"))?;
+        Ok::<(), ConnectionError>(())
+    })
+    .await
+    .map_err(|_| ConnectionError::HandshakeTimeout("coordination"))?
 }
 
 async fn receive_frame(
@@ -553,7 +564,7 @@ pub fn decode_server_message(message: Message) -> Result<Option<ServerFrame>, Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use north_protocol::{ProtocolErrorFrame, SCHEMA_VERSION};
+    use north_protocol::{ProtocolErrorFrame, PROTOCOL_VERSION, SCHEMA_VERSION};
 
     #[test]
     fn phases_gate_application_traffic_until_reconciliation() {
@@ -591,6 +602,110 @@ mod tests {
             .await
             .expect_err("empty handshake must time out");
         assert_eq!(error.failure_class(), FailureClass::Retryable);
+    }
+
+    fn test_handshake_result() -> HandshakeResult {
+        HandshakeResult {
+            welcome: Welcome {
+                protocol_version: PROTOCOL_VERSION.into(),
+                schema_version: SCHEMA_VERSION,
+                daemon_id: "daemon-1".into(),
+                server_time: "2026-01-01T00:00:00Z".into(),
+            },
+            reconciliation: ReconcileSnapshot {
+                schema_version: SCHEMA_VERSION,
+                sessions: vec![],
+            },
+        }
+    }
+
+    fn queued_event() -> ConnectionEvent {
+        ConnectionEvent::Frame(ServerFrame::Reconcile(ReconcileSnapshot {
+            schema_version: SCHEMA_VERSION,
+            sessions: vec![],
+        }))
+    }
+
+    #[tokio::test]
+    async fn coordination_timeout_covers_slow_delivery() {
+        let (inbound, _receiver) = mpsc::channel(1);
+        inbound
+            .send(queued_event())
+            .await
+            .expect("prefill coordination channel");
+
+        let error =
+            await_coordination_ready(inbound, test_handshake_result(), Duration::from_millis(25))
+                .await
+                .expect_err("slow delivery must consume coordination deadline");
+        assert!(matches!(
+            error,
+            ConnectionError::HandshakeTimeout("coordination")
+        ));
+    }
+
+    #[tokio::test]
+    async fn coordination_timeout_covers_slow_readiness_ack() {
+        let (inbound, mut receiver) = mpsc::channel(1);
+        let task = tokio::spawn(await_coordination_ready(
+            inbound.clone(),
+            test_handshake_result(),
+            Duration::from_millis(25),
+        ));
+
+        let ConnectionEvent::HandshakeComplete { ready, .. } =
+            receiver.recv().await.expect("coordination event delivery")
+        else {
+            panic!("expected handshake completion event");
+        };
+        tokio::time::sleep(Duration::from_millis(45)).await;
+        drop(ready);
+
+        let error = task
+            .await
+            .expect("coordination task")
+            .expect_err("slow readiness acknowledgement must time out");
+        assert!(matches!(
+            error,
+            ConnectionError::HandshakeTimeout("coordination")
+        ));
+    }
+
+    #[tokio::test]
+    async fn coordination_timeout_is_one_budget_for_delivery_and_readiness() {
+        let (inbound, mut receiver) = mpsc::channel(1);
+        inbound
+            .send(queued_event())
+            .await
+            .expect("prefill coordination channel");
+        let task = tokio::spawn(await_coordination_ready(
+            inbound.clone(),
+            test_handshake_result(),
+            Duration::from_millis(120),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        receiver
+            .recv()
+            .await
+            .expect("release delayed handshake delivery");
+        let ConnectionEvent::HandshakeComplete { ready, .. } =
+            receiver.recv().await.expect("coordination event delivery")
+        else {
+            panic!("expected handshake completion event");
+        };
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        drop(ready);
+
+        let error = tokio::time::timeout(Duration::from_millis(20), task)
+            .await
+            .expect("delivery plus readiness must not receive two budgets")
+            .expect("coordination task")
+            .expect_err("combined coordination delay must time out");
+        assert!(matches!(
+            error,
+            ConnectionError::HandshakeTimeout("coordination")
+        ));
     }
 
     #[test]

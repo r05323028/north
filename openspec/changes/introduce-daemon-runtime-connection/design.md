@@ -24,9 +24,10 @@ cross-cutting ownership contract lives in
   heartbeat before `Active`; WebSocket ping/pong remains available in every
   phase. The connection-level reconciliation snapshot is delivered to
   coordination, which signals readiness after applying/restoring replay state.
-- Handshake timeouts for hello, welcome/authentication, reconciliation, and
-  coordination readiness are configuration, separate from execution timeout and
-  server retry budget.
+- Handshake timeouts for hello, welcome/authentication, and reconciliation are
+  configuration. Coordination readiness has one total stage budget covering
+  `HandshakeComplete` delivery, reconciliation application, and the readiness
+  signal. All remain separate from execution timeout and server retry budget.
 - `ConnectionError` classifies socket/connect interruption and handshake timeout
   as retryable, while malformed/unsupported protocol, authentication/revocation,
   and `protocol.error` as terminal. Every protocol error closes the connection;

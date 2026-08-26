@@ -60,8 +60,10 @@ that remains for the session.
 `server_command_seq` and `daemon_event_seq` SHALL be monotonic independently
 within each session and direction. Each `SessionReconcileState` in the
 connection-level reconciliation snapshot SHALL carry contiguous command/event
-watermarks and MAY carry sparse acknowledgements. A valid out-of-order
-frame MAY be buffered but SHALL NOT affect business state until its gap closes.
+watermarks and MAY carry a canonical `event_ack_sparse` list. When present, the list
+SHALL contain only values above `event_ack_through_seq`, SHALL contain no duplicates,
+and SHALL be strictly ascending. A valid out-of-order frame MAY be buffered but
+SHALL NOT affect business state until its gap closes.
 A duplicate id+sequence SHALL be harmless and re-acknowledged; the same sequence
 with a different id SHALL be a protocol error; a late acknowledged frame SHALL
 be inert.
@@ -76,9 +78,10 @@ be inert.
 The server SHALL send one connection-level `ReconcileSnapshot` after
 authentication. Its `sessions` list MAY be empty or SHALL contain one unique
 `SessionReconcileState` per session pinned to the daemon. Each entry SHALL carry
-independent command/event contiguous ACK watermarks and sparse event ACKs. Wire
-validation SHALL reject empty session IDs, sparse event sequences at or below
-their contiguous watermark, and duplicate session IDs before coordination
+independent command/event contiguous ACK watermarks and a canonical
+`event_ack_sparse` list. Wire validation SHALL reject empty session IDs, sparse
+event sequences at or below `event_ack_through_seq`, duplicate sparse values,
+or non-ascending sparse values, and duplicate session IDs before coordination
 receives the snapshot.
 
 #### Scenario: A daemon with no sessions reconciles explicitly

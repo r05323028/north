@@ -77,21 +77,24 @@ its business effect. No success ACK is sent before its relevant commit.
 
 `session.resume` is a server COMMAND for execution recovery only; it carries
 no daemon-event cursor. Transport replay state belongs exclusively to
-`ReconcileSnapshot` ACK watermarks and sparse sequence fields. It is never a
-daemon→server event.
+`ReconcileSnapshot` ACK watermarks and canonical `event_ack_sparse` lists. It is
+never a daemon→server event.
 
 ## Reconciliation and activation
 
 `reconcile` is one finite connection-level `ReconcileSnapshot`, not one frame per
 session. Its `sessions` list may be empty for a daemon with no pinned sessions,
 or contain one unique `SessionReconcileState` per pinned session. Each entry
-contains independent command/event contiguous watermarks and sparse event ACKs.
-The protocol validates non-empty session IDs, sparse ACKs above their contiguous
-watermark, and duplicate-session rejection before coordination sees the snapshot.
+contains independent command/event contiguous watermarks and a canonical
+`event_ack_sparse` list. The list is strictly ascending, contains no duplicates,
+and has only values above `event_ack_through_seq`. The protocol validates non-empty
+session IDs, canonical sparse ACKs, and duplicate-session rejection before
+coordination sees the snapshot.
 
 The daemon supervisor delivers `Welcome` plus `ReconcileSnapshot` as one
 `HandshakeResult` to coordination, then waits for coordination to apply/restore
-replay state and signal readiness. Only that signal moves the connection from
+replay state and signal readiness under one total coordination-stage timeout.
+Only that signal moves the connection from
 `ReconciliationReceived` to `Active`; ping/pong may operate before then, but
 heartbeat, events, replay, and ACKs cannot race ahead.
 
@@ -138,7 +141,8 @@ are replayed after reconnect.
 scoped to one session and direction. They start at 1 and are persisted with
 the outbox/journal record. Each `SessionReconcileState` in the connection-level
 snapshot carries `command_ack_through_seq`, `event_ack_through_seq`, and a
-sparse event sequence set when processing is non-contiguous.
+strictly ascending, unique sparse event sequence list above the event watermark
+when processing is non-contiguous.
 
 - A duplicate id+sequence is harmless and receives the known ACK again.
 - One sequence with a different id is a protocol error.

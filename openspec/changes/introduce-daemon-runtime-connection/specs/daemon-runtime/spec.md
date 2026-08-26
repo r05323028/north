@@ -41,8 +41,10 @@ The daemon SHALL use one supervisor with explicit phases
 coordination, and wait for coordination readiness before transmitting ordinary
 commands, events, replayed journal frames, or North heartbeat. WebSocket
 ping/pong SHALL remain available before `Active`. Handshake hello,
-welcome/authentication, reconciliation, and coordination stages SHALL have
-configurable timeouts distinct from execution retry policy.
+welcome/authentication, and reconciliation stages SHALL have configurable timeouts
+distinct from execution retry policy. The coordination stage SHALL use one total
+budget for `HandshakeComplete` delivery, reconciliation application, and the
+readiness signal; timeout remains retryable.
 
 #### Scenario: Runtime traffic cannot race authentication
 
@@ -62,6 +64,13 @@ revocation failure, invalid daemon identity, `protocol.error`, and
 non-recoverable reconciliation violations SHALL surface as terminal connection
 errors and SHALL NOT reconnect automatically. A `protocol.error` has no severity
 discriminator: receiving one always closes the current connection.
+
+#### Scenario: Coordination timeout is one total budget
+
+- **WHEN** delivery to coordination consumes part of the configured coordination
+  timeout and readiness consumes the rest
+- **THEN** the supervisor times out the whole stage at one budget, classifies the
+  timeout as retryable, and does not grant a second budget
 
 #### Scenario: Protocol error does not loop
 

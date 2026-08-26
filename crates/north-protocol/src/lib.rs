@@ -495,14 +495,19 @@ pub struct SessionReconcileState {
 impl SessionReconcileState {
     fn validate(&self) -> Result<(), FrameError> {
         non_empty("session_id", &self.session_id)?;
-        if self
-            .event_ack_sparse
-            .iter()
-            .any(|sequence| *sequence <= self.event_ack_through_seq)
-        {
-            return Err(FrameError::Validation(
-                "sparse acknowledgements must be above event_ack_through_seq".into(),
-            ));
+        let mut previous = self.event_ack_through_seq;
+        for sequence in &self.event_ack_sparse {
+            if *sequence <= self.event_ack_through_seq {
+                return Err(FrameError::Validation(
+                    "sparse acknowledgements must be above event_ack_through_seq".into(),
+                ));
+            }
+            if *sequence <= previous {
+                return Err(FrameError::Validation(
+                    "sparse acknowledgements must be strictly ascending and unique".into(),
+                ));
+            }
+            previous = *sequence;
         }
         Ok(())
     }
@@ -642,6 +647,18 @@ mod tests {
 
     fn hello() -> Hello {
         Hello::new("daemon-1", "credential", vec!["agent".into()])
+    }
+
+    fn reconciliation_with_sparse(event_ack_sparse: Vec<u64>) -> ServerFrame {
+        ServerFrame::Reconcile(ReconcileSnapshot {
+            schema_version: SCHEMA_VERSION,
+            sessions: vec![SessionReconcileState {
+                session_id: "session-1".into(),
+                command_ack_through_seq: 1,
+                event_ack_through_seq: 4,
+                event_ack_sparse,
+            }],
+        })
     }
 
     fn command() -> CommandEnvelope {
@@ -794,6 +811,26 @@ mod tests {
             let json = frame.to_json().expect("valid daemon frame");
             assert_eq!(DaemonFrame::from_json(&json).expect("round trip"), frame);
         }
+    }
+
+    #[test]
+    fn reconciliation_rejects_duplicate_sparse_event_ack_sequences() {
+        assert!(reconciliation_with_sparse(vec![5, 5]).to_json().is_err());
+    }
+
+    #[test]
+    fn reconciliation_rejects_out_of_order_sparse_event_ack_sequences() {
+        assert!(reconciliation_with_sparse(vec![7, 5]).to_json().is_err());
+    }
+
+    #[test]
+    fn reconciliation_accepts_ascending_sparse_event_ack_sequences() {
+        assert!(reconciliation_with_sparse(vec![5, 7, 10]).to_json().is_ok());
+    }
+
+    #[test]
+    fn reconciliation_accepts_empty_sparse_event_ack_list() {
+        assert!(reconciliation_with_sparse(vec![]).to_json().is_ok());
     }
 
     #[test]

@@ -79,7 +79,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Daemon application traffic waits for welcome, reconciliation, and coordination readiness | Enforced | explicit supervisor phases plus real transport gating integration test |
 | Protocol/auth failures stop daemon reconnect | Partially Enforced | terminal failure classification and real protocol-failure test; auth persistence pending |
 | `north-domain` and `north-protocol` obey positive dependency allowlists | Enforced | Cargo metadata allowlist tests |
-| Connection reconciliation is one validated snapshot delivered to coordination before Active | Partially Enforced | typed snapshot, handshake result, activation gate, and real empty/multi-session tests; journal application pending |
+| Connection reconciliation is one validated snapshot delivered to coordination before Active | Partially Enforced | typed snapshot, canonical sparse ACK validation, handshake result, activation gate, and real empty/multi-session tests; journal application pending |
 | Axum/tokio-tungstenite do not provide North reliability | Specified | server-daemon protocol contract; outbox/journal/reconciliation implementation pending |
 | Browser communication remains HTTP + SSE; browser opens no WebSocket | Enforced | `browser_never_opens_websockets` architecture test |
 

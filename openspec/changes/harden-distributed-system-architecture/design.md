@@ -95,8 +95,9 @@ one session and direction. The assigning side persists the next value with the
 outbox/journal record. Reconciliation is one finite connection-level
 `ReconcileSnapshot` containing zero or more unique `SessionReconcileState`
 entries, one for each pinned session. Each entry carries command/event
-contiguous watermarks and sparse event sequences; sparse values must be above
-their contiguous watermark. A receiver buffers a valid out-of-order frame but
+contiguous watermarks and a canonical `event_ack_sparse` list; sparse values
+must be strictly ascending, unique, and above `event_ack_through_seq`. A receiver
+buffers a valid out-of-order frame but
 does not apply it until missing sequence values arrive. Same id plus same
 sequence is a duplicate; same sequence plus another id is a protocol error; an
 already acknowledged late frame is inert and re-acknowledged. This keeps ids
