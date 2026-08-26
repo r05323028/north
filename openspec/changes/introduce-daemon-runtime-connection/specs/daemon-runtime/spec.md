@@ -35,11 +35,13 @@ capabilities; the server SHALL track liveness via North heartbeats
 ### Requirement: Connection handshake gates application traffic
 
 The daemon SHALL use one supervisor with explicit phases
-`Connecting`, `AwaitingWelcome`, `Authenticated`, `Reconciling`, and `Active`.
-It SHALL send `hello`, wait for `welcome`, wait for reconciliation state, and
-only then transmit ordinary commands, events, replayed journal frames, or North
-heartbeat. WebSocket ping/pong SHALL remain available before `Active`.
-Handshake hello, welcome/authentication, and reconciliation stages SHALL have
+`Connecting`, `AwaitingWelcome`, `Authenticated`, `Reconciling`,
+`ReconciliationReceived`, and `Active`. It SHALL send `hello`, wait for
+`welcome`, receive one connection-level reconciliation snapshot, deliver it to
+coordination, and wait for coordination readiness before transmitting ordinary
+commands, events, replayed journal frames, or North heartbeat. WebSocket
+ping/pong SHALL remain available before `Active`. Handshake hello,
+welcome/authentication, reconciliation, and coordination stages SHALL have
 configurable timeouts distinct from execution retry policy.
 
 #### Scenario: Runtime traffic cannot race authentication
@@ -47,18 +49,36 @@ configurable timeouts distinct from execution retry policy.
 - **WHEN** a daemon has sent hello but has not received welcome and reconciliation
 - **THEN** normal application frames remain queued and are not written to the WebSocket
 
+#### Scenario: Reconciliation receipt does not activate transport
+
+- **WHEN** the daemon receives a valid reconciliation snapshot but coordination has not signaled readiness
+- **THEN** normal application frames remain queued until coordination completes reconciliation
+
 ### Requirement: Terminal protocol failures stop reconnect
 
 Retryable socket/connect interruption and temporary peer absence MAY enter
 transport backoff. Unsupported protocol/schema, authentication or credential
-revocation failure, invalid daemon identity, fatal `protocol.error`, and
+revocation failure, invalid daemon identity, `protocol.error`, and
 non-recoverable reconciliation violations SHALL surface as terminal connection
-errors and SHALL NOT reconnect automatically.
+errors and SHALL NOT reconnect automatically. A `protocol.error` has no severity
+discriminator: receiving one always closes the current connection.
 
-#### Scenario: Fatal protocol error does not loop
+#### Scenario: Protocol error does not loop
 
-- **WHEN** the server sends `protocol.error` with `fatal: true`
+- **WHEN** the server sends `protocol.error`
 - **THEN** the supervisor returns a terminal error to the daemon host without another reconnect attempt
+
+### Requirement: Healthy connection resets transport backoff
+
+After coordination signals readiness and the supervisor enters `Active`, the
+transport reconnect attempt counter SHALL reset to its initial state. A later
+retryable disconnect SHALL therefore use the initial backoff delay. This state is
+independent from server execution retry budgets.
+
+#### Scenario: Healthy connection clears historical failures
+
+- **WHEN** several transport attempts fail, a connection becomes `Active`, and it later disconnects
+- **THEN** the next retry starts at the initial transport backoff delay
 
 ### Requirement: Active sessions are pinned to their daemon
 

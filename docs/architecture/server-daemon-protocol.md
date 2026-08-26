@@ -23,7 +23,8 @@ layer. Each North frame serializes to one WebSocket **text** message; binary
 messages are rejected at the adapter boundary.
 
 Current defensive defaults are 8 MiB maximum message size, 1 MiB maximum frame
-size, and bounded 256-item connection/inbound/outbound queues. The daemon
+size, a bounded 64-item admission queue, and bounded 256-item inbound/outbound
+queues. The daemon
 uses tokio-tungstenite with the minimal `rustls-tls-native-roots` feature for
 WSS. These are configuration points, not reliability guarantees.
 
@@ -32,8 +33,10 @@ WSS. These are configuration points, not reliability guarantees.
 - Daemon-initiated persistent connection (WebSocket over TLS in deployment);
   the daemon may sit behind NAT/firewalls; no inbound ports.
 - The server endpoint is an Axum upgrade handler plus a thin transport adapter;
-  application/session coordination authenticates the first `hello`, owns
-  registration, and receives decoded frames through bounded channels.
+  the adapter starts the hello deadline immediately after upgrade, reads the
+  first `hello`, and admits the hello-bearing connection through a bounded
+  coordinator queue with its own timeout. Coordination authenticates the hello,
+  owns registration, and receives decoded frames through bounded channels.
 - The daemon endpoint is one `tokio-tungstenite` connection supervisor; it
   owns hello, split reader/writer tasks, ping/pong, disconnect, local backoff,
   and reconnect. Runtime/session code never writes to the socket directly.
@@ -54,9 +57,9 @@ under the same name.
 
 ```text
 Connection/control frames
-  daemon → server : hello/registration, heartbeat, command_ack(status=accepted)
+  daemon → server : hello/registration, heartbeat, command_ack
   server → daemon : welcome, event_ack(status=accepted), event_ack(status=rejected),
-                    reconciliation/watermarks, protocol.error
+                    reconciliation snapshot, protocol.error
 
 Server commands (server → daemon ONLY)
   session.start · session.cancel · session.resume · message.send
@@ -66,16 +69,31 @@ Daemon events (daemon → server ONLY)
   session.completed · session.failed
 ```
 
-`command_ack(status=accepted)` means the daemon's durable inbox has recorded the command;
-it is not runtime completion. `event_ack(status=accepted)` means the server committed the
-business effect. `event_ack(status=rejected)` means the server durably recorded a
+`command_ack` means the daemon durably recorded the command for processing;
+it is not runtime completion and carries no status. `event_ack(status=accepted)` means
+the server committed the business effect. `event_ack(status=rejected)` means the server durably recorded a
 well-formed fact as rejected (for example stale assessment) and will not retry
 its business effect. No success ACK is sent before its relevant commit.
 
 `session.resume` is a server COMMAND for execution recovery only; it carries
 no daemon-event cursor. Transport replay state belongs exclusively to
-`ReconcileState` ACK watermarks and sparse sequence fields. It is never a
+`ReconcileSnapshot` ACK watermarks and sparse sequence fields. It is never a
 daemon→server event.
+
+## Reconciliation and activation
+
+`reconcile` is one finite connection-level `ReconcileSnapshot`, not one frame per
+session. Its `sessions` list may be empty for a daemon with no pinned sessions,
+or contain one unique `SessionReconcileState` per pinned session. Each entry
+contains independent command/event contiguous watermarks and sparse event ACKs.
+The protocol validates non-empty session IDs, sparse ACKs above their contiguous
+watermark, and duplicate-session rejection before coordination sees the snapshot.
+
+The daemon supervisor delivers `Welcome` plus `ReconcileSnapshot` as one
+`HandshakeResult` to coordination, then waits for coordination to apply/restore
+replay state and signal readiness. Only that signal moves the connection from
+`ReconciliationReceived` to `Active`; ping/pong may operate before then, but
+heartbeat, events, replay, and ACKs cannot race ahead.
 
 ## `session.start` runtime context
 
@@ -105,7 +123,7 @@ Every command/event carries:
 The server persists a command outbox row before dispatch. Retries reuse the
 same `command_id` and sequence, and the outbox retains unaccepted commands.
 The daemon persists a local command inbox/processed ledger before sending
-`command_ack(status=accepted)`. Duplicate delivery repeats the known ACK and never invokes
+`command_ack`. Duplicate delivery repeats the known ACK and never invokes
 the runtime twice. `message.send` is submitted to the agent at most once for
 one command id, including reconnect and daemon restart recovery.
 
@@ -118,8 +136,9 @@ are replayed after reconnect.
 
 `server_command_seq` and `daemon_event_seq` are independent monotonic counters,
 scoped to one session and direction. They start at 1 and are persisted with
-the outbox/journal record. Reconciliation carries `ack_through_seq` plus a
-sparse sequence set when processing is non-contiguous.
+the outbox/journal record. Each `SessionReconcileState` in the connection-level
+snapshot carries `command_ack_through_seq`, `event_ack_through_seq`, and a
+sparse event sequence set when processing is non-contiguous.
 
 - A duplicate id+sequence is harmless and receives the known ACK again.
 - One sequence with a different id is a protocol error.
@@ -140,8 +159,12 @@ ordered delivery?” Neither replaces the other.
 A protocol-version mismatch receives `protocol.error(incompatible_protocol)`
 and the connection closes before session traffic. Unknown command/event types
 or unsupported schema versions receive explicit `protocol.error`, cause no side
-effect, and close the connection. Unacknowledged outbox/journal messages stay
-eligible for replay; peers do not silently reinterpret unknown payloads.
+effect, and close the connection. `protocol.error` carries no severity
+discriminator: every protocol error is terminal for this connection, while the
+host decides whether
+an equivalent future connection may be attempted. Unacknowledged outbox/journal
+messages stay eligible for replay; peers do not silently reinterpret unknown
+payloads.
 
 ## Liveness and error boundaries
 

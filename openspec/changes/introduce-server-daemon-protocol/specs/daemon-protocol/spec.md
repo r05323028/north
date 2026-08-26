@@ -24,7 +24,7 @@ crate, which SHALL NOT depend on business crates.
 ### Requirement: Server commands cross a durable daemon idempotency boundary
 
 The server SHALL persist every command before dispatch and retry it with the
-same id and sequence until the daemon sends `command_ack(status=accepted)`. The daemon
+same id and sequence until the daemon sends `command_ack`. The daemon
 SHALL persist a command inbox/processed record before that ACK. The ACK means
 durable receipt for processing, not runtime completion. A duplicate command
 SHALL repeat its known ACK without invoking the runtime twice or duplicating a
@@ -58,8 +58,9 @@ that remains for the session.
 ### Requirement: Directional sequences detect gaps and preserve order
 
 `server_command_seq` and `daemon_event_seq` SHALL be monotonic independently
-within each session and direction. Reconciliation SHALL carry
-`ack_through_seq` and MAY carry sparse acknowledgements. A valid out-of-order
+within each session and direction. Each `SessionReconcileState` in the
+connection-level reconciliation snapshot SHALL carry contiguous command/event
+watermarks and MAY carry sparse acknowledgements. A valid out-of-order
 frame MAY be buffered but SHALL NOT affect business state until its gap closes.
 A duplicate id+sequence SHALL be harmless and re-acknowledged; the same sequence
 with a different id SHALL be a protocol error; a late acknowledged frame SHALL
@@ -70,14 +71,62 @@ be inert.
 - **WHEN** event sequence 4 arrives before sequence 3
 - **THEN** sequence 4 is buffered or causes replay reconciliation, and no sequence-4 business effect occurs before sequence 3 is handled
 
+### Requirement: Connection reconciliation is one finite snapshot
+
+The server SHALL send one connection-level `ReconcileSnapshot` after
+authentication. Its `sessions` list MAY be empty or SHALL contain one unique
+`SessionReconcileState` per session pinned to the daemon. Each entry SHALL carry
+independent command/event contiguous ACK watermarks and sparse event ACKs. Wire
+validation SHALL reject empty session IDs, sparse event sequences at or below
+their contiguous watermark, and duplicate session IDs before coordination
+receives the snapshot.
+
+#### Scenario: A daemon with no sessions reconciles explicitly
+
+- **WHEN** a newly registered daemon has no pinned sessions
+- **THEN** the server sends one valid snapshot with an empty `sessions` list
+
+#### Scenario: Multiple pinned sessions share one snapshot
+
+- **WHEN** a daemon owns multiple pinned sessions
+- **THEN** one reconciliation snapshot carries one distinct state entry for each session
+
+### Requirement: Reconciliation crosses transport into coordination
+
+The daemon transport SHALL expose `Welcome` and the complete
+`ReconcileSnapshot` as one typed handshake result to coordination. It SHALL
+wait for coordination to apply/restore replay state and signal readiness before
+entering `Active` or releasing heartbeat, events, ACKs, replay, or commands.
+Transport ping/pong MAY operate before `Active`; the transport SHALL NOT apply or
+discard reconciliation watermarks.
+
+#### Scenario: Snapshot receipt does not activate application traffic
+
+- **WHEN** the daemon receives a valid reconciliation snapshot but coordination has not signaled readiness
+- **THEN** queued application traffic remains off the WebSocket until readiness completes
+
+### Requirement: Upgraded connection admission is bounded
+
+The Axum upgrade adapter SHALL start the hello timeout immediately after upgrade
+and SHALL bound coordinator admission separately. Coordinator backpressure
+MUST NOT leave an upgraded socket waiting outside all configured handshake
+timeouts.
+
+#### Scenario: Full coordinator queue cannot bypass hello timeout
+
+- **WHEN** the coordinator queue is full and an upgraded daemon sends no hello
+- **THEN** the socket closes at the hello deadline rather than waiting for queue admission
+
 ### Requirement: Protocol compatibility fails closed
 
 Hello/registration and welcome SHALL carry exact `protocol_version: "0.1"`;
 0.1.x frames SHALL use `schema_version: 1`. An incompatible peer, unknown
 command/event type, or unsupported schema SHALL receive `protocol.error`, cause
-no side effect, and have its connection closed. Unacknowledged durable frames
-remain eligible for replay; peers SHALL NOT silently reinterpret unknown
-payloads.
+no side effect, and have its connection closed. A `protocol.error` carries no
+severity discriminator; receiving one always closes the current connection and
+is terminal to the current supervisor run, while the host may decide whether a
+future connection is allowed. Unacknowledged durable frames remain eligible for
+replay; peers SHALL NOT silently reinterpret unknown payloads.
 
 #### Scenario: Unknown frame cannot mutate state
 

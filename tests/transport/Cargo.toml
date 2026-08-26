@@ -1,0 +1,17 @@
+[package]
+name = "north-transport-integration"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+axum = { version = "0.8.4", default-features = false, features = ["http1", "tokio", "ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+north-daemon = { path = "../../crates/north-daemon" }
+north-protocol = { path = "../../crates/north-protocol" }
+north-server = { path = "../../crates/north-server" }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+
+[lints]
+workspace = true

@@ -19,8 +19,9 @@ explicit durable owner when multiple daemons exist.
 - The supervisor owns hello, reader/writer tasks, ping/pong, bounded outbound
   buffering, disconnect, and transport backoff/reconnect; session/runtime code
   does not own a second reconnect loop. Normal traffic starts only after
-  `welcome` and reconciliation; retryable transport failures back off while
-  fatal protocol/auth failures surface terminally without reconnect loops.
+  `welcome` and reconciliation; coordination applies the reconciliation snapshot
+  before Active; retryable transport failures back off while protocol/auth
+  failures surface terminally without reconnect loops.
 - The server selects an eligible daemon before the first command and persists
   `session.daemon_id`; reconnect resumes only sessions pinned to that identity.
   North 0.1.0 performs no automatic live migration or multi-user sharing.

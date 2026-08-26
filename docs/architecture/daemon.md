@@ -11,27 +11,31 @@ custom WebSocket implementation. One connection supervisor owns the lifecycle:
 ```text
 Disconnected → Connecting → AwaitingWelcome → Authenticated
                                       ↓
-                                Reconciling → Active
+                    Reconciling → ReconciliationReceived → Active
                                       ↓
                                   disconnect
                                       ↓
                          bounded transport backoff → reconnect
 ```
 
-The supervisor sends `hello`, waits for `welcome`, waits for reconciliation,
-and opens normal application traffic only in `Active`. Runtime events,
+The supervisor sends `hello`, waits for `welcome`, receives one connection-level
+reconciliation snapshot, delivers it to coordination, and waits for coordination
+readiness before opening normal application traffic in `Active`. Runtime events,
 application heartbeat, and local journal replay remain queued before `Active`;
 ping/pong remains enabled as transport control. Handshake stages have
-configurable hello, welcome, and reconciliation timeouts.
+configurable hello, welcome, reconciliation, and coordination timeouts.
+A healthy Active connection resets transport reconnect backoff.
 
 Retryable socket/connect failures enter transport backoff. Protocol/schema
-mismatch, rejected credentials, revoked identity, and fatal protocol errors are
-terminal and surface to the daemon host; they never reconnect forever.
+mismatch, rejected credentials, revoked identity, and protocol errors are terminal
+and surface to the daemon host; they never reconnect forever.
 
 Runtime/session coordination sends `north-protocol::DaemonFrame` values through
 a bounded channel. Only the supervisor's single writer task converts them to
-JSON text WebSocket messages. The reader decodes server text messages and
-forwards `ServerFrame` values independently. Ping/pong is transport liveness;
+JSON text WebSocket messages. The supervisor delivers `HandshakeResult`
+(welcome plus the complete reconciliation snapshot) through `ConnectionEvent`
+and forwards application frames only after coordination signals readiness.
+Ping/pong is transport liveness;
 `heartbeat` is authenticated North application liveness.
 
 Transport defaults: 8 MiB message, 1 MiB frame, 256 outbound frames. Cargo
@@ -47,7 +51,7 @@ Socket.IO or native-tls stack is introduced.
   ledger and unacknowledged event replay buffer. This is not a business
   database and never grants database access.
 - Acknowledge a server command only after its inbox record is flushed durably
-  (`command_ack(status=accepted)`). This means durable receipt, not runtime completion.
+  (`command_ack`). This means durable receipt, not runtime completion.
 - Invoke the local runtime once per `command_id`; pass that id as its operation
   id and reattach after restart when possible. Never re-invoke a
   `dispatch_started` command automatically.

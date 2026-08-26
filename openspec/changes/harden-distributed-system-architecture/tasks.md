@@ -5,7 +5,7 @@
 
 ## 2. Architecture and persistence documentation
 
-- [x] 2.1 Update `docs/architecture/server-daemon-protocol.md` with durable command outbox/inbox, `command_ack(status=accepted)`, directional sequence spaces, reconciliation, duplicate/gap behavior, and 0.1.x compatibility.
+- [x] 2.1 Update `docs/architecture/server-daemon-protocol.md` with durable command outbox/inbox, `command_ack`, directional sequence spaces, reconciliation, duplicate/gap behavior, and 0.1.x compatibility.
 - [x] 2.2 Update `docs/architecture/{overview,daemon,persistence,repository-access}.md` with session pinning, server retry authority, disposable checkout isolation, `disabled_at`, credential ownership, and durable/ephemeral classes.
 - [x] 2.3 Update `docs/architecture/dependency-boundaries.md` and `docs/development/testing.md` with structural limits and the later integration/E2E proof plan.
 - [x] 2.4 Update `docs/development/invariants.md` so every new guarantee is honestly `Specified` or `Partially Enforced` until a running mechanism exists.

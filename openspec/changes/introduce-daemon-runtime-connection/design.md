@@ -12,22 +12,25 @@ cross-cutting ownership contract lives in
 - The server exposes an Axum WebSocket upgrade and keeps the handler thin. It
   forwards decoded `north-protocol` frames through bounded connection channels;
   the coordinator authenticates the first `hello`, registers the daemon, and
-  sends `welcome`/reconciliation frames.
+  sends `welcome` plus one connection-level reconciliation snapshot.
 - The daemon uses one `tokio-tungstenite` supervisor with a single writer and
   independent reader. It sends hello on each connection, handles WebSocket
   ping/pong as transport control, forwards JSON text frames to coordination, and
   applies only local bounded reconnect backoff. North execution retry budgets
   remain server-owned.
 - The daemon supervisor uses explicit phases `Connecting → AwaitingWelcome →
-  Authenticated → Reconciling → Active`. It does not drain normal outbound
-  frames, replay local events, or send application heartbeat before `Active`;
-  WebSocket ping/pong remains available in every phase.
-- Handshake timeouts for hello, welcome/authentication, and reconciliation are
-  configuration, separate from execution timeout and server retry budget.
+  Authenticated → Reconciling → ReconciliationReceived → Active`. It does not
+  drain normal outbound frames, replay local events, or send application
+  heartbeat before `Active`; WebSocket ping/pong remains available in every
+  phase. The connection-level reconciliation snapshot is delivered to
+  coordination, which signals readiness after applying/restoring replay state.
+- Handshake timeouts for hello, welcome/authentication, reconciliation, and
+  coordination readiness are configuration, separate from execution timeout and
+  server retry budget.
 - `ConnectionError` classifies socket/connect interruption and handshake timeout
   as retryable, while malformed/unsupported protocol, authentication/revocation,
-  and fatal `protocol.error` as terminal. Terminal failures return to the host
-  and stop automatic reconnect.
+  and `protocol.error` as terminal. Every protocol error closes the connection;
+  terminal failures return to the host and stop automatic reconnect.
 - `north setup --server-url <url>` uses a short-lived browser request token;
   approval returns one random secret shown once and stored by the CLI with
   owner-only permissions. Email verification codes are never reused.
@@ -43,10 +46,11 @@ cross-cutting ownership contract lives in
 - Session start performs a simple connected/capability/repository filter,
   persists `session.daemon_id` atomically with the first command outbox row,
   and routes all later frames to that identity. No scheduler abstraction.
-- A reconnect with the same unrevoked identity reconciles its pinned sessions;
-  another daemon cannot claim them. Revocation closes current connections and
-  causes pinned sessions to follow server retry/failure policy without
-  migration.
+- A reconnect with the same unrevoked identity receives one connection-level
+  reconciliation snapshot for zero or more pinned sessions; coordination applies
+  it before Active. Another daemon cannot claim those sessions. Revocation closes
+  current connections and causes pinned sessions to follow server retry/failure
+  policy without migration.
 - Server-side liveness is informational and never directly changes Requirement
   lifecycle state.
 

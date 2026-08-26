@@ -40,7 +40,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Every server command is durable before dispatch and idempotent at daemon boundary | Specified | harden-distributed-system-architecture; protocol integration test pending |
 | Command ACK means durable daemon acceptance, not runtime completion | Specified | harden-distributed-system-architecture; protocol integration test pending |
 | Command/event ids and independent directional sequences detect gaps and harmless duplicates | Specified | harden-distributed-system-architecture; protocol replay/gap tests pending |
-| Protocol 0.1.x rejects incompatible/unknown frames deterministically | Specified | harden-distributed-system-architecture; protocol compatibility tests pending |
+| Protocol 0.1.x rejects incompatible/unknown frames deterministically | Partially Enforced | codec validation, terminal supervisor handling, and real protocol-failure test; production coordinator error/replay handling pending |
 | Active session is durably pinned to one daemon; no automatic live migration | Specified | harden-distributed-system-architecture; session routing/reconnect tests pending |
 | Daemon credentials are user-owned; Admin/Owner revocation cuts access | Specified | introduce-daemon-runtime-connection + hardening; connection/revocation tests pending |
 | Server owns execution state, retry budget, attempt count, and terminal Failed | Specified | introduce-runtime-retry-and-failure-state + hardening; restart/retry tests pending |
@@ -71,14 +71,15 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Invariant | Status | Enforcement |
 | --- | --- | --- |
 | `north-protocol` is independent from Axum/Tokio/Tungstenite and host crates | Enforced | Cargo metadata rules in `tests/architecture`; pure JSON codec tests |
-| Server daemon transport is Axum WebSocket + JSON text; daemon transport is tokio-tungstenite | Enforced | adapter modules and dependency metadata; full endpoint/runtime integration pending |
+| Server daemon transport is Axum WebSocket + JSON text; daemon transport is tokio-tungstenite | Enforced | adapter modules, dependency metadata, and real Axum↔tokio-tungstenite integration tests |
 | WebSocket ping/pong does not replace North heartbeat | Partially Enforced | adapter tests and protocol/docs; authenticated liveness persistence pending |
 | Transport errors stay distinct from North protocol errors | Enforced | `TransportError`/`ConnectionError` variants and adapter tests |
 | `session.start` carries server-assembled requirement, bounded conversation, and enabled repository metadata | Partially Enforced | `north-server::assemble_session_start` + unit test; persistence/session coordinator pending |
-| `requirement.assessed` carries typed verdict/evidence, not opaque assessment text | Enforced | `north-protocol` validation and round-trip tests; domain conversion pending |
-| Daemon application traffic waits for welcome and reconciliation | Partially Enforced | explicit supervisor phases and tests; live connection integration pending |
-| Fatal protocol/auth failures stop daemon reconnect | Partially Enforced | failure classification and supervisor tests; auth persistence pending |
+| `requirement.assessed` carries typed verdict/evidence, not opaque assessment text | Enforced | `north-protocol` validation/round-trip tests and explicit server/domain conversion; persistence transaction pending |
+| Daemon application traffic waits for welcome, reconciliation, and coordination readiness | Enforced | explicit supervisor phases plus real transport gating integration test |
+| Protocol/auth failures stop daemon reconnect | Partially Enforced | terminal failure classification and real protocol-failure test; auth persistence pending |
 | `north-domain` and `north-protocol` obey positive dependency allowlists | Enforced | Cargo metadata allowlist tests |
+| Connection reconciliation is one validated snapshot delivered to coordination before Active | Partially Enforced | typed snapshot, handshake result, activation gate, and real empty/multi-session tests; journal application pending |
 | Axum/tokio-tungstenite do not provide North reliability | Specified | server-daemon protocol contract; outbox/journal/reconciliation implementation pending |
 | Browser communication remains HTTP + SSE; browser opens no WebSocket | Enforced | `browser_never_opens_websockets` architecture test |
 

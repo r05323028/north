@@ -72,12 +72,14 @@ convention for now, structural check when the surface exists.
 ## Transport boundary
 
 The server WebSocket endpoint is an Axum upgrade handler followed by a thin
-transport adapter. The adapter decodes JSON text into `north-protocol` frames
-and forwards them to protocol/session coordination through bounded channels; it
-does not contain business transitions or persistence logic. The daemon uses one
-`tokio-tungstenite` connection supervisor with a single writer, an independent
-reader, bounded outbound buffering, and local reconnect backoff. No Socket.IO,
-custom WebSocket framing, or generic unused transport abstraction is allowed.
+transport adapter. The adapter starts the hello deadline immediately after
+upgrade, reads hello before bounded coordinator admission, and forwards decoded
+JSON text into `north-protocol` channels without business transitions or
+persistence logic. The daemon uses one `tokio-tungstenite` connection supervisor
+with a single writer, an independent reader, bounded outbound buffering, local
+reconnect backoff, and an explicit handshake-result boundary for coordination.
+No Socket.IO, custom WebSocket framing, or generic unused transport abstraction
+is allowed.
 
 `north-protocol` must not expose Axum, Tokio, Tungstenite, or WebSocket message
 types. Browser code remains HTTP + SSE only.

@@ -1,17 +1,18 @@
 //! tokio-tungstenite daemon connection supervisor.
 //!
-//! The supervisor owns connect, hello, welcome/reconcile handshake, split
+//! The supervisor owns connect, hello, welcome/reconciliation handshake, split
 //! read/write halves, transport ping/pong, bounded outbound buffering,
-//! disconnect, failure classification, backoff, and reconnect. Runtime/session
-//! code sees only North protocol frames and channels.
+//! disconnect, failure classification, backoff, and reconnect. It delivers the
+//! handshake result to coordination and waits for readiness before application
+//! traffic. Runtime/session code sees only North protocol values and channels.
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use north_protocol::{
     decode_server_frame, encode_daemon_frame, DaemonFrame, FrameError, Hello, ProtocolErrorFrame,
-    ServerFrame,
+    ReconcileSnapshot, ServerFrame, Welcome,
 };
 use std::{error::Error, fmt, sync::Arc, time::Duration};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{protocol::WebSocketConfig, Message},
@@ -29,6 +30,7 @@ pub enum ConnectionPhase {
     AwaitingWelcome,
     Authenticated,
     Reconciling,
+    ReconciliationReceived,
     Active,
 }
 
@@ -62,9 +64,18 @@ impl ConnectionPhase {
 
     fn reconciliation_received(self) -> Result<Self, ConnectionError> {
         match self {
-            Self::Reconciling => Ok(Self::Active),
+            Self::Reconciling => Ok(Self::ReconciliationReceived),
             _ => Err(ConnectionError::HandshakeViolation(
                 "reconciliation received outside Reconciling phase".into(),
+            )),
+        }
+    }
+
+    fn coordination_ready(self) -> Result<Self, ConnectionError> {
+        match self {
+            Self::ReconciliationReceived => Ok(Self::Active),
+            _ => Err(ConnectionError::HandshakeViolation(
+                "coordination became ready before reconciliation was received".into(),
             )),
         }
     }
@@ -72,6 +83,22 @@ impl ConnectionPhase {
     pub fn allows_application_traffic(self) -> bool {
         matches!(self, Self::Active)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeResult {
+    pub welcome: Welcome,
+    pub reconciliation: ReconcileSnapshot,
+}
+
+/// Values delivered from the transport supervisor to North coordination.
+#[derive(Debug)]
+pub enum ConnectionEvent {
+    HandshakeComplete {
+        result: HandshakeResult,
+        ready: oneshot::Sender<()>,
+    },
+    Frame(ServerFrame),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +109,8 @@ pub struct HandshakeTimeouts {
     pub welcome: Duration,
     /// Time allowed to receive reconciliation state.
     pub reconcile: Duration,
+    /// Time allowed for coordination to apply reconciliation and signal ready.
+    pub coordination: Duration,
 }
 
 impl Default for HandshakeTimeouts {
@@ -90,6 +119,7 @@ impl Default for HandshakeTimeouts {
             hello: Duration::from_secs(5),
             welcome: Duration::from_secs(10),
             reconcile: Duration::from_secs(10),
+            coordination: Duration::from_secs(10),
         }
     }
 }
@@ -161,11 +191,7 @@ pub enum ConnectionError {
     Task(String),
     HandshakeTimeout(&'static str),
     HandshakeViolation(String),
-    TerminalProtocol {
-        code: String,
-        message: String,
-        fatal: bool,
-    },
+    TerminalProtocol { code: String, message: String },
 }
 
 impl ConnectionError {
@@ -197,14 +223,9 @@ impl fmt::Display for ConnectionError {
             Self::Task(reason) => write!(f, "connection task failed: {reason}"),
             Self::HandshakeTimeout(stage) => write!(f, "handshake timed out waiting for {stage}"),
             Self::HandshakeViolation(reason) => write!(f, "handshake violation: {reason}"),
-            Self::TerminalProtocol {
-                code,
-                message,
-                fatal,
-            } => write!(
-                f,
-                "terminal North protocol error ({code}, fatal={fatal}): {message}"
-            ),
+            Self::TerminalProtocol { code, message } => {
+                write!(f, "terminal North protocol error ({code}): {message}")
+            }
         }
     }
 }
@@ -234,16 +255,18 @@ impl ConnectionSupervisor {
     /// Runs one connection lifecycle. Only retryable transport failures enter
     /// local backoff. Protocol/auth/reconciliation failures surface to the host
     /// and stop automatic reconnect; a closed application channel is shutdown.
+    /// Coordination receives `HandshakeComplete` and must signal readiness before
+    /// the supervisor releases queued application traffic.
     pub async fn run(
         &self,
         outbound: mpsc::Receiver<DaemonFrame>,
-        inbound: mpsc::Sender<ServerFrame>,
+        inbound: mpsc::Sender<ConnectionEvent>,
     ) -> Result<(), ConnectionError> {
         let outbound = Arc::new(Mutex::new(outbound));
         let mut attempt = 0;
         loop {
             match self
-                .connect_once(Arc::clone(&outbound), inbound.clone())
+                .connect_once(Arc::clone(&outbound), inbound.clone(), &mut attempt)
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -261,7 +284,8 @@ impl ConnectionSupervisor {
     async fn connect_once(
         &self,
         outbound: Arc<Mutex<mpsc::Receiver<DaemonFrame>>>,
-        inbound: mpsc::Sender<ServerFrame>,
+        inbound: mpsc::Sender<ConnectionEvent>,
+        attempt: &mut u32,
     ) -> Result<(), ConnectionError> {
         let config = WebSocketConfig::default()
             .max_message_size(Some(self.config.max_message_size))
@@ -285,7 +309,7 @@ impl ConnectionSupervisor {
         let mut phase = ConnectionPhase::Connecting.hello_sent()?;
         let (control_sender, control_receiver) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
         let (incoming_sender, mut incoming_receiver) =
-            mpsc::channel::<Result<ServerFrame, ConnectionError>>(INCOMING_QUEUE_CAPACITY);
+            mpsc::channel::<ServerFrame>(INCOMING_QUEUE_CAPACITY);
         let (writer_sender, writer_receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
 
         let mut writer_task = tokio::spawn(write_loop(writer, writer_receiver, control_receiver));
@@ -298,14 +322,17 @@ impl ConnectionSupervisor {
                 "welcome",
             )
             .await?;
-            if matches!(welcome, ServerFrame::ProtocolError(_)) {
-                return Err(protocol_failure(welcome));
-            }
-            if !matches!(welcome, ServerFrame::Welcome(_)) {
-                return Err(ConnectionError::HandshakeViolation(
-                    "expected welcome before application traffic".into(),
-                ));
-            }
+            let welcome = match welcome {
+                ServerFrame::Welcome(welcome) => welcome,
+                ServerFrame::ProtocolError(error) => {
+                    return Err(protocol_failure(ServerFrame::ProtocolError(error)));
+                }
+                _ => {
+                    return Err(ConnectionError::HandshakeViolation(
+                        "expected welcome before application traffic".into(),
+                    ));
+                }
+            };
             phase = phase.welcome_received()?.begin_reconciliation()?;
 
             let reconciliation = receive_frame(
@@ -314,32 +341,63 @@ impl ConnectionSupervisor {
                 "reconciliation",
             )
             .await?;
-            if matches!(reconciliation, ServerFrame::ProtocolError(_)) {
-                return Err(protocol_failure(reconciliation));
-            }
-            if !matches!(reconciliation, ServerFrame::Reconcile(_)) {
-                return Err(ConnectionError::HandshakeViolation(
-                    "expected reconcile before application traffic".into(),
-                ));
-            }
+            let reconciliation = match reconciliation {
+                ServerFrame::Reconcile(reconciliation) => reconciliation,
+                ServerFrame::ProtocolError(error) => {
+                    return Err(protocol_failure(ServerFrame::ProtocolError(error)));
+                }
+                _ => {
+                    return Err(ConnectionError::HandshakeViolation(
+                        "expected reconcile before application traffic".into(),
+                    ));
+                }
+            };
             phase = phase.reconciliation_received()?;
+
+            let (ready, coordination) = oneshot::channel();
+            tokio::time::timeout(
+                self.config.handshake.coordination,
+                inbound.send(ConnectionEvent::HandshakeComplete {
+                    result: HandshakeResult {
+                        welcome,
+                        reconciliation,
+                    },
+                    ready,
+                }),
+            )
+            .await
+            .map_err(|_| ConnectionError::HandshakeTimeout("coordination"))?
+            .map_err(|_| ConnectionError::ChannelClosed("inbound"))?;
+            tokio::time::timeout(self.config.handshake.coordination, coordination)
+                .await
+                .map_err(|_| ConnectionError::HandshakeTimeout("coordination"))?
+                .map_err(|_| ConnectionError::ChannelClosed("coordination"))?;
+            phase = phase.coordination_ready()?;
+            reset_transport_backoff(attempt);
             debug_assert!(phase.allows_application_traffic());
 
             loop {
                 tokio::select! {
                     incoming = incoming_receiver.recv() => match incoming {
-                        Some(Ok(ServerFrame::ProtocolError(error))) => {
+                        Some(ServerFrame::ProtocolError(error)) => {
                             return Err(protocol_failure(ServerFrame::ProtocolError(error)));
                         }
-                        Some(Ok(ServerFrame::Welcome(_))) => {
+                        Some(ServerFrame::Welcome(_)) => {
                             return Err(ConnectionError::HandshakeViolation(
                                 "welcome repeated after Active".into(),
                             ));
                         }
-                        Some(Ok(frame)) => {
-                            inbound.send(frame).await.map_err(|_| ConnectionError::ChannelClosed("inbound"))?;
+                        Some(ServerFrame::Reconcile(_)) => {
+                            return Err(ConnectionError::HandshakeViolation(
+                                "reconciliation repeated after Active".into(),
+                            ));
                         }
-                        Some(Err(error)) => return Err(error),
+                        Some(frame) => {
+                            inbound
+                                .send(ConnectionEvent::Frame(frame))
+                                .await
+                                .map_err(|_| ConnectionError::ChannelClosed("inbound"))?;
+                        }
                         None => return Err(ConnectionError::PeerClosed),
                     },
                     frame = next_outbound(&outbound), if phase.allows_application_traffic() => match frame {
@@ -376,31 +434,25 @@ async fn next_outbound(outbound: &SharedOutbound) -> Option<DaemonFrame> {
 }
 
 async fn receive_frame(
-    incoming: &mut mpsc::Receiver<Result<ServerFrame, ConnectionError>>,
+    incoming: &mut mpsc::Receiver<ServerFrame>,
     duration: Duration,
     stage: &'static str,
 ) -> Result<ServerFrame, ConnectionError> {
     tokio::time::timeout(duration, incoming.recv())
         .await
         .map_err(|_| ConnectionError::HandshakeTimeout(stage))?
-        .ok_or(ConnectionError::PeerClosed)?
+        .ok_or(ConnectionError::PeerClosed)
 }
 
 fn protocol_failure(frame: ServerFrame) -> ConnectionError {
-    let ServerFrame::ProtocolError(ProtocolErrorFrame {
-        code,
-        message,
-        fatal,
-        ..
-    }) = frame
-    else {
+    let ServerFrame::ProtocolError(ProtocolErrorFrame { code, message, .. }) = frame else {
         return ConnectionError::HandshakeViolation("expected protocol error frame".into());
     };
-    ConnectionError::TerminalProtocol {
-        code,
-        message,
-        fatal,
-    }
+    ConnectionError::TerminalProtocol { code, message }
+}
+
+fn reset_transport_backoff(attempt: &mut u32) {
+    *attempt = 0;
 }
 
 async fn write_loop<W>(
@@ -440,7 +492,7 @@ where
 
 async fn read_loop<R, E>(
     mut reader: R,
-    incoming: mpsc::Sender<Result<ServerFrame, ConnectionError>>,
+    incoming: mpsc::Sender<ServerFrame>,
     controls: mpsc::Sender<Message>,
 ) -> Result<(), ConnectionError>
 where
@@ -448,54 +500,32 @@ where
     E: fmt::Display,
 {
     while let Some(message) = reader.next().await {
-        let message = match message {
-            Ok(message) => message,
-            Err(error) => {
-                let _ = incoming
-                    .send(Err(ConnectionError::Socket(error.to_string())))
-                    .await;
-                return Ok(());
-            }
-        };
+        let message = message.map_err(|error| ConnectionError::Socket(error.to_string()))?;
         match message {
             Message::Text(text) => {
-                let frame = match decode_server_frame(text.as_ref()) {
-                    Ok(frame) => frame,
-                    Err(error) => {
-                        let _ = incoming.send(Err(ConnectionError::Protocol(error))).await;
-                        return Ok(());
-                    }
-                };
-                if incoming.send(Ok(frame)).await.is_err() {
-                    return Err(ConnectionError::ChannelClosed("incoming"));
-                }
+                let frame =
+                    decode_server_frame(text.as_ref()).map_err(ConnectionError::Protocol)?;
+                incoming
+                    .send(frame)
+                    .await
+                    .map_err(|_| ConnectionError::ChannelClosed("incoming"))?;
             }
-            Message::Binary(_) => {
-                let _ = incoming.send(Err(ConnectionError::BinaryFrame)).await;
-                return Ok(());
-            }
+            Message::Binary(_) => return Err(ConnectionError::BinaryFrame),
             Message::Ping(payload) => {
                 if controls.send(Message::Pong(payload)).await.is_err() {
                     return Err(ConnectionError::PeerClosed);
                 }
             }
             Message::Pong(_) => {}
-            Message::Close(_) => {
-                let _ = incoming.send(Err(ConnectionError::PeerClosed)).await;
-                return Ok(());
-            }
+            Message::Close(_) => return Err(ConnectionError::PeerClosed),
             Message::Frame(_) => {
-                let _ = incoming
-                    .send(Err(ConnectionError::Socket(
-                        "unexpected raw WebSocket frame".into(),
-                    )))
-                    .await;
-                return Ok(());
+                return Err(ConnectionError::Socket(
+                    "unexpected raw WebSocket frame".into(),
+                ));
             }
         }
     }
-    let _ = incoming.send(Err(ConnectionError::PeerClosed)).await;
-    Ok(())
+    Err(ConnectionError::PeerClosed)
 }
 
 pub fn encode_daemon_message(frame: &DaemonFrame) -> Result<Message, ConnectionError> {
@@ -531,6 +561,7 @@ mod tests {
         assert!(!ConnectionPhase::AwaitingWelcome.allows_application_traffic());
         assert!(!ConnectionPhase::Authenticated.allows_application_traffic());
         assert!(!ConnectionPhase::Reconciling.allows_application_traffic());
+        assert!(!ConnectionPhase::ReconciliationReceived.allows_application_traffic());
         assert!(ConnectionPhase::Active.allows_application_traffic());
     }
 
@@ -545,7 +576,11 @@ mod tests {
             .unwrap()
             .reconciliation_received()
             .unwrap();
+        assert_eq!(phase, ConnectionPhase::ReconciliationReceived);
+        assert!(!phase.allows_application_traffic());
+        let phase = phase.coordination_ready().unwrap();
         assert_eq!(phase, ConnectionPhase::Active);
+        assert!(phase.allows_application_traffic());
         assert!(ConnectionPhase::Connecting.welcome_received().is_err());
     }
 
@@ -559,12 +594,11 @@ mod tests {
     }
 
     #[test]
-    fn fatal_protocol_error_is_terminal() {
+    fn protocol_error_is_terminal() {
         let error = protocol_failure(ServerFrame::ProtocolError(ProtocolErrorFrame {
             schema_version: SCHEMA_VERSION,
             code: "credential_revoked".into(),
             message: "daemon credential revoked".into(),
-            fatal: true,
         }));
         assert_eq!(error.failure_class(), FailureClass::Terminal);
     }
@@ -578,6 +612,21 @@ mod tests {
         assert_eq!(backoff.delay(0), Duration::from_secs(1));
         assert_eq!(backoff.delay(3), Duration::from_secs(5));
         assert_eq!(backoff.delay(20), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn healthy_connection_resets_transport_backoff() {
+        let mut attempt = 7;
+        let phase = ConnectionPhase::ReconciliationReceived
+            .coordination_ready()
+            .expect("coordination can activate after reconciliation");
+        assert!(phase.allows_application_traffic());
+        reset_transport_backoff(&mut attempt);
+        assert_eq!(attempt, 0);
+        assert_eq!(
+            ReconnectBackoff::default().delay(attempt),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]
@@ -595,7 +644,6 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             code: "unsupported_version".into(),
             message: "upgrade required".into(),
-            fatal: true,
         });
         let json = server_frame.to_json().expect("protocol JSON");
         let decoded = decode_server_message(Message::Text(json.into()))

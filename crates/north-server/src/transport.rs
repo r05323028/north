@@ -2,9 +2,10 @@
 //!
 //! This module owns HTTP upgrade, WebSocket frames, ping/pong, close handling,
 //! size limits, and the single transport writer. It does not authenticate
-//! credentials or mutate business state; the connection coordinator receives
-//! the first `DaemonFrame::Hello` and performs daemon authentication,
-//! registration, and reconciliation.
+//! credentials or mutate business state; the adapter reads the first
+//! `DaemonFrame::Hello` before bounded coordinator admission, then the
+//! connection coordinator performs daemon authentication, registration, and
+//! reconciliation.
 
 use axum::{
     extract::{
@@ -16,8 +17,8 @@ use axum::{
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use north_protocol::{DaemonFrame, FrameError, ServerFrame};
-use std::{error::Error, fmt, time::Duration};
+use north_protocol::{DaemonFrame, FrameError, ProtocolErrorFrame, ServerFrame, SCHEMA_VERSION};
+use std::{error::Error, fmt, future::Future, time::Duration};
 use tokio::sync::mpsc;
 
 pub const MAX_MESSAGE_SIZE: usize = 8 * 1024 * 1024;
@@ -30,6 +31,8 @@ pub const CONNECTION_QUEUE_CAPACITY: usize = 64;
 pub struct HandshakeTimeouts {
     /// Time allowed for the first application `hello` after upgrade.
     pub hello: Duration,
+    /// Time allowed for the coordinator to admit a hello-bearing connection.
+    pub admission: Duration,
     /// Reserved for the server coordinator's auth result.
     pub welcome: Duration,
     /// Reserved for the server coordinator's reconciliation result.
@@ -40,6 +43,7 @@ impl Default for HandshakeTimeouts {
     fn default() -> Self {
         Self {
             hello: Duration::from_secs(5),
+            admission: Duration::from_secs(5),
             welcome: Duration::from_secs(10),
             reconcile: Duration::from_secs(10),
         }
@@ -125,8 +129,8 @@ pub fn daemon_router(state: DaemonTransportState) -> Router {
         .with_state(state)
 }
 
-/// Thin Axum upgrade handler. Credential authentication and business routing
-/// happen after the upgrade in the protocol/session coordinator.
+/// Thin Axum upgrade handler. The adapter starts the hello timeout immediately
+/// after upgrade, then admits the hello-bearing connection with its own bound.
 pub async fn daemon_websocket_handler(
     State(state): State<DaemonTransportState>,
     ws: WebSocketUpgrade,
@@ -137,87 +141,157 @@ pub async fn daemon_websocket_handler(
         .on_upgrade(move |socket| async move {
             let (inbound_sender, inbound) = mpsc::channel(INBOUND_QUEUE_CAPACITY);
             let (outbound, outbound_receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
-            let connection = DaemonConnection { inbound, outbound };
-            if state.connections.send(connection).await.is_err() {
-                return;
-            }
-            let _ = serve_websocket(
+            let admission = async move {
+                state
+                    .connections
+                    .send(DaemonConnection { inbound, outbound })
+                    .await
+                    .map_err(|_| TransportError::ChannelClosed)
+            };
+            let _ = serve_websocket_with_admission(
                 socket,
                 inbound_sender,
                 outbound_receiver,
                 handshake_timeouts,
+                admission,
             )
             .await;
         })
 }
 
-/// Runs one upgraded connection. The first application frame is bounded by the
-/// hello timeout; Axum owns WebSocket control behavior and this adapter maps
-/// text messages to/from North frames through bounded channels.
+/// Runs one upgraded connection without coordinator admission. Tests and
+/// embedders use this thin adapter entry point; the endpoint uses the bounded
+/// admission variant below.
 pub async fn serve_websocket(
     socket: WebSocket,
     inbound: mpsc::Sender<DaemonFrame>,
     outbound: mpsc::Receiver<ServerFrame>,
     handshake_timeouts: HandshakeTimeouts,
 ) -> Result<(), TransportError> {
-    let (mut writer, mut reader) = socket.split();
+    serve_websocket_with_admission(
+        socket,
+        inbound,
+        outbound,
+        handshake_timeouts,
+        std::future::ready(Ok::<(), TransportError>(())),
+    )
+    .await
+}
 
-    let mut reader_task = tokio::spawn(async move {
-        let hello = tokio::time::timeout(handshake_timeouts.hello, async {
-            loop {
-                let message = reader.next().await.ok_or(TransportError::PeerClosed)?;
-                let message = message.map_err(|error| TransportError::Socket(error.to_string()))?;
-                if let Some(frame) = decode_daemon_message(message)? {
-                    return Ok::<DaemonFrame, TransportError>(frame);
+async fn serve_websocket_with_admission<F>(
+    socket: WebSocket,
+    inbound: mpsc::Sender<DaemonFrame>,
+    mut outbound: mpsc::Receiver<ServerFrame>,
+    handshake_timeouts: HandshakeTimeouts,
+    admission: F,
+) -> Result<(), TransportError>
+where
+    F: Future<Output = Result<(), TransportError>>,
+{
+    let (mut writer, mut reader) = socket.split();
+    let hello = match tokio::time::timeout(handshake_timeouts.hello, async {
+        loop {
+            let message = reader.next().await.ok_or(TransportError::PeerClosed)?;
+            let message = message.map_err(|error| TransportError::Socket(error.to_string()))?;
+            match message {
+                Message::Ping(payload) => {
+                    writer
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|error| TransportError::Socket(error.to_string()))?;
+                }
+                Message::Pong(_) => {}
+                message => {
+                    if let Some(frame) = decode_daemon_message(message)? {
+                        break Ok::<DaemonFrame, TransportError>(frame);
+                    }
                 }
             }
-        })
+        }
+    })
+    .await
+    {
+        Err(_) => return Err(TransportError::HandshakeTimeout("hello")),
+        Ok(Ok(frame)) => frame,
+        Ok(Err(error)) => {
+            if let Some(frame) = protocol_error_frame(&error) {
+                let _ = writer.send(encode_server_message(&frame)?).await;
+            }
+            return Err(error);
+        }
+    };
+
+    if !matches!(hello, DaemonFrame::Hello(_)) {
+        let error = TransportError::ExpectedHello;
+        if let Some(frame) = protocol_error_frame(&error) {
+            let _ = writer.send(encode_server_message(&frame)?).await;
+        }
+        return Err(error);
+    }
+    inbound
+        .send(hello)
         .await
-        .map_err(|_| TransportError::HandshakeTimeout("hello"))??;
+        .map_err(|_| TransportError::ChannelClosed)?;
 
-        if !matches!(hello, DaemonFrame::Hello(_)) {
-            return Err(TransportError::ExpectedHello);
-        }
-        inbound
-            .send(hello)
-            .await
-            .map_err(|_| TransportError::ChannelClosed)?;
+    tokio::time::timeout(handshake_timeouts.admission, admission)
+        .await
+        .map_err(|_| TransportError::HandshakeTimeout("coordinator admission"))??;
 
-        while let Some(message) = reader.next().await {
-            let message = message.map_err(|error| TransportError::Socket(error.to_string()))?;
-            let Some(frame) = decode_daemon_message(message)? else {
-                continue;
-            };
-            inbound
-                .send(frame)
-                .await
-                .map_err(|_| TransportError::ChannelClosed)?;
-        }
-        Err(TransportError::PeerClosed)
-    });
-
-    let mut writer_task = tokio::spawn(async move {
-        let mut outbound = outbound;
-        while let Some(frame) = outbound.recv().await {
-            let message = encode_server_message(&frame)?;
-            writer
-                .send(message)
-                .await
-                .map_err(|error| TransportError::Socket(error.to_string()))?;
-        }
-        Ok::<(), TransportError>(())
-    });
-
-    tokio::select! {
-        result = &mut reader_task => {
-            writer_task.abort();
-            result.map_err(|error| TransportError::Task(error.to_string()))?
-        }
-        result = &mut writer_task => {
-            reader_task.abort();
-            result.map_err(|error| TransportError::Task(error.to_string()))?
+    loop {
+        tokio::select! {
+            message = reader.next() => {
+                let message = message.ok_or(TransportError::PeerClosed)?;
+                let message = message.map_err(|error| TransportError::Socket(error.to_string()))?;
+                match message {
+                    Message::Ping(payload) => writer
+                        .send(Message::Pong(payload))
+                        .await
+                        .map_err(|error| TransportError::Socket(error.to_string()))?,
+                    Message::Pong(_) => {}
+                    message => {
+                        let frame = match decode_daemon_message(message) {
+                            Ok(Some(frame)) => frame,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                if let Some(frame) = protocol_error_frame(&error) {
+                                    writer
+                                        .send(encode_server_message(&frame)?)
+                                        .await
+                                        .map_err(|error| TransportError::Socket(error.to_string()))?;
+                                }
+                                return Err(error);
+                            }
+                        };
+                        inbound
+                            .send(frame)
+                            .await
+                            .map_err(|_| TransportError::ChannelClosed)?;
+                    }
+                }
+            }
+            frame = outbound.recv() => match frame {
+                Some(frame) => writer
+                    .send(encode_server_message(&frame)?)
+                    .await
+                    .map_err(|error| TransportError::Socket(error.to_string()))?,
+                None => return Ok(()),
+            },
         }
     }
+}
+
+fn protocol_error_frame(error: &TransportError) -> Option<ServerFrame> {
+    let code = match error {
+        TransportError::Protocol(_) => "invalid_frame",
+        TransportError::BinaryFrame => "binary_frame",
+        TransportError::ExpectedHello => "expected_hello",
+        _ => return None,
+    };
+    Some(ServerFrame::ProtocolError(ProtocolErrorFrame {
+        schema_version: SCHEMA_VERSION,
+        code: code.into(),
+        message: error.to_string(),
+    }))
 }
 
 pub fn encode_server_message(frame: &ServerFrame) -> Result<Message, TransportError> {
@@ -233,7 +307,7 @@ pub fn decode_daemon_message(message: Message) -> Result<Option<DaemonFrame>, Tr
             .map_err(TransportError::Protocol),
         Message::Binary(_) => Err(TransportError::BinaryFrame),
         Message::Ping(_) | Message::Pong(_) => Ok(None),
-        Message::Close(_) => Ok(None),
+        Message::Close(_) => Err(TransportError::PeerClosed),
     }
 }
 
@@ -248,7 +322,6 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             code: "test".into(),
             message: "no side effect".into(),
-            fatal: true,
         });
         let Message::Text(text) = encode_server_message(&frame).expect("encode") else {
             panic!("North transport must use text frames");
@@ -279,7 +352,8 @@ mod tests {
     #[test]
     fn handshake_timeouts_have_explicit_stages() {
         let timeouts = HandshakeTimeouts::default();
-        assert!(timeouts.hello < timeouts.welcome);
+        assert!(!timeouts.hello.is_zero());
+        assert!(!timeouts.admission.is_zero());
         assert_eq!(timeouts.welcome, timeouts.reconcile);
     }
 }

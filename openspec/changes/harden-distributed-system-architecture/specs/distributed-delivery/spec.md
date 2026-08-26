@@ -8,12 +8,12 @@ Defines reconnect-safe server-to-daemon command delivery and daemon-to-server ev
 
 Every server command SHALL carry a stable `command_id`, `session_id`, and
 monotonic `server_command_seq`. The server SHALL durably persist a command
-before dispatching it and SHALL retain it until a daemon `command_ack(status=accepted)`
+before dispatching it and SHALL retain it until a daemon `command_ack`
 acknowledges durable receipt. Delivery SHALL be at least once. The daemon SHALL
 persist an inbox/processed-command record keyed by daemon identity and
-`command_id` before sending `command_ack(status=accepted)`.
+`command_id` before sending `command_ack`.
 
-`command_ack(status=accepted)` means the command is durably recorded for processing; it
+`command_ack` means the command is durably recorded for processing; it
 MUST NOT be interpreted as runtime completion. Runtime completion and failure
 remain facts/events handled by server execution policy. A duplicate command
 MUST return the same acceptance outcome and MUST NOT invoke the runtime again
@@ -52,9 +52,10 @@ For each session, server command sequences and daemon event sequences SHALL be
 independent, monotonic, and persisted before transmission. The daemon SHALL
 replay buffered events in `daemon_event_seq` order. The server SHALL process
 events in contiguous order, buffer or request replay for a gap, and commit
-business effects before acknowledging the event sequence. Reconciliation ACKs
-SHALL carry `ack_through_seq` and MAY carry sparse acknowledged sequences when
-processing is non-contiguous.
+business effects before acknowledging the event sequence. Each
+`SessionReconcileState` in the connection-level snapshot SHALL carry command and
+event contiguous watermarks and MAY carry sparse acknowledged event sequences
+when processing is non-contiguous.
 
 An id identifies one delivery for idempotency; a sequence orders deliveries
 and detects gaps. A duplicate with the same id and sequence SHALL be harmless
@@ -73,6 +74,25 @@ NOT be applied to business state until its gap is reconciled.
 - **WHEN** an already committed event or command is delivered again, including after reconnect
 - **THEN** North returns the applicable acknowledgement and performs no second durable effect or runtime invocation
 
+### Requirement: Reconciliation is a connection-level snapshot
+
+The server SHALL send one finite `ReconcileSnapshot` per authenticated daemon
+connection. The snapshot MAY contain zero sessions or SHALL contain one unique
+`SessionReconcileState` for each session pinned to that daemon. Each state SHALL
+carry command/event contiguous ACK watermarks and sparse event ACKs. The wire
+contract SHALL reject empty session IDs, sparse values at or below the event
+watermark, and duplicate session IDs.
+
+#### Scenario: Empty reconciliation is explicit
+
+- **WHEN** a daemon has no sessions pinned to it
+- **THEN** the server sends one snapshot with an empty session list
+
+#### Scenario: One connection reconciles multiple sessions
+
+- **WHEN** a daemon has multiple pinned sessions
+- **THEN** one snapshot carries distinct state for every pinned session
+
 ### Requirement: Compatible peers and unknown frames fail deterministically
 
 Daemon hello/registration and the server welcome SHALL carry exact
@@ -81,8 +101,10 @@ Daemon hello/registration and the server welcome SHALL carry exact
 `protocol.error` with an incompatibility code and the connection SHALL close
 before session traffic. An unknown command/event type or unsupported schema
 version on an otherwise compatible connection SHALL receive an explicit
-`protocol.error`, SHALL have no side effect, and SHALL close that connection;
-unacknowledged durable messages remain eligible for reconciliation after an
+`protocol.error`, SHALL have no side effect, and SHALL close that connection. A
+`protocol.error` has no severity discriminator and is terminal to the current
+connection; the host decides whether a future connection may be attempted.
+Unacknowledged durable messages remain eligible for reconciliation after an
 upgrade. North 0.1.x SHALL not negotiate plugin ranges or silently reinterpret
 unknown payloads.
 

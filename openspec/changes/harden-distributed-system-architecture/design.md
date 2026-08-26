@@ -56,7 +56,7 @@ again after reconnect; it never allocates a new id for a retry.
 
 The daemon keeps a local append-only transport journal for command inbox and
 event replay records. A journal append is flushed before the daemon sends
-`command_ack(status=accepted)`. This is transport durability, not a business database.
+`command_ack`. This is transport durability, not a business database.
 The command ledger records `accepted`, `dispatch_started`, and terminal outcome
 states. A unique command id makes duplicate frames return the existing
 acceptance/outcome. The daemon writes `dispatch_started` before invoking the
@@ -67,7 +67,7 @@ reconciled, the daemon reports an explicit unknown outcome and the server's
 policy handles it; side-effecting `message.send` is not automatically resent
 under a new id.
 
-`command_ack(status=accepted)` is the only command delivery ACK in 0.1.0. It means durable
+`command_ack` is the only command delivery ACK in 0.1.0. It means durable
 inbox acceptance, not runtime completion. Runtime completion/failure remains
 represented by session/event facts and server execution state. Thus the server
 may remove the command payload from its active outbox after accepted ACK while
@@ -92,13 +92,15 @@ safe.
 
 `server_command_seq` and `daemon_event_seq` are independent counters scoped to
 one session and direction. The assigning side persists the next value with the
-outbox/journal record. Reconciliation exchanges contiguous watermarks and
-sparse sequence sets where processing is non-contiguous. A receiver buffers a
-valid out-of-order frame but does not apply it until missing sequence values
-arrive. Same id plus same sequence is a duplicate; same sequence plus another
-id is a protocol error; an already acknowledged late frame is inert and
-re-acknowledged. This keeps ids for idempotency and sequences for order/gap
-detection.
+outbox/journal record. Reconciliation is one finite connection-level
+`ReconcileSnapshot` containing zero or more unique `SessionReconcileState`
+entries, one for each pinned session. Each entry carries command/event
+contiguous watermarks and sparse event sequences; sparse values must be above
+their contiguous watermark. A receiver buffers a valid out-of-order frame but
+does not apply it until missing sequence values arrive. Same id plus same
+sequence is a duplicate; same sequence plus another id is a protocol error; an
+already acknowledged late frame is inert and re-acknowledged. This keeps ids
+for idempotency and sequences for order/gap detection.
 
 ### Protocol compatibility
 
@@ -106,8 +108,24 @@ The daemon hello and server welcome carry exact `protocol_version: "0.1"`.
 Frames carry `schema_version: 1`. There is no generalized range negotiation in
 0.1.x. Version mismatch, unknown frame type, or unsupported schema gets an
 explicit `protocol.error` and connection close before side effects; unaccepted
-outbox/journal records remain replayable. This fails closed rather than
-silently guessing a payload shape.
+outbox/journal records remain replayable. `protocol.error` has no severity
+discriminator: every protocol error terminates the current connection, while the
+host decides whether a future connection may be attempted. This fails closed
+rather than silently guessing a payload shape.
+
+### Connection handshake ownership
+
+The daemon transport validates and moves the finite `ReconcileSnapshot`; it
+does not apply command/event watermarks. After receiving `Welcome` and the
+snapshot, it emits a typed `HandshakeResult` to coordination and waits for an
+explicit readiness signal. Only then does it enter `Active` and release queued
+heartbeat, events, ACKs, and replay. Transport ping/pong remains available
+during this wait.
+
+The Axum upgrade adapter starts the hello timeout immediately after upgrade. It
+reads and queues the first hello before attempting coordinator admission, then
+applies a separate admission timeout so a full coordinator queue cannot leave
+an upgraded socket outside all handshake bounds.
 
 ### Requirement concurrency and assessment commit
 
@@ -168,9 +186,11 @@ The transport slice keeps `north-protocol` as pure JSON DTOs. Server-owned
 excerpt, and enabled repository metadata; typed readiness evidence crosses back
 as explicit wire fields. `session.resume` is execution recovery only; replay
 cursors stay in reconciliation. Daemon handshake phases gate normal traffic,
-and fatal protocol/auth failures stop reconnect while socket interruption uses
-transport backoff. These mechanics do not change server-owned outbox, journal,
-ordering, pinning, expected-revision, retry, or SSE canonical-refetch contracts.
+and protocol/auth failures stop reconnect while socket interruption uses
+transport backoff. A connection that reaches Active resets transport backoff
+before any later retry. These mechanics do not change server-owned outbox,
+journal, ordering, pinning, expected-revision, retry, or SSE canonical-refetch
+contracts.
 
 ### SSE reconnect
 

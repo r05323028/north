@@ -9,7 +9,7 @@
 //! are explicit enum variants rather than transport-specific messages.
 
 use serde::{Deserialize, Serialize};
-use std::{error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt};
 
 pub const PROTOCOL_VERSION: &str = "0.1";
 pub const SCHEMA_VERSION: u16 = 1;
@@ -485,17 +485,15 @@ impl EventAck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReconcileState {
-    pub schema_version: u16,
+pub struct SessionReconcileState {
     pub session_id: String,
     pub command_ack_through_seq: u64,
     pub event_ack_through_seq: u64,
     pub event_ack_sparse: Vec<u64>,
 }
 
-impl ReconcileState {
+impl SessionReconcileState {
     fn validate(&self) -> Result<(), FrameError> {
-        schema(self.schema_version)?;
         non_empty("session_id", &self.session_id)?;
         if self
             .event_ack_sparse
@@ -511,11 +509,32 @@ impl ReconcileState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconcileSnapshot {
+    pub schema_version: u16,
+    pub sessions: Vec<SessionReconcileState>,
+}
+
+impl ReconcileSnapshot {
+    fn validate(&self) -> Result<(), FrameError> {
+        schema(self.schema_version)?;
+        let mut session_ids = HashSet::with_capacity(self.sessions.len());
+        for session in &self.sessions {
+            session.validate()?;
+            if !session_ids.insert(&session.session_id) {
+                return Err(FrameError::Validation(
+                    "reconciliation snapshot contains duplicate session_id".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolErrorFrame {
     pub schema_version: u16,
     pub code: String,
     pub message: String,
-    pub fatal: bool,
 }
 
 impl ProtocolErrorFrame {
@@ -538,7 +557,7 @@ pub enum ServerFrame {
     #[serde(rename = "event_ack")]
     EventAck(EventAck),
     #[serde(rename = "reconcile")]
-    Reconcile(ReconcileState),
+    Reconcile(ReconcileSnapshot),
     #[serde(rename = "protocol_error")]
     ProtocolError(ProtocolErrorFrame),
 }
@@ -727,18 +746,27 @@ mod tests {
                 status: EventAckStatus::Accepted,
                 reason: None,
             }),
-            ServerFrame::Reconcile(ReconcileState {
+            ServerFrame::Reconcile(ReconcileSnapshot {
                 schema_version: SCHEMA_VERSION,
-                session_id: "session-1".into(),
-                command_ack_through_seq: 1,
-                event_ack_through_seq: 1,
-                event_ack_sparse: vec![3],
+                sessions: vec![
+                    SessionReconcileState {
+                        session_id: "session-1".into(),
+                        command_ack_through_seq: 1,
+                        event_ack_through_seq: 1,
+                        event_ack_sparse: vec![3],
+                    },
+                    SessionReconcileState {
+                        session_id: "session-2".into(),
+                        command_ack_through_seq: 2,
+                        event_ack_through_seq: 4,
+                        event_ack_sparse: vec![6],
+                    },
+                ],
             }),
             ServerFrame::ProtocolError(ProtocolErrorFrame {
                 schema_version: SCHEMA_VERSION,
                 code: "unsupported_version".into(),
                 message: "peer is too old".into(),
-                fatal: true,
             }),
         ];
         for frame in server_frames {
@@ -766,6 +794,69 @@ mod tests {
             let json = frame.to_json().expect("valid daemon frame");
             assert_eq!(DaemonFrame::from_json(&json).expect("round trip"), frame);
         }
+    }
+
+    #[test]
+    fn reconciliation_snapshot_round_trips_and_validates_entries() {
+        let snapshot = ReconcileSnapshot {
+            schema_version: SCHEMA_VERSION,
+            sessions: vec![SessionReconcileState {
+                session_id: "session-1".into(),
+                command_ack_through_seq: 2,
+                event_ack_through_seq: 3,
+                event_ack_sparse: vec![5],
+            }],
+        };
+        let frame = ServerFrame::Reconcile(snapshot.clone());
+        let json = frame.to_json().expect("snapshot is valid");
+        assert_eq!(ServerFrame::from_json(&json).expect("round trip"), frame);
+
+        let empty = ServerFrame::Reconcile(ReconcileSnapshot {
+            schema_version: SCHEMA_VERSION,
+            sessions: vec![],
+        });
+        assert!(empty.to_json().is_ok());
+
+        let duplicate = ServerFrame::Reconcile(ReconcileSnapshot {
+            schema_version: SCHEMA_VERSION,
+            sessions: vec![
+                SessionReconcileState {
+                    session_id: "session-1".into(),
+                    command_ack_through_seq: 1,
+                    event_ack_through_seq: 1,
+                    event_ack_sparse: vec![],
+                },
+                SessionReconcileState {
+                    session_id: "session-1".into(),
+                    command_ack_through_seq: 2,
+                    event_ack_through_seq: 2,
+                    event_ack_sparse: vec![],
+                },
+            ],
+        });
+        assert!(duplicate.to_json().is_err());
+
+        let sparse_below_watermark = ServerFrame::Reconcile(ReconcileSnapshot {
+            schema_version: SCHEMA_VERSION,
+            sessions: vec![SessionReconcileState {
+                session_id: "session-1".into(),
+                command_ack_through_seq: 1,
+                event_ack_through_seq: 3,
+                event_ack_sparse: vec![3],
+            }],
+        });
+        assert!(sparse_below_watermark.to_json().is_err());
+
+        let empty_session_id = ServerFrame::Reconcile(ReconcileSnapshot {
+            schema_version: SCHEMA_VERSION,
+            sessions: vec![SessionReconcileState {
+                session_id: String::new(),
+                command_ack_through_seq: 1,
+                event_ack_through_seq: 1,
+                event_ack_sparse: vec![],
+            }],
+        });
+        assert!(empty_session_id.to_json().is_err());
     }
 
     #[test]
@@ -828,7 +919,6 @@ mod tests {
         .expect("event ACK");
         assert!(event_ack.contains("event_ack"));
         assert!(event_ack.contains("accepted"));
-        assert!(!event_ack.contains("event_ack(status=accepted)"));
 
         let command_ack = DaemonFrame::CommandAck(CommandAck {
             command_id: "command-1".into(),
@@ -839,7 +929,22 @@ mod tests {
         .to_json()
         .expect("command ACK");
         assert!(command_ack.contains("command_ack"));
-        assert!(!command_ack.contains("command_ack(status=accepted)"));
+        assert!(!command_ack.contains("\"status\""));
+    }
+
+    #[test]
+    fn protocol_error_has_no_severity_field() {
+        let frame = ServerFrame::ProtocolError(ProtocolErrorFrame {
+            schema_version: SCHEMA_VERSION,
+            code: "unsupported_version".into(),
+            message: "close connection".into(),
+        });
+        let json = frame.to_json().expect("protocol error");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("protocol error JSON");
+        assert_eq!(
+            value["payload"].as_object().expect("payload object").len(),
+            3
+        );
     }
 
     #[test]

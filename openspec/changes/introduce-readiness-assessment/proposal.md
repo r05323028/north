@@ -11,8 +11,9 @@ dedicated assessment concept, Ready decays into vibes.
 - The wire `RequirementAssessed` records requirement_revision, typed verdict,
   blockers[], assumptions[], repositories_reviewed[] (non-empty repository_id
   - commit SHA), and assessed_at is applied by the server/domain conversion.
-  Canonical outcomes use `event_ack(status=accepted|rejected)`; no opaque
-  assessment JSON or event-name ACK aliases.
+  Canonical outcomes use `event_ack(status=accepted)` or
+  `event_ack(status=rejected)`; no opaque assessment JSON or event-name ACK
+  aliases.
 - Agent verdicts arrive as `requirement.assessed` events; the server validates
   all hard gates through the domain (`mark_ready`) before any transition —
   Discussing→Ready becomes reachable for the first time.

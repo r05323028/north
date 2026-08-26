@@ -1,7 +1,7 @@
 ## 1. Types
 
 - [x] 1.1 Add envelope fields and direction-specific frame enums with `command_id`/`event_id`, `session_id`, directional sequence, `schema_version`, and exact `protocol_version` hello/welcome. JSON codec validates the pure wire values.
-- [x] 1.2 Add `command_ack(status=accepted)`, event ACK accepted/rejected status, reconciliation watermark, and `protocol.error` frames; round-trip serialization tests cover every frame family.
+- [x] 1.2 Add `command_ack`, event ACK accepted/rejected status, reconciliation watermark, and `protocol.error` frames; round-trip serialization tests cover every frame family.
 
 ## 2. Durable delivery semantics
 
@@ -14,7 +14,7 @@
 ## 3. Boundaries and validation
 
 - [x] 3.1 Architecture tests confirm protocol purity and no new server↔daemon crate edge after adding dependencies.
-- [ ] 3.2 Run `./scripts/validate.sh fast` and `openspec validate --all --strict` after protocol integration tests pass.
+- [x] 3.2 Run `./scripts/validate.sh fast` and `openspec validate --all --strict` after protocol integration tests pass.
 
 ## 4. Transport standardization slice
 
@@ -29,3 +29,12 @@
 - [x] 5.2 Replace opaque assessment text with typed readiness evidence and structural validation tests; keep domain conversion outside `north-protocol`.
 - [x] 5.3 Make `session.resume` execution-only and standardize all ACK terminology as `command_ack` plus `event_ack(status=...)`.
 - [x] 5.4 Add explicit daemon handshake phases, stage timeouts, terminal-vs-retryable failure classification, and pure-crate dependency allowlists.
+
+## 6. Review hardening
+
+- [x] 6.1 Model reconciliation as one validated connection-level snapshot supporting zero or multiple pinned sessions.
+- [x] 6.2 Deliver welcome and reconciliation to coordination, gate `Active` on coordination readiness, and reset transport backoff after healthy activation.
+- [x] 6.3 Bound post-upgrade hello and coordinator admission deadlines in the Axum adapter.
+- [x] 6.4 Remove protocol-error severity state and define every `protocol.error` as terminal to the current connection.
+- [x] 6.5 Add real Axum↔tokio-tungstenite integration tests for empty/multi-session snapshots, gating, protocol failure, and admission backpressure.
+- [x] 6.6 Align architecture/docs/OpenSpec contracts and retain durable outbox/journal/session coordination as pending work.

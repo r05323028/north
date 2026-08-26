@@ -17,16 +17,20 @@ business effects.
   Axum WebSocket; the daemon transport adapter is `tokio-tungstenite`. Neither
   transport library is part of the North application wire contract.
 - Transport adapters own upgrade/framing/ping/pong/close/socket lifecycle and
-  bounded limits. North coordination, not either WebSocket library, owns
+  bounded limits. The daemon transport exposes welcome plus one finite
+  connection-level reconciliation snapshot to coordination and waits for its
+  readiness signal. North coordination, not either WebSocket library, owns
   durability, idempotency, ordering, replay, acknowledgement, and recovery.
 - Server commands use durable outbox rows and daemon commands use a durable
-  inbox/processed ledger. `command_ack(status=accepted)` means durable daemon receipt, not
+  inbox/processed ledger. `command_ack` means durable daemon receipt, not
   runtime completion; `event_ack(status=accepted)`/`event_ack(status=rejected)` follow server commit.
 - Every direction has an independent monotonic per-session sequence:
-  `server_command_seq` and `daemon_event_seq`. Reconnect reconciliation detects
-  gaps and replays deterministically; ids remain idempotency keys.
+  `server_command_seq` and `daemon_event_seq`. Reconnect reconciliation uses one
+  connection-level snapshot with zero or more per-session states to detect gaps
+  and replay deterministically; ids remain idempotency keys.
 - Hello/welcome negotiate exact protocol `0.1`, frame `schema_version: 1`, and
-  fail closed with `protocol.error` for incompatible or unknown frames.
+  fail closed with a terminal `protocol.error` for incompatible or unknown frames;
+  protocol errors have no severity flag.
 
 Repository preparation events stay out unless later changes prove genuine
 protocol value. Cross-cutting semantics are canonical in
@@ -39,8 +43,8 @@ protocol value. Cross-cutting semantics are canonical in
 checkout paths, persistence handles, and domain types stay out of the wire
 crate. `requirement.assessed` SHALL carry typed readiness verdict/evidence;
 `session.resume` SHALL contain execution recovery only and never a transport
-sequence cursor. The canonical ACK wire names are `command_ack` and
-`event_ack(status = accepted | rejected)`.
+sequence cursor. The canonical ACK wire names are `command_ack`,
+`event_ack(status=accepted)`, and `event_ack(status=rejected)`.
 
 ## Capabilities
 

@@ -8,7 +8,7 @@
 
 - [ ] 2.1 Server WS endpoint: credential/protocol auth, register identity/capabilities, heartbeat updates `last_seen_at`
 - [x] 2.2 Add the single `tokio-tungstenite` connection supervisor with bounded transport backoff; no daemon-owned business retry budget. Runtime/session code has no separate reconnect loop.
-- [x] 2.5 Add explicit Connecting/AwaitingWelcome/Authenticated/Reconciling/Active gating, handshake timeouts, and terminal-vs-retryable connection failure classification.
+- [x] 2.5 Add explicit Connecting/AwaitingWelcome/Authenticated/Reconciling/ReconciliationReceived/Active gating, typed handshake-result delivery, coordination readiness, handshake timeouts, terminal protocol failure classification, and transport backoff reset.
 - [ ] 2.3 Session start selects an eligible daemon, persists `session.daemon_id` with the first command, and rejects frames from other identities
 - [ ] 2.4 Revocation drops live connections, refuses new ones, and leaves pinned sessions to server retry/failure without migration
 
@@ -19,4 +19,4 @@
 ## 4. Validation
 
 - [ ] 4.1 Integration: connect/auth/register/heartbeat/revoke, owner/admin permissions, pinned routing, reconnect, and no-migration paths
-- [ ] 4.2 Full Rust gate + `openspec validate --all --strict`
+- [x] 4.2 Full Rust gate + `openspec validate --all --strict`
