@@ -50,13 +50,15 @@ Socket.IO or native-tls stack is introduced.
 
 ## Responsibilities
 
-The connection and transport responsibilities below are current. Durable command/event
-journal, command acceptance, runtime idempotency, event replay, and recovery bullets
-describe the target durable-delivery contract; those mechanisms remain pending.
+Connection-supervisor and WebSocket responsibilities below are current where stated.
+Durable delivery, daemon registration/authentication, and repository-inspection bullets
+describe their target contracts unless explicitly identified as implemented.
 
 - Initiate and maintain the server connection (WebSocket over TLS in deployment).
-- Authenticate one user-owned daemon registration and report identity,
-  capabilities, and heartbeat liveness.
+- The target authentication flow will authenticate one user-owned daemon
+  registration and associate it with the configured daemon identity and
+  capabilities. The current connection separately carries heartbeat-based
+  application liveness.
 - The durable-delivery design will maintain a local durable transport journal:
   command inbox/processed-command ledger and unacknowledged event replay buffer.
   This is not a business database and never grants database access.
@@ -66,8 +68,9 @@ describe the target durable-delivery contract; those mechanisms remain pending.
 - The durable-delivery design will invoke the local runtime once per
   `command_id`, pass that id as its operation id, and reattach after restart when
   possible. It will never re-invoke a `dispatch_started` command automatically.
-- Manage a reusable repository cache plus unique disposable session/task
-  checkouts; report dirty-checkout violations and exact commit SHAs.
+- The repository-inspection design will manage a reusable repository cache plus
+  isolated disposable session/task checkouts, detect dirty-checkout violations,
+  and report exact commit SHAs.
 - The durable-delivery design will convert runtime output into typed facts/events,
   replay them in `daemon_event_seq` order, and report recoverability/failure.
 - Reconnect the WebSocket with local backoff. Once the durable journal exists, it
@@ -94,11 +97,13 @@ Reconnect will resume against the same identity; North 0.1.0 will not perform
 automatic live migration. If the daemon is unavailable, server-owned retry/failure
 policy will retain ownership and handle the pinned session.
 
-Daemon registrations are instance-scoped identities with credentials owned by
-the account recorded in `created_by`. The owner may revoke its own credential;
-Admin/Owner may revoke any. Revocation closes current access and refuses future
-connections; target session-routing policy retains affected ownership and
-follows normal retry/failure handling.
+The target registration model will define daemon registrations as instance-scoped
+identities with credentials owned by the account recorded in `created_by`. The
+credential owner will be able to revoke its own credential, while Admin/Owner will
+be able to revoke any daemon credential. Revocation will close current access,
+refuse future authentication, and the target session-routing policy will keep
+affected sessions pinned for normal retry/failure handling rather than migrate
+them.
 
 ## Failure posture
 
