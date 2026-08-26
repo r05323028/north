@@ -96,7 +96,8 @@ The daemon supervisor delivers `Welcome` plus `ReconcileSnapshot` as one
 replay state and signal readiness under one total coordination-stage timeout.
 Only that signal moves the connection from
 `ReconciliationReceived` to `Active`; ping/pong may operate before then, but
-heartbeat, events, replay, and ACKs cannot race ahead.
+heartbeat, events, and ACKs cannot race ahead; any future replay traffic will
+use the same gate.
 
 ## `session.start` runtime context
 
@@ -116,6 +117,13 @@ builds these DTOs and filters disabled repositories.
 
 ## Envelope and delivery contract
 
+The durable-delivery rules below define the North 0.1 target contract. The wire
+representation and transport boundaries exist today, but the durable server
+command outbox, daemon command/event journals, ACK-after-commit persistence,
+replay, gap reconciliation, and high-watermark compaction remain pending
+implementation. Statements in this section use normative language for that target
+unless they describe current transport behavior explicitly.
+
 Every command/event carries:
 
 - stable `command_id` or `event_id` for idempotency;
@@ -123,37 +131,43 @@ Every command/event carries:
   `daemon_event_seq`) for ordering and gap detection;
 - `sent_at`, `type`, `payload`, and `schema_version`.
 
-The server persists a command outbox row before dispatch. Retries reuse the
-same `command_id` and sequence, and the outbox retains unaccepted commands.
-The daemon persists a local command inbox/processed ledger before sending
-`command_ack`. Duplicate delivery repeats the known ACK and never invokes
-the runtime twice. `message.send` is submitted to the agent at most once for
-one command id, including reconnect and daemon restart recovery.
+The durable-delivery layer will persist a server command outbox row before
+dispatch. Retries will reuse the same `command_id` and sequence, and the outbox
+will retain unaccepted commands. The durable-delivery layer will persist a local
+command inbox/processed ledger before sending `command_ack`. Duplicate delivery
+will repeat the known ACK and never invoke the runtime twice. `message.send` will
+be submitted to the agent at most once for one command id, including reconnect
+and daemon restart recovery.
 
-The daemon journals events before sending them. The server deduplicates event
-ids inside the same transaction as validation/evidence/business state. The
-server ACKs only after commit; unacknowledged daemon events remain buffered and
-are replayed after reconnect.
+The durable-delivery contract requires daemon events to be journaled before
+transmission. The server will deduplicate event ids inside the same transaction
+as validation/evidence/business state. Successful ACKs will follow commit;
+unacknowledged daemon events will remain buffered and will be replayed after
+reconnect.
 
 ## Sequence and reconnect rules
 
 `server_command_seq` and `daemon_event_seq` are independent monotonic counters,
-scoped to one session and direction. They start at 1 and are persisted with
-the outbox/journal record. Each `SessionReconcileState` in the connection-level
-snapshot carries `command_ack_through_seq`, `event_ack_through_seq`, and a
-strictly ascending, unique sparse event sequence list above the event watermark
-when processing is non-contiguous.
+scoped to one session and direction. They start at 1; the durable-delivery layer
+will persist each assigned value with the relevant outbox/journal record. Each
+`SessionReconcileState` in the connection-level snapshot carries
+`command_ack_through_seq`, `event_ack_through_seq`, and a strictly ascending,
+unique sparse event sequence list above the event watermark when processing is
+non-contiguous.
 
 - A duplicate id+sequence is harmless and receives the known ACK again.
 - One sequence with a different id is a protocol error.
-- An out-of-order frame may be durably buffered, but is not applied until the
-  missing sequence is replayed/reconciled.
+- The durable-delivery contract permits an out-of-order frame to be durably
+  buffered, but it will not be applied until the missing sequence is
+  replayed/reconciled.
 - A late frame at or below an acknowledged contiguous sequence is inert.
-- Buffered daemon events replay in ascending `daemon_event_seq`; server command
-  retries retain ascending `server_command_seq`.
-- Processed command rows may be compacted only after terminal session
-  reconciliation proves a contiguous watermark. A durable per-session
-  `processed_through_seq` tombstone remains, so old duplicates stay inert.
+- The durable-delivery layer will replay buffered daemon events in ascending
+  `daemon_event_seq`; server command retries will retain ascending
+  `server_command_seq`.
+- The durable-delivery contract permits processed command rows to be compacted
+  only after terminal session reconciliation proves a contiguous watermark. A
+  durable per-session `processed_through_seq` tombstone will remain, so old
+  duplicates stay inert.
 
 IDs answer “is this the same delivery?” Sequences answer “is this the next
 ordered delivery?” Neither replaces the other.
@@ -166,9 +180,9 @@ or unsupported schema versions receive explicit `protocol.error`, cause no side
 effect, and close the connection. `protocol.error` carries no severity
 discriminator: every protocol error is terminal for this connection, while the
 host decides whether
-an equivalent future connection may be attempted. Unacknowledged outbox/journal
-messages stay eligible for replay; peers do not silently reinterpret unknown
-payloads.
+an equivalent future connection may be attempted. When durable delivery is
+implemented, unacknowledged outbox/journal messages will stay eligible for replay;
+peers will not silently reinterpret unknown payloads.
 
 ## Liveness and error boundaries
 
@@ -190,22 +204,25 @@ contract requires it; no decoder error mutates business state.
 ## Reliability ownership
 
 Axum and tokio-tungstenite do not provide durable messaging. North coordination
-owns stable command/event IDs, monotonic sequences, at-least-once delivery, the
-server command outbox, daemon processed-command dedupe, daemon event buffering,
-ACK-after-commit, reconnect reconciliation, session ownership, retry policy,
-and Requirement transaction semantics.
+is intended to own stable command/event IDs, monotonic sequences, at-least-once
+delivery, the server command outbox, daemon processed-command dedupe, daemon
+event buffering, ACK-after-commit, reconnect reconciliation, session ownership,
+retry policy, and Requirement transaction semantics. The current implementation
+provides the wire and transport boundaries plus structural validation; it does
+not yet provide those durable-delivery mechanisms.
 
 ## Session routing and state ownership
 
-The server selects a connected eligible daemon and persists `session.daemon_id`
-before the first command. Commands/events for a session are accepted only from
-that daemon. Reconnect resumes against the same identity; North 0.1.0 performs
-no live migration. If the daemon is unavailable, server retry/failure policy
-handles the pinned session.
+The target session-routing flow selects a connected eligible daemon and will
+persist `session.daemon_id` before the first command. Commands/events for a
+session will be accepted only from that daemon. Reconnect will resume against
+the same identity; North 0.1.0 will perform no live migration. If the daemon is
+unavailable, server retry/failure policy will handle the pinned session.
 
-Agent produces a readiness assessment → daemon emits `requirement.assessed` →
-server deduplicates and locks the current Requirement → validates event revision
-and domain gates → persists typed verdict, blockers, assumptions, and reviewed
-repository SHAs plus any valid transition → commits → sends
-`event_ack(status=accepted)` (or commits a rejection and sends
-`event_ack(status=rejected)`). The daemon never writes Requirement state directly.
+The target durable-delivery flow is: Agent produces a readiness assessment →
+daemon emits `requirement.assessed` → server will deduplicate and lock the
+current Requirement, validate event revision and domain gates, persist typed
+verdict, blockers, assumptions, and reviewed repository SHAs plus any valid
+transition, commit, then send `event_ack(status=accepted)` (or commit a
+rejection and send `event_ack(status=rejected)`). The daemon never writes
+Requirement state directly.

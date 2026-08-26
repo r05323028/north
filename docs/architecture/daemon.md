@@ -20,8 +20,9 @@ Disconnected → Connecting → AwaitingWelcome → Authenticated
 
 The supervisor sends `hello`, waits for `welcome`, receives one connection-level
 reconciliation snapshot, delivers it to coordination, and waits for coordination
-readiness before opening normal application traffic in `Active`. Runtime events,
-application heartbeat, and local journal replay remain queued before `Active`;
+readiness before opening normal application traffic in `Active`. Runtime events
+and application heartbeat remain queued before `Active`; any future local journal
+replay will use the same gate;
 ping/pong remains enabled as transport control. Handshake stages have
 configurable hello, welcome, and reconciliation timeouts. Coordination uses one
 whole-stage timeout covering event delivery, reconciliation application, and
@@ -49,23 +50,29 @@ Socket.IO or native-tls stack is introduced.
 
 ## Responsibilities
 
+The connection and transport responsibilities below are current. Durable command/event
+journal, command acceptance, runtime idempotency, event replay, and recovery bullets
+describe the target durable-delivery contract; those mechanisms remain pending.
+
 - Initiate and maintain the server connection (WebSocket over TLS in deployment).
 - Authenticate one user-owned daemon registration and report identity,
   capabilities, and heartbeat liveness.
-- Maintain a local durable transport journal: command inbox/processed-command
-  ledger and unacknowledged event replay buffer. This is not a business
-  database and never grants database access.
-- Acknowledge a server command only after its inbox record is flushed durably
-  (`command_ack`). This means durable receipt, not runtime completion.
-- Invoke the local runtime once per `command_id`; pass that id as its operation
-  id and reattach after restart when possible. Never re-invoke a
-  `dispatch_started` command automatically.
+- The durable-delivery design will maintain a local durable transport journal:
+  command inbox/processed-command ledger and unacknowledged event replay buffer.
+  This is not a business database and never grants database access.
+- The durable-delivery contract requires acknowledging a server command only
+  after its inbox record is flushed durably (`command_ack`). This means durable
+  receipt, not runtime completion.
+- The durable-delivery design will invoke the local runtime once per
+  `command_id`, pass that id as its operation id, and reattach after restart when
+  possible. It will never re-invoke a `dispatch_started` command automatically.
 - Manage a reusable repository cache plus unique disposable session/task
   checkouts; report dirty-checkout violations and exact commit SHAs.
-- Convert runtime output into typed facts/events, replay them in
-  `daemon_event_seq` order, and report recoverability/failure.
-- Reconnect the WebSocket with local backoff and replay eligible journal
-  buffers after reconciliation; execution recovery remains a server `session.resume` command.
+- The durable-delivery design will convert runtime output into typed facts/events,
+  replay them in `daemon_event_seq` order, and report recoverability/failure.
+- Reconnect the WebSocket with local backoff. Once the durable journal exists, it
+  will replay eligible journal buffers after reconciliation; execution recovery
+  remains a server `session.resume` command.
 
 ## Non-responsibilities
 
