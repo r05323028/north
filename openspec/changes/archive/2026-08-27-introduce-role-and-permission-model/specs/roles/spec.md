@@ -18,9 +18,10 @@ Requester. The role SHALL be stored durably with the user record.
 
 ### Requirement: Review decisions are reviewer-gated
 
-Accepting, rejecting, requesting changes on, and reopening requirements SHALL
-be permitted only for Requirement Manager, Admin, and Owner, enforced
-server-side on every transition path.
+The server SHALL provide a review guard based on the domain permission matrix.
+Every review transition endpoint SHALL call that guard, permitting only
+Requirement Manager, Admin, and Owner. Review transition handlers are owned by
+the human-review change; this change supplies the reusable boundary guard.
 
 #### Scenario: Requester cannot review
 
@@ -29,8 +30,9 @@ server-side on every transition path.
 
 ### Requirement: Administration is admin-gated
 
-Repository configuration, daemon settings, instance settings, and user
-management SHALL require Admin or Owner, enforced server-side.
+Every exposed repository, daemon-settings, instance-settings, and user-management
+endpoint SHALL call the admin guard and require Admin or Owner. This change
+implements user management; later configuration surfaces consume the same guard.
 
 #### Scenario: Manager blocked from settings
 

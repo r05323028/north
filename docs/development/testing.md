@@ -65,7 +65,7 @@ member so `cargo test --workspace` executes it.
 | Layer | Status |
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
-| Integration | Partially implemented — real Axum↔tokio-tungstenite transport coverage; durable coordination proofs remain pending |
+| Integration | Partially implemented — real Axum↔tokio-tungstenite and PostgreSQL-backed daemon lifecycle coverage; durable coordination proofs remain pending |
 | E2E | Not implemented — arrives with UI surface changes |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
@@ -117,7 +117,8 @@ Architecture tests mechanically confirm pure-crate allowlists, both hosts'
 `north-protocol` dependency, server/daemon separation, and the browser
 WebSocket ban. The real transport integration test is
 `tests/transport/tests/websocket.rs` and runs with
-`cargo test -p north-transport-integration --test websocket`. Durable outbox,
-journal replay, authentication persistence, socket reconnect sequencing, durable
-reconciliation application, and browser SSE behavior remain integration/E2E
-obligations.
+`cargo test -p north-transport-integration --test websocket`. The PostgreSQL-backed
+daemon lifecycle test runs locally with `NORTH_TEST_DATABASE_URL` and is required
+in CI job `daemon-integration`. Durable outbox, journal replay, authentication
+persistence, socket reconnect sequencing, durable reconciliation restore, and
+browser SSE behavior remain integration/E2E obligations.

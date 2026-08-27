@@ -44,6 +44,11 @@ plus a canonical `event_ack_sparse` list: strictly ascending, unique, and above
 Ping/pong is transport liveness;
 `heartbeat` is authenticated North application liveness.
 
+Daemon status is Live only while the registration has an active connection and
+its last North heartbeat is no older than 45 seconds. Known disconnects clear
+connection state immediately; stale heartbeat state becomes Offline even when
+transport close detection is delayed.
+
 Transport defaults: 8 MiB message, 1 MiB frame, 256 outbound frames. Cargo
 enables tokio-tungstenite's `rustls-tls-native-roots` feature for WSS; no
 Socket.IO or native-tls stack is introduced.
@@ -51,15 +56,17 @@ Socket.IO or native-tls stack is introduced.
 ## Responsibilities
 
 Connection-supervisor and WebSocket responsibilities below are current where stated.
-Durable delivery, daemon registration/authentication, and repository-inspection bullets
-describe their target contracts unless explicitly identified as implemented.
+Durable delivery and repository-inspection bullets remain target contracts unless
+explicitly identified as implemented.
 
 - Initiate and maintain the server connection (WebSocket over TLS in deployment).
-- The target authentication flow will authenticate one user-owned daemon
-  registration and associate it with the configured daemon identity and
-  capabilities. The current connection separately carries heartbeat-based
-  application liveness.
-- The durable-delivery design will maintain a local durable transport journal:
+- The current authentication flow accepts one user-owned daemon registration,
+  associates it with its configured identity and capabilities, updates
+  heartbeat-based application liveness, and supports owner/admin revocation.
+- Migration 0007 stores setup requests, registrations, execution-session owners,
+  and the server command outbox. Plaintext credentials remain on daemon hosts;
+  the server stores hashes only.
+- The durable-delivery design will maintain a local transport journal:
   command inbox/processed-command ledger and unacknowledged event replay buffer.
   This is not a business database and never grants database access.
 - The durable-delivery contract requires acknowledging a server command only
@@ -90,20 +97,18 @@ describe their target contracts unless explicitly identified as implemented.
 
 ## Ownership and reconnect
 
-The target session-routing flow pins each active session to one daemon identity.
-It will select an eligible daemon and persist `session.daemon_id` before the first
-command. Commands/events will be authenticated and routed against that identity.
-Reconnect will resume against the same identity; North 0.1.0 will not perform
-automatic live migration. If the daemon is unavailable, server-owned retry/failure
-policy will retain ownership and handle the pinned session.
+The current session-routing foundation selects an eligible connected daemon in
+`AuthStore::start_session_with_command`, persists `execution_sessions.daemon_id`
+atomically with the first server command outbox row, and dispatches later
+commands through the persisted owner. Reconnect reconciles only sessions pinned
+to that identity; North 0.1.0 does not perform automatic live migration. Full
+business execution retry/failure policy remains server-owned target work.
 
-The target registration model will define daemon registrations as instance-scoped
-identities with credentials owned by the account recorded in `created_by`. The
-credential owner will be able to revoke its own credential, while Admin/Owner will
-be able to revoke any daemon credential. Revocation will close current access,
-refuse future authentication, and the target session-routing policy will keep
-affected sessions pinned for normal retry/failure handling rather than migrate
-them.
+The current registration model defines daemon registrations as instance-scoped
+identities with credentials owned by the account recorded in `created_by`.
+The credential owner can revoke its own credential, while Admin/Owner can revoke
+any daemon credential. Revocation closes current access, refuses future
+authentication, and keeps affected sessions pinned rather than migrating them.
 
 ## Failure posture
 

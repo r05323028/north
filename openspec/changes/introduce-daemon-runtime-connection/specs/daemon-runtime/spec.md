@@ -32,6 +32,12 @@ capabilities; the server SHALL track liveness via North heartbeats
 - **WHEN** a daemon starts on a host with no reachable inbound ports
 - **THEN** it connects, registers, and appears live in daemon status
 
+#### Scenario: Credential owner sees its own daemon status
+
+- **WHEN** a credential owner opens daemon status
+- **THEN** the owner sees its own daemon's liveness, last-seen time, capabilities,
+  and revocation state, while Admin/Owner users may see all registrations
+
 ### Requirement: Connection handshake gates application traffic
 
 The daemon SHALL use one supervisor with explicit phases

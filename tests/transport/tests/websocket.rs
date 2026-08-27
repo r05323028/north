@@ -44,8 +44,6 @@ fn server_timeouts() -> ServerHandshakeTimeouts {
     ServerHandshakeTimeouts {
         hello: Duration::from_secs(1),
         admission: Duration::from_secs(1),
-        welcome: Duration::from_secs(1),
-        reconcile: Duration::from_secs(1),
     }
 }
 
@@ -339,8 +337,6 @@ async fn admission_backpressure_still_observes_hello_and_admission_deadlines() {
     let timeouts = ServerHandshakeTimeouts {
         hello: Duration::from_millis(40),
         admission: Duration::from_millis(40),
-        welcome: Duration::from_millis(40),
-        reconcile: Duration::from_millis(40),
     };
     let (address, mut _connections, server) = {
         let state = DaemonTransportState::with_handshake_timeouts(connection_sender, timeouts);

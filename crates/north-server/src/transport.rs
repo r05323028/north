@@ -17,7 +17,9 @@ use axum::{
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use north_protocol::{DaemonFrame, FrameError, ProtocolErrorFrame, ServerFrame, SCHEMA_VERSION};
+use north_protocol::{
+    DaemonFrame, FrameError, ProtocolErrorFrame, ServerFrame, PROTOCOL_VERSION, SCHEMA_VERSION,
+};
 use std::{error::Error, fmt, future::Future, time::Duration};
 use tokio::sync::mpsc;
 
@@ -33,10 +35,6 @@ pub struct HandshakeTimeouts {
     pub hello: Duration,
     /// Time allowed for the coordinator to admit a hello-bearing connection.
     pub admission: Duration,
-    /// Reserved for the server coordinator's auth result.
-    pub welcome: Duration,
-    /// Reserved for the server coordinator's reconciliation result.
-    pub reconcile: Duration,
 }
 
 impl Default for HandshakeTimeouts {
@@ -44,8 +42,6 @@ impl Default for HandshakeTimeouts {
         Self {
             hello: Duration::from_secs(5),
             admission: Duration::from_secs(5),
-            welcome: Duration::from_secs(10),
-            reconcile: Duration::from_secs(10),
         }
     }
 }
@@ -54,6 +50,7 @@ impl Default for HandshakeTimeouts {
 pub enum TransportError {
     Socket(String),
     Protocol(FrameError),
+    IncompatibleProtocol,
     BinaryFrame,
     ExpectedHello,
     HandshakeTimeout(&'static str),
@@ -67,6 +64,7 @@ impl fmt::Display for TransportError {
         match self {
             Self::Socket(reason) => write!(f, "Axum WebSocket transport error: {reason}"),
             Self::Protocol(error) => write!(f, "North protocol error: {error}"),
+            Self::IncompatibleProtocol => write!(f, "unsupported North protocol version"),
             Self::BinaryFrame => write!(f, "North 0.1 accepts JSON text frames only"),
             Self::ExpectedHello => write!(f, "first daemon frame must be hello"),
             Self::HandshakeTimeout(stage) => write!(f, "handshake timed out waiting for {stage}"),
@@ -135,6 +133,10 @@ pub async fn daemon_websocket_handler(
     State(state): State<DaemonTransportState>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    daemon_websocket_response(ws, state)
+}
+
+pub fn daemon_websocket_response(ws: WebSocketUpgrade, state: DaemonTransportState) -> Response {
     let handshake_timeouts = state.handshake_timeouts;
     ws.max_message_size(MAX_MESSAGE_SIZE)
         .max_frame_size(MAX_FRAME_SIZE)
@@ -283,6 +285,7 @@ where
 fn protocol_error_frame(error: &TransportError) -> Option<ServerFrame> {
     let code = match error {
         TransportError::Protocol(_) => "invalid_frame",
+        TransportError::IncompatibleProtocol => "incompatible_protocol",
         TransportError::BinaryFrame => "binary_frame",
         TransportError::ExpectedHello => "expected_hello",
         _ => return None,
@@ -302,6 +305,9 @@ pub fn encode_server_message(frame: &ServerFrame) -> Result<Message, TransportEr
 
 pub fn decode_daemon_message(message: Message) -> Result<Option<DaemonFrame>, TransportError> {
     match message {
+        Message::Text(text) if has_incompatible_protocol(text.as_ref()) => {
+            Err(TransportError::IncompatibleProtocol)
+        }
         Message::Text(text) => DaemonFrame::from_json(text.as_ref())
             .map(Some)
             .map_err(TransportError::Protocol),
@@ -309,6 +315,19 @@ pub fn decode_daemon_message(message: Message) -> Result<Option<DaemonFrame>, Tr
         Message::Ping(_) | Message::Pong(_) => Ok(None),
         Message::Close(_) => Err(TransportError::PeerClosed),
     }
+}
+
+fn has_incompatible_protocol(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    value.get("frame").and_then(serde_json::Value::as_str) == Some("hello")
+        && value
+            .get("payload")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|payload| payload.get("protocol_version"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|version| version != PROTOCOL_VERSION)
 }
 
 #[cfg(test)]
@@ -350,10 +369,23 @@ mod tests {
     }
 
     #[test]
+    fn protocol_version_mismatch_gets_incompatibility_error() {
+        let message = Message::Text(
+            r#"{"frame":"hello","payload":{"protocol_version":"0.2","schema_version":1,"daemon_id":"daemon-1","credential":"secret","capabilities":[]}}"#.into(),
+        );
+        let error = decode_daemon_message(message).expect_err("version mismatch");
+        assert!(matches!(error, TransportError::IncompatibleProtocol));
+        let ServerFrame::ProtocolError(frame) = protocol_error_frame(&error).expect("error frame")
+        else {
+            panic!("expected protocol error");
+        };
+        assert_eq!(frame.code, "incompatible_protocol");
+    }
+
+    #[test]
     fn handshake_timeouts_have_explicit_stages() {
         let timeouts = HandshakeTimeouts::default();
-        assert!(!timeouts.hello.is_zero());
-        assert!(!timeouts.admission.is_zero());
-        assert_eq!(timeouts.welcome, timeouts.reconcile);
+        assert_eq!(timeouts.hello, Duration::from_secs(5));
+        assert_eq!(timeouts.admission, Duration::from_secs(5));
     }
 }

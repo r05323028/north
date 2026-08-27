@@ -10,6 +10,16 @@ server at startup.
 | --- | --- | --- |
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
 | Durable coordination | daemon registrations, `session.daemon_id`, session execution state/attempts, server command outbox, event dedupe/rejection records, sequence watermarks | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
+
+Migration 0007 currently implements the daemon registration/setup-request and
+minimal execution-session/outbox records. Registration rows retain hashed
+credentials, owner identity, protocol/capability metadata, connection liveness,
+and revocation timestamps. The server updates liveness only for the authenticated
+connection identity; status is Live only with a heartbeat from the last 45 seconds
+and an active connection marker. Revocation clears live access without changing
+session owner. Admin/Owner users can list all registrations; other users see only
+daemons they created.
+
 | Ephemeral (TTL) | runtime events, tool activity, transient execution logs | GC'd by a boring TTL job; expiry must never invalidate a Requirement |
 
 The daemon also keeps a local transport journal for command inbox and event
@@ -33,10 +43,19 @@ Invariants:
 
 ## First-owner bootstrap
 
-On a fresh instance, the first successfully created account becomes Owner via an
-**atomic database operation** (e.g., singleton instance row claimed with a
-unique constraint inside the signup transaction). Two simultaneous first
-sign-ups must yield exactly one Owner; losers become normal Requesters.
+On a fresh instance, `instance_settings` has one singleton row (`id = 1`)
+with nullable `owner_user_id`. Verification inserts a new user as Requester,
+then claims that row in the same transaction with:
+
+```sql
+UPDATE instance_settings
+SET owner_user_id = $user_id
+WHERE id = 1 AND owner_user_id IS NULL;
+```
+
+A transaction that updates one row wins the claim and promotes its user to
+Owner; concurrent losers keep Requester. The verification-code consumption,
+user insert, owner claim, and session insert all commit or roll back together.
 No application-level "check then insert" races.
 
 ## Repository identity

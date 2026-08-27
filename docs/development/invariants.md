@@ -21,8 +21,8 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Content-changing edits bump revision once; no-op edits change nothing | Enforced | `apply_edit` canonical comparison + unit tests |
 | Editing Ready demotes to Discussing (stale invalidation) | Enforced | `apply_edit` + unit tests |
 | Review packet is projection(Requirement, revision-matched assessment); stale packet unreviewable | Enforced | `ReviewPacket::project` + unit tests |
-| Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Specified | pending introduce-role-and-permission-model (domain helpers seeded) |
-| First account atomically Owner; later accounts Requester | Specified | pending introduce-email-auth-and-owner-bootstrap |
+| Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Partially Enforced | `Role::can_review` + `north-server::require_review`; existing transition consumers are owned by introduce-human-requirement-review |
+| First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
 | Conversation is context, not source of truth | Specified | pending introduce-requirement-conversations; persistence/API test required |
 | Every existing-Requirement mutation requires expected_revision | Specified | harden-distributed-system-architecture; server/persistence CAS + HTTP 409 test pending |
 | `requirement.assessed` evidence, transition, dedupe, and ACK share one commit boundary | Specified | harden-distributed-system-architecture; readiness integration test pending |
@@ -41,8 +41,8 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Command ACK means durable daemon acceptance, not runtime completion | Specified | harden-distributed-system-architecture; protocol integration test pending |
 | Command/event ids and independent directional sequences detect gaps and harmless duplicates | Specified | harden-distributed-system-architecture; protocol replay/gap tests pending |
 | Protocol 0.1.x rejects incompatible/unknown frames deterministically | Partially Enforced | codec validation, terminal supervisor handling, and real protocol-failure test; production coordinator error/replay handling pending |
-| Active session is durably pinned to one daemon; no automatic live migration | Specified | harden-distributed-system-architecture; session routing/reconnect tests pending |
-| Daemon credentials are user-owned; Admin/Owner revocation cuts access | Specified | introduce-daemon-runtime-connection + hardening; connection/revocation tests pending |
+| Active session is durably pinned to one daemon; no automatic live migration | Partially Enforced | migration 0007, `AuthStore::start_session_with_command`, `DaemonRuntime::dispatch_command`, reconnect/offline/revocation integration coverage; full durable delivery pending |
+| Daemon credentials are user-owned; Admin/Owner revocation cuts access | Enforced | migration 0007, device-flow claim, authenticated WS registration, owner/admin revoke routes, per-frame connection revalidation, and PostgreSQL integration coverage |
 | Server owns execution state, retry budget, attempt count, and terminal Failed | Specified | introduce-runtime-retry-and-failure-state + hardening; restart/retry tests pending |
 | Daemon has no business retry policy authority | Partially Enforced | architecture source guard; runtime implementation must keep policy in server |
 | Execution failure never mutates Requirement lifecycle state | Specified | runtime retry change; isolation integration test pending |
@@ -72,15 +72,15 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | --- | --- | --- |
 | `north-protocol` is independent from Axum/Tokio/Tungstenite and host crates | Enforced | Cargo metadata rules in `tests/architecture`; pure JSON codec tests |
 | Server daemon transport is Axum WebSocket + JSON text; daemon transport is tokio-tungstenite | Enforced | adapter modules, dependency metadata, and real Axum↔tokio-tungstenite integration tests |
-| WebSocket ping/pong does not replace North heartbeat | Partially Enforced | adapter tests and protocol/docs; authenticated liveness persistence pending |
+| WebSocket ping/pong does not replace North heartbeat | Enforced | adapter tests, authenticated heartbeat persistence, 45-second stale-status expiry, and protocol/docs |
 | Transport errors stay distinct from North protocol errors | Enforced | `TransportError`/`ConnectionError` variants and adapter tests |
 | `session.start` carries server-assembled requirement, bounded conversation, and enabled repository metadata | Partially Enforced | `north-server::assemble_session_start` + unit test; persistence/session coordinator pending |
 | `requirement.assessed` carries typed verdict/evidence, not opaque assessment text | Enforced | `north-protocol` validation/round-trip tests and explicit server/domain conversion; persistence transaction pending |
 | Daemon application traffic waits for welcome, reconciliation, and coordination readiness | Enforced | explicit supervisor phases plus real transport gating integration test |
-| Protocol/auth failures stop daemon reconnect | Partially Enforced | terminal failure classification and real protocol-failure test; auth persistence pending |
+| Protocol/auth failures stop daemon reconnect | Partially Enforced | terminal failure classification, protocol-failure test, authenticated/revoked integration coverage; durable replay remains pending |
 | `north-domain` and `north-protocol` obey positive dependency allowlists | Enforced | Cargo metadata allowlist tests |
-| Connection reconciliation is one validated snapshot delivered to coordination before Active | Partially Enforced | typed snapshot, canonical sparse ACK validation, handshake result, activation gate, and real empty/multi-session tests; journal application pending |
-| Axum/tokio-tungstenite do not provide North reliability | Specified | server-daemon protocol contract; outbox/journal/reconciliation implementation pending |
+| Connection reconciliation is one validated snapshot delivered to coordination before Active | Partially Enforced | typed snapshot, canonical sparse ACK validation, handshake result, daemon coordination application before readiness, activation gate, and integration tests; durable journal restore pending |
+| Axum/tokio-tungstenite do not provide North reliability | Partially Enforced | transport adapters plus server registration, bounded liveness, session pinning, coordination application, and minimal outbox foundation; daemon journal and full durable delivery pending |
 | Browser communication remains HTTP + SSE; browser opens no WebSocket | Enforced | `browser_never_opens_websockets` architecture test |
 
 ## Existing good architecture preserved

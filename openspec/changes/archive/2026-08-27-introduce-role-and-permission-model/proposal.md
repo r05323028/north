@@ -14,8 +14,9 @@ repositories, daemons, users).
   at every API boundary.
 - Role assignment API: Owner grants any role; Admin grants everything except
   Owner; nobody modifies their own role; only Owner/Admin may assign.
-- Admin-only surfaces (repositories, daemon settings, instance settings, user
-  management) reject non-admin actors server-side.
+- Every exposed admin surface rejects non-admin actors server-side. This change
+  implements user management; later repository, daemon, and instance-settings
+  surfaces reuse the same guard helpers.
 - UI hides/disables actions per role but is never the security boundary.
 
 Out of scope: complex enterprise RBAC, multiple simultaneous roles per user,

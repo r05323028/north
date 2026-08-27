@@ -9,9 +9,10 @@ explicit durable owner when multiple daemons exist.
 
 ## What Changes
 
-- `north setup --server-url …`: browser completes normal North login, then the
-  server issues a dedicated user-owned CLI/daemon credential stored locally
-  (never a reused verification code).
+- `north setup --server-url …`: CLI creates a short-lived device request,
+  browser completes normal North login and approves it, then CLI polling receives
+  one dedicated user-owned daemon credential stored locally (never a reused
+  verification code).
 - Daemon connects outbound using one `tokio-tungstenite` connection
   supervisor (persistent WebSocket over TLS), authenticates with the local
   credential, registers one durable daemon identity + capabilities, and reports

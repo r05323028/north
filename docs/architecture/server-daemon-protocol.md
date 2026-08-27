@@ -35,7 +35,9 @@ WSS. These are configuration points, not reliability guarantees.
 - The server endpoint is an Axum upgrade handler plus a thin transport adapter;
   the adapter starts the hello deadline immediately after upgrade, reads the
   first `hello`, and admits the hello-bearing connection through a bounded
-  coordinator queue with its own timeout. Coordination authenticates the hello,
+  coordinator queue with its own timeout. Server transport config owns only
+  hello and admission bounds; daemon-side config owns welcome, reconciliation,
+  and coordination-readiness deadlines. Coordination authenticates the hello,
   owns registration, and receives decoded frames through bounded channels.
 - The daemon endpoint is one `tokio-tungstenite` connection supervisor; it
   owns hello, split reader/writer tasks, ping/pong, disconnect, local backoff,
@@ -131,13 +133,11 @@ Every command/event carries:
   `daemon_event_seq`) for ordering and gap detection;
 - `sent_at`, `type`, `payload`, and `schema_version`.
 
-The durable-delivery layer will persist a server command outbox row before
-dispatch. Retries will reuse the same `command_id` and sequence, and the outbox
-will retain unaccepted commands. The durable-delivery layer will persist a local
-command inbox/processed ledger before sending `command_ack`. Duplicate delivery
-will repeat the known ACK and never invoke the runtime twice. `message.send` will
-be submitted to the agent at most once for one command id, including reconnect
-and daemon restart recovery.
+The current session-routing foundation persists an execution-session owner and
+server command outbox row atomically before dispatch through
+`AuthStore::start_session_with_command`. Full command ACK semantics, retries,
+local command inbox/processed-ledger durability, and duplicate runtime
+suppression remain owned by the durable-delivery implementation.
 
 The durable-delivery contract requires daemon events to be journaled before
 transmission. The server will deduplicate event ids inside the same transaction
@@ -188,8 +188,9 @@ peers will not silently reinterpret unknown payloads.
 
 WebSocket ping/pong means the socket can exchange transport control frames. The
 North `heartbeat` frame means an authenticated daemon is alive and reporting
-application state. Ping/pong never proves durable session state, command
-processing, or liveness after reconnect.
+application state. Daemon status expires Live after 45 seconds without a
+heartbeat, even if the socket has not reported close. Ping/pong never proves
+durable session state, command processing, or liveness after reconnect.
 
 Transport failures stay distinct from protocol failures:
 
@@ -204,20 +205,22 @@ contract requires it; no decoder error mutates business state.
 ## Reliability ownership
 
 Axum and tokio-tungstenite do not provide durable messaging. North coordination
-is intended to own stable command/event IDs, monotonic sequences, at-least-once
-delivery, the server command outbox, daemon processed-command dedupe, daemon
-event buffering, ACK-after-commit, reconnect reconciliation, session ownership,
-retry policy, and Requirement transaction semantics. The current implementation
-provides the wire and transport boundaries plus structural validation; it does
-not yet provide those durable-delivery mechanisms.
+owns stable command/event IDs, monotonic sequences, at-least-once delivery, the
+server command outbox, daemon processed-command dedupe, daemon event buffering,
+ACK-after-commit, reconnect reconciliation, session ownership, retry policy, and
+Requirement transaction semantics. The current implementation provides the wire
+and transport boundaries, daemon registration/authentication/liveness/revocation,
+and the minimal session pinning/outbox foundation; daemon journals, full ACK/replay,
+and business execution retry remain pending.
 
 ## Session routing and state ownership
 
-The target session-routing flow selects a connected eligible daemon and will
-persist `session.daemon_id` before the first command. Commands/events for a
-session will be accepted only from that daemon. Reconnect will resume against
-the same identity; North 0.1.0 will perform no live migration. If the daemon is
-unavailable, server retry/failure policy will handle the pinned session.
+The current session-routing flow selects a connected eligible daemon and persists
+its identity before the first command. `DaemonRuntime::dispatch_command` routes
+commands only through that persisted owner, while inbound events and ACKs from a
+different daemon receive a protocol error. Reconnect receives one reconciliation
+snapshot for the same identity; revocation leaves the session pinned. Full server
+retry/failure handling remains pending.
 
 The target durable-delivery flow is: Agent produces a readiness assessment →
 daemon emits `requirement.assessed` → server will deduplicate and lock the
