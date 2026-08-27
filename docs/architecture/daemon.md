@@ -127,10 +127,16 @@ server will decide when to send `session.resume` and when retry exhaustion becom
 `Failed`. The target execution model will keep execution failure separate from
 Requirement lifecycle state.
 
-Setup/login follows the browser-assisted CLI flow: approval GET is a read-only
-label-bearing confirmation, while authenticated approval POST requires a
-same-origin browser request. The CLI polls with bounded retries for transient
-network and 5xx failures and stops on terminal errors or expiry. Server startup
-clears prior daemon connection leases before accepting placement; reconnect is
-required after a single-server restart. See `docs/architecture/server-daemon-protocol.md`
-and change `introduce-daemon-runtime-connection`.
+Setup/login follows the browser-assisted CLI flow. A normal browser GET
+returns an HTML confirmation page with daemon label and state, an explicit
+Approve POST form, and cancel/back navigation; `Accept: application/json`
+retains the read-only JSON preview for programmatic clients. GET never mutates.
+Only authenticated same-origin POST can approve, and an HTML POST returns a
+human-readable success page. The daemon credential is returned only by the
+separate claim endpoint polled by `north-daemon setup`; approval HTML contains
+no credential or other claim secret. The CLI polls with bounded retries for
+transient network and 5xx failures and stops on terminal errors or expiry.
+Server startup clears prior daemon connection leases before accepting placement;
+reconnect is required after a single-server restart. See
+`docs/architecture/server-daemon-protocol.md` and change
+`harden-daemon-runtime-correctness`.

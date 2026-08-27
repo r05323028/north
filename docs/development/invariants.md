@@ -24,6 +24,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Partially Enforced | `Role::can_review` + `north-server::require_review`; existing transition consumers are owned by introduce-human-requirement-review |
 | First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
 | Verification codes cannot be brute-forced past a bounded attempt budget | Enforced | locked transactional failed-attempt counter, five-failure consumption, PostgreSQL concurrency test |
+| Active OTP values resist database-only offline recovery | Specified | keyed OTP hashing deferred to `harden-otp-at-rest`; current SHA-256 remains documented debt |
 | Conversation is context, not source of truth | Specified | pending introduce-requirement-conversations; persistence/API test required |
 | Every existing-Requirement mutation requires expected_revision | Specified | harden-distributed-system-architecture; server/persistence CAS + HTTP 409 test pending |
 | `requirement.assessed` evidence, transition, dedupe, and ACK share one commit boundary | Specified | harden-distributed-system-architecture; readiness integration test pending |
@@ -39,13 +40,17 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Daemon reports facts/events; server owns business transitions | Partially Enforced | crate edges now; server-side transition validation lands with requirement-domain change |
 | Server is sole owner of durable business state | Partially Enforced | dependency boundaries; server/persistence implementation and integration tests pending |
 | Setup approval state changes require authenticated same-origin POST | Enforced | read-only approval GET, Origin/Host validation, and PostgreSQL HTTP-boundary tests |
+| Public auth/setup request endpoints have resource-aware abuse limits | Specified | deferred to `harden-public-endpoint-abuse-protection`; no current limiter claimed |
 | Every server command is durable before dispatch and idempotent at daemon boundary | Partially Enforced | exact envelope persistence before `DaemonRuntime::persist_and_dispatch_command` dispatch; durable ACK/dedupe remains pending |
 | Command ACK means durable daemon acceptance, not runtime completion | Specified | harden-distributed-system-architecture; protocol integration test pending |
 | Command/event ids and independent directional sequences detect gaps and harmless duplicates | Specified | harden-distributed-system-architecture; protocol replay/gap tests pending |
 | Protocol 0.1.x rejects incompatible/unknown frames deterministically | Partially Enforced | codec validation, terminal supervisor handling, and real protocol-failure test; production coordinator error/replay handling pending |
 | Active session is durably pinned to one daemon; no automatic live migration | Partially Enforced | migrations 0007/0008, `AuthStore::start_session_with_command`, `DaemonRuntime::persist_and_dispatch_command`, reconnect/offline/revocation integration coverage; full durable delivery pending |
+| Multi-server connection ownership epochs are enforced | Specified | single-server 0.1.0 only; HA ownership epochs deferred |
+| Durable command redelivery and ACK replay survive process failure | Specified | durable inbox/journal and replay deferred to protocol/runtime follow-ups |
 | Single-server restart invalidates stale daemon connection leases | Enforced | `build_app` clears `connected_at`/`connection_id` before serving; restart/reconnect integration coverage |
 | Expired daemon setup rows have bounded retention | Partially Enforced | indexed 24-hour retention and 100-row opportunistic cleanup on setup create/poll; no scheduler in 0.1.0 |
+| Setup claim response is retry-idempotent after a lost response | Specified | accepted 0.1.0 one-shot claim trade-off; no plaintext credential recovery |
 | Daemon credentials are user-owned; Admin/Owner revocation cuts access | Enforced | migration 0007, device-flow claim, authenticated WS registration, owner/admin revoke routes, per-frame connection revalidation, and PostgreSQL integration coverage |
 | Server owns execution state, retry budget, attempt count, and terminal Failed | Specified | introduce-runtime-retry-and-failure-state + hardening; restart/retry tests pending |
 | Daemon has no business retry policy authority | Partially Enforced | architecture source guard; runtime implementation must keep policy in server |

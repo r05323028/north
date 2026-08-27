@@ -1,28 +1,53 @@
+# daemon-runtime Specification
+
 ## Purpose
 
 Keeps North's authenticated daemon runtime safe and coherent at HTTP,
 persistence, restart, lifecycle, and client-retry boundaries without changing
 its single-server 0.1.0 architecture.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Setup approval is safe against cross-site state changes
 
 `GET /daemon/setup/{request_token}/approve` SHALL be read-only and SHALL NOT
-approve, claim, or otherwise mutate a setup request. It SHALL return a
-confirmation state that identifies the daemon label when available. The
-state-changing approval SHALL be performed only by
+approve, claim, or otherwise mutate a setup request. When the request accepts
+`text/html` without an explicit `application/json` preference, it SHALL return
+a minimal human confirmation page that identifies North, the daemon label,
+setup state, an explicit `Approve` form targeting the same-origin POST route,
+and an explicit cancel/back action. The HTML SHALL NOT contain daemon
+credentials or other claim secrets. When `Accept: application/json` is
+requested, GET SHALL retain the read-only JSON preview for programmatic
+clients. The state-changing approval SHALL be performed only by
 `POST /daemon/setup/{request_token}/approve`, which SHALL require an
 authenticated user and SHALL validate the browser request origin against the
-North server origin before mutating state. Invalid, expired, already claimed,
-unauthenticated, and cross-origin approval requests SHALL be rejected without
-creating a credential.
+North server origin before mutating state. A successful HTML POST SHALL return
+a human-readable success page; non-HTML clients MAY retain the existing empty
+204 response. Invalid, expired, already claimed, unauthenticated, and
+cross-origin approval requests SHALL be rejected without creating a credential.
+Daemon credentials SHALL be returned only by the setup claim endpoint used by
+the polling CLI.
 
 #### Scenario: Approval page is read-only
 
 - **WHEN** an authenticated user requests the approval URL with `GET`
-- **THEN** the response shows confirmation state and daemon information, but
-  the setup request remains pending and no credential is created
+- **THEN** an HTML response shows confirmation state, daemon information, an
+  `Approve` POST form, and cancel/back action, but the setup request remains
+  pending and no credential is created
+
+#### Scenario: API preview remains JSON
+
+- **WHEN** an authenticated programmatic client requests the approval URL with
+  `Accept: application/json`
+- **THEN** the server returns the read-only JSON preview with daemon label and
+  state, without mutating setup state or returning a credential
+
+#### Scenario: Browser receives approval success
+
+- **WHEN** an authenticated browser submits the confirmation form with a valid
+  same-origin approval `POST`
+- **THEN** the server approves the request and returns a human-readable success
+  page without including the daemon credential
 
 #### Scenario: Valid same-origin POST approves
 
@@ -155,3 +180,16 @@ final error. Polling retries SHALL NOT create additional setup requests.
 
 - **WHEN** the setup request reaches its expiry before approval completes
 - **THEN** polling stops with an expiry error
+
+## Deferred 0.1.0 Hardening
+
+These items are not currently enforced by North 0.1.0:
+
+- Public `/auth/request-code` and `/daemon/setup/request` abuse protection and
+  resource-aware rate limiting: follow-up `harden-public-endpoint-abuse-protection`.
+- Keyed OTP hashing with a server-side pepper: follow-up `harden-otp-at-rest`;
+  current high-entropy session and daemon credential hashing remains unchanged.
+- Idempotent recovery after a committed one-shot setup claim response is lost;
+  plaintext credential recovery is not added.
+- Multi-server/HA connection ownership epochs and durable command redelivery,
+  replay, and ACK processing.

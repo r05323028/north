@@ -43,7 +43,11 @@ WSS. These are configuration points, not reliability guarantees.
   owns hello, split reader/writer tasks, ping/pong, disconnect, local backoff,
   and reconnect. Runtime/session code never writes to the socket directly.
 - Daemon authenticates with a locally stored CLI/daemon credential obtained via
-  browser setup — never a reused email verification code.
+  browser setup — never a reused email verification code. Browser approval GET
+  returns a read-only HTML confirmation page (or JSON for explicit API clients);
+  authenticated same-origin POST is the only approval mutation. The polling CLI
+  alone uses the claim endpoint that returns the one-shot daemon credential, and
+  approval HTML never contains it.
 - Hello/registration and welcome carry exact `protocol_version: "0.1"`;
   each frame carries `schema_version: 1`. 0.1.x has no plugin/range
   negotiation.

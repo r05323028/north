@@ -25,6 +25,8 @@ wire/protocol crates.
 - Redis, a background scheduler, HA ownership epochs, durable redelivery, or a
   new HTTP client dependency.
 - Changes to browser cookie policy or unrelated role/auth behavior.
+- Public endpoint rate limiting, keyed OTP hashing, claim-response idempotency,
+  HA ownership epochs, and durable command redelivery/replay.
 
 ## Decisions
 
@@ -32,12 +34,16 @@ wire/protocol crates.
 
 Split the approval route into a read-only GET preview and a POST approval
 handler. Persistence exposes a non-mutating setup-request preview containing
-only label and lifecycle state; the HTTP response returns JSON confirmation
-state. The POST requires `CurrentUser` from existing auth middleware and a
-present `Origin` whose scheme is HTTP(S) and whose host (including port) equals
-the request `Host`. This host-bound check rejects cross-site browser requests
-without trusting arbitrary forwarded headers or weakening cookies. The CLI
-never approves, so it does not need a CSRF token.
+only label and lifecycle state. The HTTP handler returns an escaped HTML
+confirmation page for browser `Accept: text/html` requests and retains JSON
+confirmation state for explicit `Accept: application/json` clients. The HTML
+contains only label/state, a same-origin POST form, and cancel/back navigation;
+it never contains the daemon credential. A successful HTML POST returns a small
+human-readable success page. The POST requires `CurrentUser` from existing auth
+middleware and a present `Origin` whose scheme is HTTP(S) and whose host
+(including port) equals the request `Host`. This host-bound check rejects
+cross-site browser requests without trusting arbitrary forwarded headers or
+weakening cookies. The CLI never approves, so it does not need a CSRF token.
 
 Alternative: a synchronizer token would require rendering and retaining a
 browser form token. Origin validation is sufficient for this JSON endpoint and
@@ -103,6 +109,23 @@ and 5xx responses as retryable; classify 4xx and malformed successful bodies
 as terminal. The setup poll loop retries retryable errors with a bounded
 exponential delay capped below the setup deadline, resets delay after a good
 poll, and reports terminal or expiry failures clearly.
+
+## Accepted 0.1.0 hardening debt
+
+- `/auth/request-code` and `/daemon/setup/request` remain unauthenticated
+  public request surfaces without resource-aware abuse limits. Track both in
+  `harden-public-endpoint-abuse-protection`; future design should combine
+  coarse IP/subnet limits, resource-specific limits, and trusted reverse-proxy
+  client-IP handling.
+- Verification codes remain ordinary SHA-256 hashes. Track keyed
+  `HMAC(server-side pepper, normalized_email || issuance_id || code)` hashing in
+  `harden-otp-at-rest`; do not change high-entropy session or daemon credential
+  hashing as part of that follow-up.
+- Setup claim is intentionally one-shot. If claim commits and its response is
+  lost, retry can require restarting setup; no plaintext credential recovery is
+  added in 0.1.0.
+- Multi-server ownership epochs and durable command redelivery/ACK replay remain
+  future architecture work.
 
 ## Risks / Trade-offs
 

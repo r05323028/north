@@ -4,7 +4,7 @@ Verification of `introduce-daemon-runtime-connection` found correctness and secu
 
 ## What Changes
 
-- Make setup approval read-only on `GET` and authenticated, origin-checked, state-changing on `POST`; expose daemon label in confirmation state.
+- Make setup approval read-only on `GET` and authenticated, origin-checked, state-changing on `POST`; expose daemon label in confirmation state and return a minimal browser confirmation page with an explicit approval form.
 - Bound failed verification attempts transactionally while retaining six-digit codes, expiry, cooldown, and supersession semantics.
 - Construct one typed command envelope, persist its exact serialized representation, then dispatch that persisted command; keep raw dispatch internal.
 - Opportunistically delete setup requests expired beyond a retention window with bounded indexed cleanup.
@@ -12,7 +12,7 @@ Verification of `introduce-daemon-runtime-connection` found correctness and secu
 - Make daemon setup polling retry connection failures and retryable 5xx responses with bounded backoff, while stopping on terminal errors and expiry.
 - Add focused unit, HTTP-boundary, persistence, concurrency, and PostgreSQL integration coverage.
 
-Out of scope: Redis or scheduler infrastructure, durable redelivery/replay, HA ownership epochs, replacing the CLI `curl` subprocess unless the existing change is trivial, and unrelated refactors.
+Out of scope: Redis or scheduler infrastructure, durable redelivery/replay, HA ownership epochs, replacing the CLI `curl` subprocess unless the existing change is trivial, public endpoint abuse/rate limiting, keyed OTP hashing, claim-response idempotency, and unrelated refactors. These remain explicit 0.1.0 hardening debt with follow-up OpenSpec items.
 
 ## Capabilities
 
@@ -26,4 +26,4 @@ Out of scope: Redis or scheduler infrastructure, durable redelivery/replay, HA o
 
 ## Impact
 
-Affected areas: `crates/north-server` setup/auth/daemon handlers and runtime state, `crates/north-persistence` auth and daemon SQL operations, `crates/north-daemon` setup polling, migrations, PostgreSQL integration tests, CI/test documentation, and OpenSpec canonical specs. Existing HTTP routes remain compatible except that setup approval `GET` no longer mutates state and invalid/unauthenticated approval POSTs are rejected.
+Affected areas: `crates/north-server` setup/auth/daemon handlers and runtime state, `crates/north-persistence` auth and daemon SQL operations, `crates/north-daemon` setup polling, migrations, PostgreSQL integration tests, CI/test documentation, and OpenSpec canonical specs. Existing API clients retain read-only JSON preview with `Accept: application/json`; normal browsers receive an HTML confirmation form. Setup approval `GET` never mutates state, and invalid/unauthenticated approval POSTs are rejected.

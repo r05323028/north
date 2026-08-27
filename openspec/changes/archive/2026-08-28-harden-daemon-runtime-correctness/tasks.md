@@ -21,3 +21,11 @@
 
 - [x] 4.1 Update canonical daemon/auth/testing/invariant documentation with CSRF, attempt limits, cleanup, restart lease, and polling behavior; record HA and durable redelivery as deferred.
 - [x] 4.2 Run format, clippy, unit, architecture, web, PostgreSQL integration, merge-gate, and strict OpenSpec validation; review diff and preserve all existing runtime invariants.
+
+## 5. Browser approval flow and explicit 0.1.0 debt
+
+- [x] 5.1 Return escaped HTML confirmation UI for browser approval GET, retain JSON read-only preview for explicit API clients, and return human-readable HTML after browser POST while preserving authentication and same-origin checks.
+- [x] 5.2 Add HTTP/integration coverage for browser GET → label/state/form → non-mutating GET → same-origin POST → CLI-style claim, including JSON negotiation, secret exclusion, conflict, invalid, expired, unauthenticated, and cross-origin cases.
+- [x] 5.3 Document browser GET/POST/claim semantics and explicitly record public endpoint abuse protection, keyed OTP hashing, one-shot claim recovery, HA ownership epochs, and durable redelivery/ACK processing as deferred.
+- [x] 5.4 Create or follow separate OpenSpec follow-ups for public endpoint abuse protection and keyed OTP hashing without changing those mechanisms in this branch.
+- [x] 5.5 Run focused and full repository validation, strict OpenSpec validation, and review the final change boundary before archive.
