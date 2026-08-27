@@ -5,7 +5,9 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use north_domain::role::Role;
-use north_persistence::{AuthStore, PersistenceError, PoolOptions};
+use north_persistence::{
+    AuthStore, PersistenceError, PoolOptions, DAEMON_SETUP_CLEANUP_BATCH_SIZE,
+};
 use north_protocol::{
     encode_daemon_frame, Command, CommandAck, DaemonFrame, Heartbeat, MessageSend,
     ProtocolErrorFrame, ServerFrame, SCHEMA_VERSION,
@@ -860,6 +862,51 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
             .expect("count recent rows");
     assert_eq!(expired_count, 0);
     assert_eq!(recent_count, 1);
+
+    let batch_prefix = unique_email("expired-cleanup-batch");
+    for index in 0..=DAEMON_SETUP_CLEANUP_BATCH_SIZE {
+        let label = format!("{batch_prefix}-{index}");
+        store
+            .create_daemon_setup_request(&label)
+            .await
+            .expect("create batch cleanup setup request");
+    }
+    sqlx::query(
+        "UPDATE daemon_setup_requests
+         SET expires_at = CURRENT_TIMESTAMP - INTERVAL '2 days'
+         WHERE label LIKE $1",
+    )
+    .bind(format!("{batch_prefix}-%"))
+    .execute(&pool)
+    .await
+    .expect("age batch cleanup setup requests");
+    let first_batch_deleted = store
+        .cleanup_expired_daemon_setup_requests()
+        .await
+        .expect("run bounded cleanup");
+    assert_eq!(
+        first_batch_deleted,
+        u64::try_from(DAEMON_SETUP_CLEANUP_BATCH_SIZE).expect("positive cleanup batch")
+    );
+    let remaining_after_first: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
+            .bind(format!("{batch_prefix}-%"))
+            .fetch_one(&pool)
+            .await
+            .expect("count remaining batch rows");
+    assert_eq!(remaining_after_first, 1);
+    let second_batch_deleted = store
+        .cleanup_expired_daemon_setup_requests()
+        .await
+        .expect("finish bounded cleanup");
+    assert_eq!(second_batch_deleted, 1);
+    let remaining_after_second: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
+            .bind(format!("{batch_prefix}-%"))
+            .fetch_one(&pool)
+            .await
+            .expect("count cleaned batch rows");
+    assert_eq!(remaining_after_second, 0);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
     let address = listener.local_addr().expect("server address");

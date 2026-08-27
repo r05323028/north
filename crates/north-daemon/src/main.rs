@@ -8,6 +8,7 @@ use std::{
     error::Error,
     fmt,
     fs::{self, OpenOptions},
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
     process::Command,
@@ -143,40 +144,12 @@ async fn setup(args: &[String]) -> Result<(), CliError> {
     let expires = u64::try_from(request.expires_in_seconds).unwrap_or(0);
     let deadline = Instant::now() + Duration::from_secs(expires);
     let status_url = format!("{base}/daemon/setup/{}", request.request_token);
-    let mut retry_delay = Duration::from_secs(1);
-    let claimed = loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(CliError("daemon setup request expired".into()));
-        }
-        match curl_json::<SetupStatus>("GET", &status_url, None) {
-            Ok(status) => {
-                retry_delay = Duration::from_secs(1);
-                if status.status == "claimed" {
-                    break status;
-                }
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            Err(CurlError::Retryable(error)) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                let wait = retry_delay.min(remaining);
-                if wait.is_zero() {
-                    return Err(CliError(
-                        "daemon setup request expired while polling".into(),
-                    ));
-                }
-                eprintln!("north-daemon: {error}; retrying");
-                tokio::time::sleep(wait).await;
-                retry_delay = retry_delay
-                    .checked_mul(2)
-                    .unwrap_or(Duration::from_secs(8))
-                    .min(Duration::from_secs(8));
-            }
-            Err(CurlError::Terminal(error)) => {
-                return Err(CliError(format!("poll daemon setup: {error}")));
-            }
-        }
-    };
+    let claimed = poll_setup_status(
+        deadline,
+        || curl_json::<SetupStatus>("GET", &status_url, None),
+        |duration| tokio::time::sleep(duration),
+    )
+    .await?;
     let daemon_id = claimed
         .daemon_id
         .ok_or_else(|| CliError("setup response omitted daemon_id".into()))?;
@@ -197,6 +170,51 @@ async fn setup(args: &[String]) -> Result<(), CliError> {
         state_path.display()
     );
     Ok(())
+}
+
+async fn poll_setup_status<F, W, Fut>(
+    deadline: Instant,
+    mut poll: F,
+    mut wait: W,
+) -> Result<SetupStatus, CliError>
+where
+    F: FnMut() -> Result<SetupStatus, CurlError>,
+    W: FnMut(Duration) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let mut retry_delay = Duration::from_secs(1);
+    loop {
+        if Instant::now() >= deadline {
+            return Err(CliError("daemon setup request expired".into()));
+        }
+        match poll() {
+            Ok(status) => {
+                retry_delay = Duration::from_secs(1);
+                if status.status == "claimed" {
+                    return Ok(status);
+                }
+                wait(Duration::from_secs(2)).await;
+            }
+            Err(CurlError::Retryable(error)) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let sleep_for = retry_delay.min(remaining);
+                if sleep_for.is_zero() {
+                    return Err(CliError(
+                        "daemon setup request expired while polling".into(),
+                    ));
+                }
+                eprintln!("north-daemon: {error}; retrying");
+                wait(sleep_for).await;
+                retry_delay = retry_delay
+                    .checked_mul(2)
+                    .unwrap_or(Duration::from_secs(8))
+                    .min(Duration::from_secs(8));
+            }
+            Err(CurlError::Terminal(error)) => {
+                return Err(CliError(format!("poll daemon setup: {error}")));
+            }
+        }
+    }
 }
 
 async fn start(args: &[String]) -> Result<(), CliError> {
@@ -431,6 +449,65 @@ mod tests {
         let (body, status) = split_curl_response(b"{\"status\":\"pending\"}\n200");
         assert_eq!(body, b"{\"status\":\"pending\"}");
         assert_eq!(status, 200);
+    }
+
+    #[tokio::test]
+    async fn polling_retries_connection_failure_until_claimed() {
+        let mut polls = 0;
+        let claimed = poll_setup_status(
+            Instant::now() + Duration::from_secs(2),
+            || {
+                polls += 1;
+                if polls == 1 {
+                    Err(CurlError::Retryable("connection refused".into()))
+                } else {
+                    Ok(SetupStatus {
+                        status: "claimed".into(),
+                        daemon_id: Some("daemon-1".into()),
+                        credential: Some("credential-1".into()),
+                    })
+                }
+            },
+            |_| async {},
+        )
+        .await
+        .expect("retry then claim");
+        assert_eq!(polls, 2);
+        assert_eq!(claimed.status, "claimed");
+    }
+
+    #[tokio::test]
+    async fn polling_stops_at_expiry_and_terminal_failure() {
+        let mut polls = 0;
+        let expired = poll_setup_status(
+            Instant::now(),
+            || {
+                polls += 1;
+                Ok(SetupStatus {
+                    status: "pending".into(),
+                    daemon_id: None,
+                    credential: None,
+                })
+            },
+            |_| async {},
+        )
+        .await;
+        assert!(matches!(
+            expired,
+            Err(CliError(message)) if message == "daemon setup request expired"
+        ));
+        assert_eq!(polls, 0);
+
+        let terminal = poll_setup_status(
+            Instant::now() + Duration::from_secs(1),
+            || Err(CurlError::Terminal("bad request".into())),
+            |_| async {},
+        )
+        .await;
+        assert!(matches!(
+            terminal,
+            Err(CliError(message)) if message == "poll daemon setup: bad request"
+        ));
     }
 
     #[test]
