@@ -63,9 +63,11 @@ explicitly identified as implemented.
 - The current authentication flow accepts one user-owned daemon registration,
   associates it with its configured identity and capabilities, updates
   heartbeat-based application liveness, and supports owner/admin revocation.
-- Migration 0007 stores setup requests, registrations, execution-session owners,
-  and the server command outbox. Plaintext credentials remain on daemon hosts;
-  the server stores hashes only.
+- Migrations 0007 and 0008 store setup requests, registrations, execution-session
+  owners, the server command outbox, and bounded verification-attempt state.
+  Plaintext credentials remain on daemon hosts; the server stores hashes only.
+  Setup rows older than the retention window are removed opportunistically in
+  bounded indexed batches.
 - The durable-delivery design will maintain a local transport journal:
   command inbox/processed-command ledger and unacknowledged event replay buffer.
   This is not a business database and never grants database access.
@@ -98,9 +100,11 @@ explicitly identified as implemented.
 ## Ownership and reconnect
 
 The current session-routing foundation selects an eligible connected daemon in
-`AuthStore::start_session_with_command`, persists `execution_sessions.daemon_id`
-atomically with the first server command outbox row, and dispatches later
-commands through the persisted owner. Reconnect reconciles only sessions pinned
+`AuthStore::start_session_with_command`, assigns sequence metadata, serializes
+one complete command envelope, and persists that exact payload atomically with
+`execution_sessions.daemon_id`. `DaemonRuntime::persist_and_dispatch_command`
+then dispatches the persisted envelope through its pinned owner. Reconnect
+reconciles only sessions pinned
 to that identity; North 0.1.0 does not perform automatic live migration. Full
 business execution retry/failure policy remains server-owned target work.
 
@@ -123,6 +127,10 @@ server will decide when to send `session.resume` and when retry exhaustion becom
 `Failed`. The target execution model will keep execution failure separate from
 Requirement lifecycle state.
 
-Setup/login follows the browser-assisted CLI flow: see
-`docs/architecture/server-daemon-protocol.md` and change
-`introduce-daemon-runtime-connection`.
+Setup/login follows the browser-assisted CLI flow: approval GET is a read-only
+label-bearing confirmation, while authenticated approval POST requires a
+same-origin browser request. The CLI polls with bounded retries for transient
+network and 5xx failures and stops on terminal errors or expiry. Server startup
+clears prior daemon connection leases before accepting placement; reconnect is
+required after a single-server restart. See `docs/architecture/server-daemon-protocol.md`
+and change `introduce-daemon-runtime-connection`.

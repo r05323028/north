@@ -11,14 +11,17 @@ server at startup.
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
 | Durable coordination | daemon registrations, `session.daemon_id`, session execution state/attempts, server command outbox, event dedupe/rejection records, sequence watermarks | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
-Migration 0007 currently implements the daemon registration/setup-request and
-minimal execution-session/outbox records. Registration rows retain hashed
-credentials, owner identity, protocol/capability metadata, connection liveness,
-and revocation timestamps. The server updates liveness only for the authenticated
-connection identity; status is Live only with a heartbeat from the last 45 seconds
-and an active connection marker. Revocation clears live access without changing
-session owner. Admin/Owner users can list all registrations; other users see only
-daemons they created.
+Migrations 0007 and 0008 implement the daemon registration/setup-request,
+verification-attempt, and minimal execution-session/outbox records.
+Registration rows retain hashed credentials, owner identity,
+protocol/capability metadata, connection liveness, and revocation timestamps.
+The server updates liveness only for the authenticated connection identity;
+status is Live only with a heartbeat from the last 45 seconds and an active
+connection marker. Revocation clears live access without changing session owner.
+Admin/Owner users can list all registrations; other users see only daemons they
+created. Verification codes commit failed-attempt counts under row lock and are
+consumed after five failures. Setup rows older than 24 hours are removed in
+bounded batches using an expiry index when setup requests are created or polled.
 
 | Ephemeral (TTL) | runtime events, tool activity, transient execution logs | GC'd by a boring TTL job; expiry must never invalidate a Requirement |
 
@@ -33,7 +36,9 @@ Invariants:
   execution policy state.
 - TTL/GC deletes only ephemeral records; retention window is configuration.
 - Server command outbox rows are inserted before dispatch and remain eligible
-  for resend until `command_ack` is durably recorded.
+  for resend until `command_ack` is durably recorded. The current foundation
+  serializes the complete command envelope once and dispatches that persisted
+  representation; durable resend and ACK processing remain future work.
 - Every mutation of an existing Requirement uses an atomic `expected_revision`
   check; stale callers receive a conflict with no side effects.
 - `requirement.assessed` dedupe, revision validation, domain gates, immutable

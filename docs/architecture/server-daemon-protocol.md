@@ -135,9 +135,11 @@ Every command/event carries:
 
 The current session-routing foundation persists an execution-session owner and
 server command outbox row atomically before dispatch through
-`AuthStore::start_session_with_command`. Full command ACK semantics, retries,
-local command inbox/processed-ledger durability, and duplicate runtime
-suppression remain owned by the durable-delivery implementation.
+`AuthStore::start_session_with_command`. The server assigns sequence metadata,
+serializes one complete envelope, and `DaemonRuntime::persist_and_dispatch_command`
+dispatches the persisted payload; full command ACK semantics, retries, local
+command inbox/processed-ledger durability, and duplicate runtime suppression
+remain owned by the durable-delivery implementation.
 
 The durable-delivery contract requires daemon events to be journaled before
 transmission. The server will deduplicate event ids inside the same transaction
@@ -216,9 +218,10 @@ and business execution retry remain pending.
 ## Session routing and state ownership
 
 The current session-routing flow selects a connected eligible daemon and persists
-its identity before the first command. `DaemonRuntime::dispatch_command` routes
-commands only through that persisted owner, while inbound events and ACKs from a
-different daemon receive a protocol error. Reconnect receives one reconciliation
+its identity before the first command. `DaemonRuntime::persist_and_dispatch_command`
+constructs and dispatches the persisted envelope only through that owner, while
+inbound events and ACKs from a different daemon receive a protocol error.
+Reconnect receives one reconciliation
 snapshot for the same identity; revocation leaves the session pinned. Full server
 retry/failure handling remains pending.
 

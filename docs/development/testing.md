@@ -73,7 +73,7 @@ member so `cargo test --workspace` executes it.
 
 | Contract | Primary layer | Owning change |
 | --- | --- | --- |
-| command outbox, daemon inbox, duplicate `message.send`, restart recovery | Integration | introduce-server-daemon-protocol + daemon connection |
+| exact command envelope persistence/order, daemon inbox, duplicate `message.send`, restart recovery | Integration | harden-daemon-runtime-correctness covers exact persistence/order; durable inbox/replay remains introduce-server-daemon-protocol + daemon connection |
 | sequence gaps, late/out-of-order replay, protocol errors | Integration | introduce-server-daemon-protocol |
 | expected_revision HTTP 409 and no side effects | Integration | requirement-domain/conversations/human-review |
 | atomic assessment evidence/transition/dedupe before event ACK | Integration | readiness-assessment |
@@ -108,6 +108,8 @@ fork them casually. Frontend unit tests arrive with the board change.
 ## Server↔daemon transport checks
 
 Unit tests cover every `north-protocol` frame family, JSON text round trips,
+setup approval Origin/Host policy, bounded verification-attempt accounting,
+setup-row retention, restart lease invalidation, and exact outbox persistence,
 assembled `session.start` context, typed readiness evidence, canonical
 `command_ack`/`event_ack` serialization, execution-only `session.resume`,
 unsupported schema/unknown frame rejection, Axum text-frame conversion, binary
@@ -119,6 +121,8 @@ WebSocket ban. The real transport integration test is
 `tests/transport/tests/websocket.rs` and runs with
 `cargo test -p north-transport-integration --test websocket`. The PostgreSQL-backed
 daemon lifecycle test runs locally with `NORTH_TEST_DATABASE_URL` and is required
-in CI job `daemon-integration`. Durable outbox, journal replay, authentication
-persistence, socket reconnect sequencing, durable reconciliation restore, and
-browser SSE behavior remain integration/E2E obligations.
+in CI job `daemon-integration`. Durable outbox redelivery/ACK processing, journal
+replay, authentication persistence, socket reconnect sequencing, durable
+reconciliation restore, and browser SSE behavior remain integration/E2E
+obligations; exact persistence-before-dispatch and restart lease behavior are
+covered by the PostgreSQL daemon suite.
