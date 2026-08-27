@@ -38,6 +38,33 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
+  daemon-integration:
+    name: Daemon runtime integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: north
+          POSTGRES_PASSWORD: north
+          POSTGRES_DB: north
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U north -d north"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run database-backed daemon integration
+        env:
+          NORTH_TEST_DATABASE_URL: postgres://north:north@127.0.0.1:5432/north
+        run: |
+          cargo test -p north-persistence --all-targets
+          cargo test -p north-server --test daemon_runtime -- --ignored
+
   web:
     name: Web (lint, typecheck, build)
     runs-on: ubuntu-latest
@@ -69,7 +96,7 @@ jobs:
 
   gate:
     name: merge gate
-    needs: [pr-title, rust, web, openspec]
+    needs: [pr-title, rust, web, openspec, daemon-integration]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
@@ -83,10 +110,13 @@ jobs:
             echo "pr-title gate result: ${{ needs.pr-title.result }}"
             exit 1
           fi
-          for job in rust web openspec; do
+          for job in rust web openspec daemon-integration; do
             result="${{ needs.rust.result }}"
             [ "$job" = web ] && result="${{ needs.web.result }}"
             [ "$job" = openspec ] && result="${{ needs.openspec.result }}"
+            if [ "$job" = daemon-integration ]; then
+              result="${{ needs.daemon-integration.result }}"
+            fi
             echo "$job: $result"
             [ "$result" = success ] || exit 1
           done
