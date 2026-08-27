@@ -1,7 +1,7 @@
 use axum::{
     extract::{ws::WebSocketUpgrade, Json, Path, State},
     http::{header, HeaderMap, StatusCode, Uri},
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Extension, Router,
 };
@@ -199,8 +199,9 @@ pub async fn poll_setup(
 
 pub async fn preview_setup(
     State(state): State<AuthState>,
+    headers: HeaderMap,
     Path(request_token): Path<String>,
-) -> Result<Json<SetupApprovalResponse>, DaemonHttpError> {
+) -> Result<Response, DaemonHttpError> {
     let preview = state
         .store()
         .preview_daemon_setup_request(&request_token)
@@ -211,10 +212,19 @@ pub async fn preview_setup(
         DaemonSetupState::Approved => "approved",
         DaemonSetupState::Claimed => "claimed",
     };
-    Ok(Json(SetupApprovalResponse {
+    let response = SetupApprovalResponse {
         status: status.into(),
         label: preview.label,
-    }))
+    };
+    if wants_html(&headers) {
+        Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Html(render_setup_approval_page(&request_token, &response)),
+        )
+            .into_response())
+    } else {
+        Ok(Json(response).into_response())
+    }
 }
 
 pub async fn approve_setup(
@@ -222,7 +232,7 @@ pub async fn approve_setup(
     headers: HeaderMap,
     Extension(user): Extension<CurrentUser>,
     Path(request_token): Path<String>,
-) -> Result<StatusCode, DaemonHttpError> {
+) -> Result<Response, DaemonHttpError> {
     if !same_origin(&headers) {
         return Err(DaemonHttpError::Forbidden);
     }
@@ -231,7 +241,15 @@ pub async fn approve_setup(
         .approve_daemon_setup_request(&request_token, &user.user().id)
         .await
         .map_err(store_error)?;
-    Ok(StatusCode::NO_CONTENT)
+    if wants_html(&headers) {
+        Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Html(render_setup_approved_page()),
+        )
+            .into_response())
+    } else {
+        Ok(StatusCode::NO_CONTENT.into_response())
+    }
 }
 
 pub async fn list_daemons(
@@ -674,6 +692,71 @@ fn store_error(error: PersistenceError) -> DaemonHttpError {
     }
 }
 
+fn wants_html(headers: &HeaderMap) -> bool {
+    let Some(accept) = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let mut html = false;
+    let mut json = false;
+    for media_range in accept.split(',') {
+        let media_type = media_range.split(';').next().unwrap_or("").trim();
+        if media_type.eq_ignore_ascii_case("text/html") {
+            html = true;
+        }
+        if media_type.eq_ignore_ascii_case("application/json") || media_type.ends_with("+json") {
+            json = true;
+        }
+    }
+    html && !json
+}
+
+fn render_setup_approval_page(request_token: &str, response: &SetupApprovalResponse) -> String {
+    let action = escape_html(&format!("/daemon/setup/{request_token}/approve"));
+    let label = escape_html(&response.label);
+    let status = escape_html(&response.status);
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approve daemon connection</title>
+</head>
+<body>
+<main>
+<h1>Connect daemon to North</h1>
+<p>North is asking to connect a daemon.</p>
+<dl>
+<dt>Daemon</dt><dd>{label}</dd>
+<dt>Setup state</dt><dd>{status}</dd>
+</dl>
+<form method="POST" action="{action}">
+<button type="submit">Approve</button>
+</form>
+<p><a href="/">Cancel / back</a></p>
+</main>
+</body>
+</html>
+"#
+    )
+}
+
+fn render_setup_approved_page() -> &'static str {
+    "<!doctype html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>Daemon approved</title></head>\n<body><main><h1>Daemon approved</h1><p>You may return to the terminal.</p></main></body>\n</html>\n"
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 fn same_origin(headers: &HeaderMap) -> bool {
     let Some(origin) = headers
         .get(header::ORIGIN)
@@ -712,6 +795,33 @@ fn server_time() -> String {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn approval_content_negotiation_prefers_explicit_json() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/html,application/xhtml+xml"),
+        );
+        assert!(wants_html(&headers));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        assert!(!wants_html(&headers));
+    }
+
+    #[test]
+    fn approval_html_escapes_label_and_token() {
+        let html = render_setup_approval_page(
+            "token\"&",
+            &SetupApprovalResponse {
+                status: "pending".into(),
+                label: "<daemon>".into(),
+            },
+        );
+        assert!(html.contains("&lt;daemon&gt;"));
+        assert!(html.contains(r#"token&quot;&amp;"#));
+        assert!(!html.contains("<daemon>"));
+        assert!(!html.contains("credential"));
+    }
 
     #[test]
     fn same_origin_requires_matching_request_host() {

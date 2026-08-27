@@ -1,6 +1,6 @@
 use axum::{
     body::{to_bytes, Body},
-    http::{Method, Request, StatusCode},
+    http::{header, HeaderValue, Method, Request, StatusCode},
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -52,12 +52,34 @@ async fn response_json<T: DeserializeOwned>(response: Response) -> T {
     serde_json::from_slice(&bytes).expect("JSON response")
 }
 
+async fn response_text(response: Response) -> String {
+    let bytes = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("response body");
+    String::from_utf8(bytes.to_vec()).expect("UTF-8 response")
+}
+
 fn cookie(token: &str) -> String {
     format!("north_session={token}")
 }
 
 fn request(method: Method, uri: &str, session: Option<&str>, body: Body) -> Request<Body> {
     request_with_origin(method, uri, session, body, Some("http://north.test"))
+}
+
+fn request_with_accept(
+    method: Method,
+    uri: &str,
+    session: Option<&str>,
+    body: Body,
+    accept: &str,
+) -> Request<Body> {
+    let mut request = request(method, uri, session, body);
+    request.headers_mut().insert(
+        header::ACCEPT,
+        HeaderValue::from_str(accept).expect("accept header"),
+    );
+    request
 }
 
 fn request_with_origin(
@@ -209,31 +231,84 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
 
     let response = app
         .clone()
-        .oneshot(request(
+        .oneshot(request_with_accept(
             Method::GET,
             &created.verification_path,
             Some(&admin.token),
             Body::empty(),
+            "text/html",
         ))
         .await
-        .expect("approval preview response");
+        .expect("browser approval page response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    let html = response_text(response).await;
+    assert!(html.contains("Connect daemon to North"));
+    assert!(html.contains("North is asking to connect a daemon."));
+    assert!(html.contains("integration daemon"));
+    assert!(html.contains("Setup state</dt><dd>pending"));
+    assert!(html.contains(&format!(
+        "<form method=\"POST\" action=\"{}\">",
+        created.verification_path
+    )));
+    assert!(html.contains(">Approve</button>"));
+    assert!(html.contains("Cancel / back"));
+    assert!(!html.contains("credential"));
+
+    let response = app
+        .clone()
+        .oneshot(request_with_accept(
+            Method::GET,
+            &created.verification_path,
+            Some(&admin.token),
+            Body::empty(),
+            "application/json",
+        ))
+        .await
+        .expect("API approval preview response");
     assert_eq!(response.status(), StatusCode::OK);
     let preview: SetupApprovalResponse = response_json(response).await;
     assert_eq!(preview.status, "pending");
     assert_eq!(preview.label, "integration daemon");
 
+    let mut cross_site_get = request_with_origin(
+        Method::GET,
+        &created.verification_path,
+        Some(&admin.token),
+        Body::empty(),
+        Some("https://evil.example"),
+    );
+    cross_site_get
+        .headers_mut()
+        .insert(header::ACCEPT, HeaderValue::from_static("text/html"));
     let response = app
         .clone()
-        .oneshot(request_with_origin(
+        .oneshot(cross_site_get)
+        .await
+        .expect("cross-site approval preview response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response_text(response).await;
+    assert!(html.contains("integration daemon"));
+    assert!(html.contains("Setup state</dt><dd>pending"));
+    assert!(!html.contains("credential"));
+
+    let response = app
+        .clone()
+        .oneshot(request_with_accept(
             Method::GET,
             &created.verification_path,
             Some(&admin.token),
             Body::empty(),
-            Some("https://evil.example"),
+            "application/json",
         ))
         .await
-        .expect("cross-site approval preview response");
-    assert_eq!(response.status(), StatusCode::OK);
+        .expect("read-only state response");
     let preview: SetupApprovalResponse = response_json(response).await;
     assert_eq!(preview.status, "pending");
 
@@ -300,6 +375,30 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
 
     let response = app
         .clone()
+        .oneshot(request_with_accept(
+            Method::POST,
+            &created.verification_path,
+            Some(&admin.token),
+            Body::empty(),
+            "text/html",
+        ))
+        .await
+        .expect("browser approval response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    let html = response_text(response).await;
+    assert!(html.contains("Daemon approved"));
+    assert!(html.contains("You may return to the terminal."));
+    assert!(!html.contains("credential"));
+
+    let response = app
+        .clone()
         .oneshot(request(
             Method::POST,
             &created.verification_path,
@@ -307,8 +406,8 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             Body::empty(),
         ))
         .await
-        .expect("approval response");
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        .expect("already approved response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 
     let response = app
         .clone()
@@ -335,6 +434,18 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         ))
         .await
         .expect("second claim response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &created.verification_path,
+            Some(&admin.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("already claimed approval response");
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
     let response = app
