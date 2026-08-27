@@ -1,14 +1,16 @@
 use axum::{
     extract::{ws::WebSocketUpgrade, Json, Path, State},
-    http::StatusCode,
+    http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Extension, Router,
 };
-use north_persistence::{AuthStore, DaemonRegistration, DaemonSetupClaim, PersistenceError};
+use north_persistence::{
+    AuthStore, DaemonRegistration, DaemonSetupClaim, DaemonSetupState, PersistenceError,
+};
 use north_protocol::{
-    DaemonFrame, Heartbeat, ProtocolErrorFrame, ReconcileSnapshot, ServerFrame,
-    SessionReconcileState, Welcome, PROTOCOL_VERSION, SCHEMA_VERSION,
+    Command, CommandEnvelope, DaemonFrame, Heartbeat, ProtocolErrorFrame, ReconcileSnapshot,
+    ServerFrame, SessionReconcileState, Welcome, PROTOCOL_VERSION, SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -81,6 +83,12 @@ pub struct SetupCreatedResponse {
     pub expires_in_seconds: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SetupApprovalResponse {
+    pub status: String,
+    pub label: String,
+}
+
 #[derive(Debug, Serialize)]
 struct SetupPendingResponse {
     status: &'static str,
@@ -136,7 +144,7 @@ pub fn protected_router() -> Router<AuthState> {
     Router::new()
         .route(
             "/daemon/setup/{request_token}/approve",
-            get(approve_setup).post(approve_setup),
+            get(preview_setup).post(approve_setup),
         )
         .route("/daemons", get(list_daemons))
         .route("/daemons/{daemon_id}/revoke", post(revoke_daemon))
@@ -189,11 +197,35 @@ pub async fn poll_setup(
     }
 }
 
+pub async fn preview_setup(
+    State(state): State<AuthState>,
+    Path(request_token): Path<String>,
+) -> Result<Json<SetupApprovalResponse>, DaemonHttpError> {
+    let preview = state
+        .store()
+        .preview_daemon_setup_request(&request_token)
+        .await
+        .map_err(store_error)?;
+    let status = match preview.state {
+        DaemonSetupState::Pending => "pending",
+        DaemonSetupState::Approved => "approved",
+        DaemonSetupState::Claimed => "claimed",
+    };
+    Ok(Json(SetupApprovalResponse {
+        status: status.into(),
+        label: preview.label,
+    }))
+}
+
 pub async fn approve_setup(
     State(state): State<AuthState>,
+    headers: HeaderMap,
     Extension(user): Extension<CurrentUser>,
     Path(request_token): Path<String>,
 ) -> Result<StatusCode, DaemonHttpError> {
+    if !same_origin(&headers) {
+        return Err(DaemonHttpError::Forbidden);
+    }
     state
         .store()
         .approve_daemon_setup_request(&request_token, &user.user().id)
@@ -276,6 +308,13 @@ pub enum DaemonDispatchError {
     SessionNotFound,
     DaemonUnavailable,
     Internal,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandRequest {
+    pub command_id: String,
+    pub session_id: String,
+    pub command: Command,
 }
 
 impl DaemonRuntime {
@@ -475,35 +514,75 @@ impl DaemonRuntime {
         }
     }
 
-    pub async fn start_session_with_command(
+    pub async fn persist_and_dispatch_command(
         &self,
-        session_id: &str,
-        command_id: &str,
-        payload: &str,
+        request: CommandRequest,
         required_capabilities: &[String],
-    ) -> Result<north_persistence::PinnedCommand, PersistenceError> {
-        self.inner
-            .store
-            .start_session_with_command(session_id, command_id, payload, required_capabilities)
-            .await
-    }
-
-    pub async fn dispatch_command(&self, command: ServerFrame) -> Result<(), DaemonDispatchError> {
-        let session_id = match &command {
-            ServerFrame::Command(command) => &command.session_id,
-            _ => return Err(DaemonDispatchError::InvalidCommand),
-        };
-        let daemon_id = self
+    ) -> Result<north_persistence::PinnedCommand, DaemonDispatchError> {
+        let command_id = request.command_id.clone();
+        let session_id = request.session_id.clone();
+        let envelope_command_id = command_id.clone();
+        let envelope_session_id = session_id.clone();
+        let command = request.command.clone();
+        let pinned = self
             .inner
             .store
-            .session_owner(session_id)
+            .start_session_with_command(
+                &session_id,
+                &command_id,
+                required_capabilities,
+                move |_daemon_id, server_command_seq| {
+                    ServerFrame::Command(CommandEnvelope {
+                        command_id: envelope_command_id.clone(),
+                        session_id: envelope_session_id.clone(),
+                        server_command_seq,
+                        sent_at: server_time(),
+                        schema_version: SCHEMA_VERSION,
+                        command: command.clone(),
+                    })
+                    .to_json()
+                    .map_err(|_| PersistenceError::InvalidCommandPayload)
+                },
+            )
             .await
-            .map_err(|_| DaemonDispatchError::Internal)?
-            .ok_or(DaemonDispatchError::SessionNotFound)?;
+            .map_err(|error| match error {
+                PersistenceError::NoEligibleDaemon => DaemonDispatchError::DaemonUnavailable,
+                PersistenceError::InvalidCommandPayload => DaemonDispatchError::InvalidCommand,
+                _ => DaemonDispatchError::Internal,
+            })?;
+        let persisted = ServerFrame::from_json(&pinned.payload)
+            .map_err(|_| DaemonDispatchError::InvalidCommand)?;
+        let ServerFrame::Command(envelope) = &persisted else {
+            return Err(DaemonDispatchError::InvalidCommand);
+        };
+        if envelope.command_id != pinned.command_id
+            || envelope.session_id != pinned.session_id
+            || envelope.server_command_seq != pinned.server_command_seq
+        {
+            return Err(DaemonDispatchError::InvalidCommand);
+        }
+        self.dispatch_persisted_command(&pinned, persisted).await?;
+        Ok(pinned)
+    }
+
+    async fn dispatch_persisted_command(
+        &self,
+        pinned: &north_persistence::PinnedCommand,
+        command: ServerFrame,
+    ) -> Result<(), DaemonDispatchError> {
+        let ServerFrame::Command(envelope) = &command else {
+            return Err(DaemonDispatchError::InvalidCommand);
+        };
+        if envelope.command_id != pinned.command_id
+            || envelope.session_id != pinned.session_id
+            || envelope.server_command_seq != pinned.server_command_seq
+        {
+            return Err(DaemonDispatchError::InvalidCommand);
+        }
         let daemon = self
             .inner
             .store
-            .daemon_by_id(&daemon_id)
+            .daemon_by_id(&pinned.daemon_id)
             .await
             .map_err(|_| DaemonDispatchError::Internal)?
             .ok_or(DaemonDispatchError::SessionNotFound)?;
@@ -515,7 +594,7 @@ impl DaemonRuntime {
             .live
             .lock()
             .await
-            .get(&daemon_id)
+            .get(&pinned.daemon_id)
             .map(|connection| connection.outbound.clone())
             .ok_or(DaemonDispatchError::DaemonUnavailable)?;
         outbound
@@ -585,6 +664,7 @@ fn store_error(error: PersistenceError) -> DaemonHttpError {
         }
         PersistenceError::InvalidCapabilities
         | PersistenceError::InvalidSetup
+        | PersistenceError::InvalidCommandPayload
         | PersistenceError::InvalidSessionState
         | PersistenceError::NoEligibleDaemon
         | PersistenceError::InvalidRole(_)
@@ -594,9 +674,66 @@ fn store_error(error: PersistenceError) -> DaemonHttpError {
     }
 }
 
+fn same_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Ok(origin_uri) = origin.parse::<Uri>() else {
+        return false;
+    };
+    if !matches!(origin_uri.scheme_str(), Some("http" | "https"))
+        || !(origin_uri.path().is_empty() || origin_uri.path() == "/")
+        || origin_uri.query().is_some()
+    {
+        return false;
+    }
+    origin_uri
+        .authority()
+        .is_some_and(|authority| authority.as_str().eq_ignore_ascii_case(host))
+}
+
 fn server_time() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
         .unwrap_or_else(|_| "0".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn same_origin_requires_matching_request_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("north.test"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://north.test"),
+        );
+        assert!(same_origin(&headers));
+
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert!(!same_origin(&headers));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://north.test/setup"),
+        );
+        assert!(!same_origin(&headers));
+        headers.remove(header::ORIGIN);
+        assert!(!same_origin(&headers));
+    }
 }

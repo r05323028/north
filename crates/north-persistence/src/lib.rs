@@ -14,7 +14,8 @@ use subtle::ConstantTimeEq;
 mod daemon;
 pub use daemon::{
     AuthenticatedDaemon, DaemonRegistration, DaemonSessionState, DaemonSetupClaim,
-    DaemonSetupRequest, PinnedCommand, DAEMON_SETUP_TTL_SECONDS,
+    DaemonSetupPreview, DaemonSetupRequest, DaemonSetupState, PinnedCommand,
+    DAEMON_SETUP_CLEANUP_BATCH_SIZE, DAEMON_SETUP_RETENTION_SECONDS, DAEMON_SETUP_TTL_SECONDS,
 };
 
 pub use sqlx::postgres::PgPoolOptions as PoolOptions;
@@ -22,6 +23,8 @@ pub use sqlx::PgPool as DatabasePool;
 
 /// Verification codes remain usable for ten minutes.
 pub const VERIFICATION_CODE_TTL_SECONDS: i64 = 10 * 60;
+/// Failed verification invalidates one issued code after this many attempts.
+pub const VERIFICATION_CODE_MAX_ATTEMPTS: i32 = 5;
 /// A single email cannot request more than one code per minute.
 pub const CODE_REQUEST_COOLDOWN_SECONDS: i64 = 60;
 /// Sessions remain valid for thirty days unless explicitly invalidated.
@@ -52,6 +55,7 @@ pub enum PersistenceError {
     InvalidSetup,
     NoEligibleDaemon,
     InvalidCapabilities,
+    InvalidCommandPayload,
     InvalidSessionState,
 }
 
@@ -72,6 +76,7 @@ impl fmt::Display for PersistenceError {
             Self::InvalidSetup => f.write_str("invalid daemon setup request"),
             Self::NoEligibleDaemon => f.write_str("no eligible daemon connected"),
             Self::InvalidCapabilities => f.write_str("invalid daemon capabilities"),
+            Self::InvalidCommandPayload => f.write_str("invalid durable command payload"),
             Self::InvalidSessionState => f.write_str("invalid durable session state"),
         }
     }
@@ -94,6 +99,7 @@ impl Error for PersistenceError {
             | Self::InvalidSetup
             | Self::NoEligibleDaemon
             | Self::InvalidCapabilities
+            | Self::InvalidCommandPayload
             | Self::InvalidSessionState => None,
         }
     }
@@ -196,7 +202,7 @@ impl AuthStore {
         let mut transaction = self.pool.begin().await?;
 
         let Some(code_row) = sqlx::query_as::<_, VerificationCodeRow>(
-            "SELECT id, code_hash
+            "SELECT id, code_hash, failed_attempts
              FROM verification_codes
              WHERE email = $1
                AND used_at IS NULL
@@ -219,6 +225,19 @@ impl AuthStore {
             .unwrap_u8()
             == 1;
         if !matches {
+            let failed_attempts = code_row.failed_attempts.saturating_add(1);
+            sqlx::query(
+                "UPDATE verification_codes
+                 SET failed_attempts = $2,
+                     used_at = CASE WHEN $2 >= $3 THEN CURRENT_TIMESTAMP ELSE used_at END
+                 WHERE id = $1 AND used_at IS NULL",
+            )
+            .bind(code_row.id)
+            .bind(failed_attempts)
+            .bind(VERIFICATION_CODE_MAX_ATTEMPTS)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
             return Err(PersistenceError::InvalidCode);
         }
 
@@ -358,6 +377,7 @@ impl AuthStore {
 struct VerificationCodeRow {
     id: i64,
     code_hash: Vec<u8>,
+    failed_attempts: i32,
 }
 
 #[derive(Debug, FromRow)]
@@ -409,6 +429,16 @@ fn random_hex(byte_count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    static DATABASE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    async fn database_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        DATABASE_TEST_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
 
     #[test]
     fn persisted_roles_map_only_inside_persistence() {
@@ -444,6 +474,7 @@ mod tests {
         let Ok(database_url) = std::env::var("NORTH_TEST_DATABASE_URL") else {
             return;
         };
+        let _database_test_guard = database_test_lock().await;
         let pool = PoolOptions::new()
             .max_connections(8)
             .connect(&database_url)
@@ -513,5 +544,123 @@ mod tests {
                 .await
                 .expect("count owners");
         assert_eq!(owner_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn verification_attempts_are_bounded_transactionally() {
+        let Ok(database_url) = std::env::var("NORTH_TEST_DATABASE_URL") else {
+            return;
+        };
+        let _database_test_guard = database_test_lock().await;
+        let pool = PoolOptions::new()
+            .max_connections(8)
+            .connect(&database_url)
+            .await
+            .expect("connect test database");
+        run_migrations(&pool).await.expect("run migrations");
+        let store = AuthStore::new(pool.clone());
+        let email = format!("verification-attempts-{}@example.com", random_hex(8));
+        store
+            .issue_code(&email, "123456")
+            .await
+            .expect("issue verification code");
+
+        assert!(matches!(
+            store.verify_code(&email, "000000").await,
+            Err(PersistenceError::InvalidCode)
+        ));
+        let failed_attempts: i32 = sqlx::query_scalar(
+            "SELECT failed_attempts FROM verification_codes
+             WHERE email = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("read failed attempts");
+        assert_eq!(failed_attempts, 1);
+
+        let mut attempts = Vec::new();
+        for _ in 1..VERIFICATION_CODE_MAX_ATTEMPTS {
+            let store = store.clone();
+            let email = email.clone();
+            attempts.push(tokio::spawn(async move {
+                store.verify_code(&email, "000000").await
+            }));
+        }
+        for attempt in attempts {
+            assert!(matches!(
+                attempt.await.expect("verification task"),
+                Err(PersistenceError::InvalidCode)
+            ));
+        }
+
+        let (failed_attempts, consumed): (i32, bool) = sqlx::query_as(
+            "SELECT failed_attempts, used_at IS NOT NULL
+             FROM verification_codes
+             WHERE email = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("read consumed code");
+        assert_eq!(failed_attempts, VERIFICATION_CODE_MAX_ATTEMPTS);
+        assert!(consumed);
+        assert!(matches!(
+            store.verify_code(&email, "123456").await,
+            Err(PersistenceError::InvalidCode)
+        ));
+
+        sqlx::query(
+            "UPDATE verification_codes
+             SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes'
+             WHERE email = $1",
+        )
+        .bind(&email)
+        .execute(&pool)
+        .await
+        .expect("age previous verification code");
+        store
+            .issue_code(&email, "654321")
+            .await
+            .expect("issue fresh verification code");
+        let session = store
+            .verify_code(&email, "654321")
+            .await
+            .expect("verify fresh code");
+        assert_eq!(session.user.email, email);
+        let fresh_attempts: i32 = sqlx::query_scalar(
+            "SELECT failed_attempts FROM verification_codes
+             WHERE email = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+        .expect("read fresh attempt budget");
+        assert_eq!(fresh_attempts, 0);
+
+        let superseded_email = format!("verification-superseded-{}@example.com", random_hex(8));
+        store
+            .issue_code(&superseded_email, "777777")
+            .await
+            .expect("issue superseded code");
+        sqlx::query(
+            "UPDATE verification_codes\n             SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes'\n             WHERE email = $1",
+        )
+        .bind(&superseded_email)
+        .execute(&pool)
+        .await
+        .expect("age superseded code");
+        store
+            .issue_code(&superseded_email, "888888")
+            .await
+            .expect("issue replacement code");
+        assert!(matches!(
+            store.verify_code(&superseded_email, "777777").await,
+            Err(PersistenceError::InvalidCode)
+        ));
+        store
+            .verify_code(&superseded_email, "888888")
+            .await
+            .expect("verify replacement code");
     }
 }

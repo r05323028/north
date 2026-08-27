@@ -134,6 +134,7 @@ impl From<PersistenceError> for AuthHttpError {
             | PersistenceError::InvalidSetup
             | PersistenceError::NoEligibleDaemon
             | PersistenceError::InvalidCapabilities
+            | PersistenceError::InvalidCommandPayload
             | PersistenceError::InvalidSessionState => Self::Internal,
         }
     }

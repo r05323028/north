@@ -3,6 +3,8 @@ use sqlx::FromRow;
 use subtle::ConstantTimeEq;
 
 pub const DAEMON_SETUP_TTL_SECONDS: i64 = 10 * 60;
+pub const DAEMON_SETUP_RETENTION_SECONDS: i64 = 24 * 60 * 60;
+pub const DAEMON_SETUP_CLEANUP_BATCH_SIZE: i64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonSetupRequest {
@@ -17,6 +19,19 @@ pub enum DaemonSetupClaim {
         daemon_id: String,
         credential: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonSetupState {
+    Pending,
+    Approved,
+    Claimed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonSetupPreview {
+    pub label: String,
+    pub state: DaemonSetupState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,13 +66,37 @@ pub struct PinnedCommand {
     pub session_id: String,
     pub daemon_id: String,
     pub server_command_seq: u64,
+    pub payload: String,
 }
 
 impl AuthStore {
+    /// Remove only old expired setup rows, keeping recent rows for diagnostics.
+    pub async fn cleanup_expired_daemon_setup_requests(&self) -> Result<u64, PersistenceError> {
+        let deleted = sqlx::query(
+            "WITH expired AS (
+                 SELECT id
+                 FROM daemon_setup_requests
+                 WHERE expires_at < CURRENT_TIMESTAMP
+                     - ($1::double precision * INTERVAL '1 second')
+                 ORDER BY expires_at ASC
+                 LIMIT $2
+             )
+             DELETE FROM daemon_setup_requests AS requests
+             USING expired
+             WHERE requests.id = expired.id",
+        )
+        .bind(DAEMON_SETUP_RETENTION_SECONDS)
+        .bind(DAEMON_SETUP_CLEANUP_BATCH_SIZE)
+        .execute(&self.pool)
+        .await?;
+        Ok(deleted.rows_affected())
+    }
+
     pub async fn create_daemon_setup_request(
         &self,
         label: &str,
     ) -> Result<DaemonSetupRequest, PersistenceError> {
+        self.cleanup_expired_daemon_setup_requests().await?;
         let request_token = random_hex(32);
         sqlx::query(
             "INSERT INTO daemon_setup_requests
@@ -74,6 +113,39 @@ impl AuthStore {
         Ok(DaemonSetupRequest {
             request_token,
             label: label.to_owned(),
+        })
+    }
+
+    pub async fn preview_daemon_setup_request(
+        &self,
+        request_token: &str,
+    ) -> Result<DaemonSetupPreview, PersistenceError> {
+        let Some(request) = sqlx::query_as::<_, SetupPreviewRow>(
+            "SELECT label, expires_at <= CURRENT_TIMESTAMP AS expired,
+                    approved_at IS NOT NULL AS approved,
+                    claimed_at IS NOT NULL AS claimed
+             FROM daemon_setup_requests
+             WHERE request_token_hash = $1",
+        )
+        .bind(hash_secret(request_token.as_bytes()))
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Err(PersistenceError::SetupNotFound);
+        };
+        if request.expired {
+            return Err(PersistenceError::SetupExpired);
+        }
+        let state = if request.claimed {
+            DaemonSetupState::Claimed
+        } else if request.approved {
+            DaemonSetupState::Approved
+        } else {
+            DaemonSetupState::Pending
+        };
+        Ok(DaemonSetupPreview {
+            label: request.label,
+            state,
         })
     }
 
@@ -122,6 +194,7 @@ impl AuthStore {
         &self,
         request_token: &str,
     ) -> Result<DaemonSetupClaim, PersistenceError> {
+        self.cleanup_expired_daemon_setup_requests().await?;
         let mut transaction = self.pool.begin().await?;
         let Some(request) = sqlx::query_as::<_, SetupRequestRow>(
             "SELECT label, created_by, approved_at IS NOT NULL AS approved,
@@ -219,6 +292,18 @@ impl AuthStore {
         .fetch_optional(&self.pool)
         .await?;
         row.map(DaemonRegistrationRow::into_domain).transpose()
+    }
+
+    /// Invalidate connection leases left by a prior single-server process.
+    pub async fn invalidate_daemon_connections(&self) -> Result<u64, PersistenceError> {
+        let updated = sqlx::query(
+            "UPDATE daemon_registrations
+             SET connected_at = NULL, connection_id = NULL
+             WHERE connected_at IS NOT NULL OR connection_id IS NOT NULL",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(updated.rows_affected())
     }
 
     pub async fn connect_daemon(
@@ -392,13 +477,16 @@ impl AuthStore {
         Ok(row.and_then(|row| row.daemon_id))
     }
 
-    pub async fn start_session_with_command(
+    pub async fn start_session_with_command<F>(
         &self,
         session_id: &str,
         command_id: &str,
-        payload: &str,
         required_capabilities: &[String],
-    ) -> Result<PinnedCommand, PersistenceError> {
+        build_payload: F,
+    ) -> Result<PinnedCommand, PersistenceError>
+    where
+        F: FnOnce(&str, u64) -> Result<String, PersistenceError> + Send,
+    {
         let mut transaction = self.pool.begin().await?;
         let existing = sqlx::query_as::<_, SessionOwnerRow>(
             "SELECT daemon_id
@@ -444,6 +532,9 @@ impl AuthStore {
         .bind(session_id)
         .fetch_one(&mut *transaction)
         .await?;
+        let server_command_seq =
+            u64::try_from(next_sequence).map_err(|_| PersistenceError::InvalidSessionState)?;
+        let payload = build_payload(&daemon_id, server_command_seq)?;
         sqlx::query(
             "INSERT INTO server_command_outbox
                 (command_id, session_id, daemon_id, server_command_seq, payload)
@@ -453,7 +544,7 @@ impl AuthStore {
         .bind(session_id)
         .bind(&daemon_id)
         .bind(next_sequence)
-        .bind(payload)
+        .bind(&payload)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -461,8 +552,8 @@ impl AuthStore {
             command_id: command_id.to_owned(),
             session_id: session_id.to_owned(),
             daemon_id,
-            server_command_seq: u64::try_from(next_sequence)
-                .map_err(|_| PersistenceError::InvalidSessionState)?,
+            server_command_seq,
+            payload,
         })
     }
 }
@@ -501,6 +592,14 @@ fn encode_capabilities(capabilities: &[String]) -> Result<String, PersistenceErr
 
 fn decode_capabilities(value: &str) -> Result<Vec<String>, PersistenceError> {
     serde_json::from_str(value).map_err(|_| PersistenceError::InvalidCapabilities)
+}
+
+#[derive(Debug, FromRow)]
+struct SetupPreviewRow {
+    label: String,
+    expired: bool,
+    approved: bool,
+    claimed: bool,
 }
 
 #[derive(Debug, FromRow)]

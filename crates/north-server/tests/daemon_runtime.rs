@@ -7,12 +7,19 @@ use futures_util::{SinkExt, StreamExt};
 use north_domain::role::Role;
 use north_persistence::{AuthStore, PersistenceError, PoolOptions};
 use north_protocol::{
-    encode_daemon_frame, Command, CommandAck, CommandEnvelope, DaemonFrame, Heartbeat, MessageSend,
+    encode_daemon_frame, Command, CommandAck, DaemonFrame, Heartbeat, MessageSend,
     ProtocolErrorFrame, ServerFrame, SCHEMA_VERSION,
 };
-use north_server::{auth_router, AuthState, DaemonResponse};
+use north_server::{
+    auth_router, build_app, AuthState, CommandRequest, DaemonResponse, LogCodeDelivery,
+    SetupApprovalResponse,
+};
 use serde::{de::DeserializeOwned, Deserialize};
-use std::{env, time::Duration};
+use std::{
+    env,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 use tokio::{
     net::TcpListener,
     time::{sleep, timeout},
@@ -27,6 +34,15 @@ struct SetupClaimed {
     credential: String,
 }
 
+static DATABASE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+async fn database_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    DATABASE_TEST_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
 async fn response_json<T: DeserializeOwned>(response: Response) -> T {
     let bytes = to_bytes(response.into_body(), 1024 * 1024)
         .await
@@ -39,9 +55,25 @@ fn cookie(token: &str) -> String {
 }
 
 fn request(method: Method, uri: &str, session: Option<&str>, body: Body) -> Request<Body> {
-    let mut builder = Request::builder().method(method).uri(uri);
+    request_with_origin(method, uri, session, body, Some("http://north.test"))
+}
+
+fn request_with_origin(
+    method: Method,
+    uri: &str,
+    session: Option<&str>,
+    body: Body,
+    origin: Option<&str>,
+) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("host", "north.test");
     if let Some(session) = session {
         builder = builder.header("cookie", cookie(session));
+    }
+    if let Some(origin) = origin {
+        builder = builder.header("origin", origin);
     }
     builder
         .header("content-type", "application/json")
@@ -104,6 +136,7 @@ fn heartbeat(daemon_id: &str) -> DaemonFrame {
 async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for daemon integration tests");
+    let _database_test_guard = database_test_lock().await;
     let pool = PoolOptions::new()
         .max_connections(8)
         .connect(&database_url)
@@ -171,6 +204,97 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .await
         .expect("pending response");
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &created.verification_path,
+            Some(&admin.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("approval preview response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: SetupApprovalResponse = response_json(response).await;
+    assert_eq!(preview.status, "pending");
+    assert_eq!(preview.label, "integration daemon");
+
+    let response = app
+        .clone()
+        .oneshot(request_with_origin(
+            Method::GET,
+            &created.verification_path,
+            Some(&admin.token),
+            Body::empty(),
+            Some("https://evil.example"),
+        ))
+        .await
+        .expect("cross-site approval preview response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let preview: SetupApprovalResponse = response_json(response).await;
+    assert_eq!(preview.status, "pending");
+
+    let response = app
+        .clone()
+        .oneshot(request_with_origin(
+            Method::POST,
+            &created.verification_path,
+            None,
+            Body::empty(),
+            Some("http://north.test"),
+        ))
+        .await
+        .expect("unauthenticated approval response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = app
+        .clone()
+        .oneshot(request_with_origin(
+            Method::POST,
+            &created.verification_path,
+            Some(&admin.token),
+            Body::empty(),
+            Some("https://evil.example"),
+        ))
+        .await
+        .expect("cross-site approval response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/daemon/setup/not-a-real-token/approve",
+            Some(&admin.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("invalid approval response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let expired = store
+        .create_daemon_setup_request("expired integration daemon")
+        .await
+        .expect("create expired setup request");
+    sqlx::query(
+        "UPDATE daemon_setup_requests\n         SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'\n         WHERE label = $1",
+    )
+    .bind(&expired.label)
+    .execute(&pool)
+    .await
+    .expect("expire setup request");
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!("/daemon/setup/{}/approve", expired.request_token),
+            Some(&admin.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("expired approval response");
+    assert_eq!(response.status(), StatusCode::GONE);
 
     let response = app
         .clone()
@@ -258,37 +382,39 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     let session_id = format!("daemon-session-{}", claimed.daemon_id);
     let command_id = format!("daemon-command-{}", claimed.daemon_id);
     let required_capability = format!("test:{}", claimed.daemon_id);
-    let pinned = store
-        .start_session_with_command(
-            &session_id,
-            &command_id,
-            "{}",
-            std::slice::from_ref(&required_capability),
-        )
+    let command = CommandRequest {
+        command_id: command_id.clone(),
+        session_id: session_id.clone(),
+        command: Command::MessageSend(MessageSend {
+            message_id: "message-1".into(),
+            content: "hello daemon".into(),
+        }),
+    };
+    let pinned = runtime
+        .persist_and_dispatch_command(command, std::slice::from_ref(&required_capability))
         .await
-        .expect("pin session and persist first command");
+        .expect("pin, persist, and dispatch first command");
     assert_eq!(pinned.daemon_id, claimed.daemon_id);
     let owner_before_revoke = store
         .session_owner(&session_id)
         .await
         .expect("session owner")
         .expect("pinned session");
-    let command = ServerFrame::Command(CommandEnvelope {
-        command_id: command_id.clone(),
-        session_id: session_id.clone(),
-        server_command_seq: pinned.server_command_seq,
-        sent_at: "2026-01-01T00:00:00Z".into(),
-        schema_version: SCHEMA_VERSION,
-        command: Command::MessageSend(MessageSend {
-            message_id: "message-1".into(),
-            content: "hello daemon".into(),
-        }),
-    });
-    runtime
-        .dispatch_command(command.clone())
-        .await
-        .expect("dispatch through pinned daemon");
-    assert_eq!(next_server_frame(&mut socket).await, command);
+    let received = next_server_frame(&mut socket).await;
+    let stored_payload: String =
+        sqlx::query_scalar("SELECT payload FROM server_command_outbox WHERE command_id = $1")
+            .bind(&command_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read persisted command");
+    let persisted = ServerFrame::from_json(&stored_payload).expect("decode persisted command");
+    assert_eq!(persisted, received);
+    let ServerFrame::Command(envelope) = received else {
+        panic!("expected dispatched command");
+    };
+    assert_eq!(envelope.command_id, command_id);
+    assert_eq!(envelope.session_id, session_id);
+    assert_eq!(envelope.server_command_seq, pinned.server_command_seq);
     let second_response = app
         .clone()
         .oneshot(request(
@@ -365,6 +491,54 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         ServerFrame::ProtocolError(ProtocolErrorFrame { code, .. }) if code == "daemon_identity_mismatch"
     ));
     drop(second_socket);
+    let second_capability = format!("test:{}", second_claimed.daemon_id);
+    let manual_connection = store
+        .connect_daemon(
+            &second_claimed.daemon_id,
+            &second_claimed.credential,
+            "0.1",
+            std::slice::from_ref(&second_capability),
+        )
+        .await
+        .expect("mark second daemon connected");
+    let failing_runtime = north_server::DaemonRuntime::new(store.clone());
+    let failed_command = Command::MessageSend(MessageSend {
+        message_id: "dispatch-failure-message".into(),
+        content: "must remain durable".into(),
+    });
+    let failed_request = CommandRequest {
+        command_id: format!("dispatch-failure-command-{}", second_claimed.daemon_id),
+        session_id: format!("dispatch-failure-session-{}", second_claimed.daemon_id),
+        command: failed_command.clone(),
+    };
+    let failure = failing_runtime
+        .persist_and_dispatch_command(failed_request, std::slice::from_ref(&second_capability))
+        .await;
+    assert!(matches!(
+        failure,
+        Err(north_server::DaemonDispatchError::DaemonUnavailable)
+    ));
+    let (stored_daemon_id, stored_seq, stored_payload): (String, i64, String) = sqlx::query_as(
+        "SELECT daemon_id, server_command_seq, payload\n         FROM server_command_outbox WHERE command_id = $1",
+    )
+    .bind(format!("dispatch-failure-command-{}", second_claimed.daemon_id))
+    .fetch_one(&pool)
+    .await
+    .expect("read command persisted before failed dispatch");
+    let persisted = ServerFrame::from_json(&stored_payload).expect("decode failed command");
+    let ServerFrame::Command(envelope) = persisted else {
+        panic!("expected persisted command envelope");
+    };
+    assert_eq!(stored_daemon_id, second_claimed.daemon_id);
+    assert_eq!(
+        u64::try_from(stored_seq).expect("positive sequence"),
+        envelope.server_command_seq
+    );
+    assert_eq!(envelope.command, failed_command);
+    store
+        .disconnect_daemon(&second_claimed.daemon_id, &manual_connection.connection_id)
+        .await
+        .expect("clear manually connected daemon");
 
     let last_seen_before = store
         .daemon_by_id(&claimed.daemon_id)
@@ -418,8 +592,8 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .start_session_with_command(
             &format!("stale-session-{}", claimed.daemon_id),
             &format!("stale-command-{}", claimed.daemon_id),
-            "{}",
             std::slice::from_ref(&required_capability),
+            |_, _| Ok("{}".into()),
         )
         .await;
     assert!(matches!(
@@ -580,6 +754,219 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
+    let Ok(database_url) = env::var("NORTH_TEST_DATABASE_URL") else {
+        return;
+    };
+    let _database_test_guard = database_test_lock().await;
+    let pool = PoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await
+        .expect("connect test database");
+    north_server::run_migrations(&pool)
+        .await
+        .expect("run migrations");
+    let store = AuthStore::new(pool.clone());
+
+    let email = unique_email("restart-admin");
+    store
+        .issue_code(&email, "333333")
+        .await
+        .expect("issue admin code");
+    let admin = store
+        .verify_code(&email, "333333")
+        .await
+        .expect("verify admin code");
+    store
+        .update_user_role(&admin.user.id, Role::Admin)
+        .await
+        .expect("promote admin")
+        .expect("admin exists");
+
+    let app = auth_router(AuthState::with_log_delivery(store.clone()));
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/daemon/setup/request",
+            None,
+            Body::from(r#"{"label":"restart daemon"}"#),
+        ))
+        .await
+        .expect("setup request response");
+    let created: north_server::daemon::SetupCreatedResponse = response_json(response).await;
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &created.verification_path,
+            Some(&admin.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("approval response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/daemon/setup/{}", created.request_token),
+            None,
+            Body::empty(),
+        ))
+        .await
+        .expect("claim response");
+    let claimed: SetupClaimed = response_json(response).await;
+
+    let recent_label = unique_email("recent-cleanup");
+    let recent = store
+        .create_daemon_setup_request(&recent_label)
+        .await
+        .expect("create recent setup request");
+    let expired_label = unique_email("expired-cleanup");
+    let expired = store
+        .create_daemon_setup_request(&expired_label)
+        .await
+        .expect("create expired setup request");
+    sqlx::query(
+        "UPDATE daemon_setup_requests\n         SET expires_at = CURRENT_TIMESTAMP - INTERVAL '2 days'\n         WHERE label = $1",
+    )
+    .bind(&expired.label)
+    .execute(&pool)
+    .await
+    .expect("age setup request");
+    let deleted = store
+        .cleanup_expired_daemon_setup_requests()
+        .await
+        .expect("cleanup expired setup requests");
+    assert!(deleted >= 1);
+    let expired_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label = $1")
+            .bind(&expired.label)
+            .fetch_one(&pool)
+            .await
+            .expect("count expired rows");
+    let recent_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label = $1")
+            .bind(&recent.label)
+            .fetch_one(&pool)
+            .await
+            .expect("count recent rows");
+    assert_eq!(expired_count, 0);
+    assert_eq!(recent_count, 1);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+    let address = listener.local_addr().expect("server address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve first runtime");
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/daemon/ws"))
+        .await
+        .expect("connect first daemon");
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&hello(&claimed.daemon_id, &claimed.credential))
+                .expect("encode hello")
+                .into(),
+        ))
+        .await
+        .expect("send hello");
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Welcome(_)
+    ));
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Reconcile(_)
+    ));
+    assert!(
+        store
+            .daemon_by_id(&claimed.daemon_id)
+            .await
+            .expect("daemon lookup")
+            .expect("daemon record")
+            .connected
+    );
+
+    server.abort();
+    drop(socket);
+    let restarted_app = build_app(pool.clone(), Arc::new(LogCodeDelivery))
+        .await
+        .expect("build restarted app");
+    let restart_only_capability = format!("restart-only:{}", claimed.daemon_id);
+    let stale = store
+        .start_session_with_command(
+            &format!("restart-stale-session-{}", claimed.daemon_id),
+            &format!("restart-stale-command-{}", claimed.daemon_id),
+            std::slice::from_ref(&restart_only_capability),
+            |_, _| Ok("{}".into()),
+        )
+        .await;
+    assert!(matches!(stale, Err(PersistenceError::NoEligibleDaemon)));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind restarted server");
+    let address = listener.local_addr().expect("restarted server address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, restarted_app)
+            .await
+            .expect("serve restarted runtime");
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/daemon/ws"))
+        .await
+        .expect("connect reconnected daemon");
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&hello(&claimed.daemon_id, &claimed.credential))
+                .expect("encode reconnect hello")
+                .into(),
+        ))
+        .await
+        .expect("send reconnect hello");
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Welcome(_)
+    ));
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Reconcile(_)
+    ));
+    let mut connected = false;
+    for _ in 0..20 {
+        if store
+            .daemon_by_id(&claimed.daemon_id)
+            .await
+            .expect("daemon lookup")
+            .expect("daemon record")
+            .connected
+        {
+            connected = true;
+            break;
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert!(connected, "reconnect did not restore daemon eligibility");
+    let pinned = store
+        .start_session_with_command(
+            &format!("restart-live-session-{}", claimed.daemon_id),
+            &format!("restart-live-command-{}", claimed.daemon_id),
+            std::slice::from_ref(&format!("test:{}", claimed.daemon_id)),
+            |_, _| Ok(r#"{"stored":"after-reconnect"}"#.into()),
+        )
+        .await
+        .expect("place session after reconnect");
+    assert_eq!(pinned.daemon_id, claimed.daemon_id);
+
+    drop(socket);
     server.abort();
 }
 

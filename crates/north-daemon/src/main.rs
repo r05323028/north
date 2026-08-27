@@ -26,6 +26,27 @@ impl fmt::Display for CliError {
 
 impl Error for CliError {}
 
+#[derive(Debug)]
+enum CurlError {
+    Retryable(String),
+    Terminal(String),
+}
+
+impl fmt::Display for CurlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retryable(message) => write!(f, "retryable curl failure: {message}"),
+            Self::Terminal(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<CurlError> for CliError {
+    fn from(error: CurlError) -> Self {
+        Self(error.to_string())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SetupCreated {
     request_token: String,
@@ -112,7 +133,8 @@ async fn setup(args: &[String]) -> Result<(), CliError> {
         "POST",
         &format!("{base}/daemon/setup/request"),
         Some(&serde_json::json!({"label": label}).to_string()),
-    )?;
+    )
+    .map_err(CliError::from)?;
     println!(
         "Approve daemon setup in browser: {base}{}",
         request.verification_path
@@ -121,15 +143,39 @@ async fn setup(args: &[String]) -> Result<(), CliError> {
     let expires = u64::try_from(request.expires_in_seconds).unwrap_or(0);
     let deadline = Instant::now() + Duration::from_secs(expires);
     let status_url = format!("{base}/daemon/setup/{}", request.request_token);
+    let mut retry_delay = Duration::from_secs(1);
     let claimed = loop {
-        if Instant::now() >= deadline {
+        let now = Instant::now();
+        if now >= deadline {
             return Err(CliError("daemon setup request expired".into()));
         }
-        let status: SetupStatus = curl_json("GET", &status_url, None)?;
-        if status.status == "claimed" {
-            break status;
+        match curl_json::<SetupStatus>("GET", &status_url, None) {
+            Ok(status) => {
+                retry_delay = Duration::from_secs(1);
+                if status.status == "claimed" {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(CurlError::Retryable(error)) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let wait = retry_delay.min(remaining);
+                if wait.is_zero() {
+                    return Err(CliError(
+                        "daemon setup request expired while polling".into(),
+                    ));
+                }
+                eprintln!("north-daemon: {error}; retrying");
+                tokio::time::sleep(wait).await;
+                retry_delay = retry_delay
+                    .checked_mul(2)
+                    .unwrap_or(Duration::from_secs(8))
+                    .min(Duration::from_secs(8));
+            }
+            Err(CurlError::Terminal(error)) => {
+                return Err(CliError(format!("poll daemon setup: {error}")));
+            }
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
     };
     let daemon_id = claimed
         .daemon_id
@@ -219,7 +265,7 @@ fn curl_json<T: DeserializeOwned>(
     method: &str,
     url: &str,
     body: Option<&str>,
-) -> Result<T, CliError> {
+) -> Result<T, CurlError> {
     let mut command = Command::new("curl");
     command
         .args([
@@ -228,6 +274,8 @@ fn curl_json<T: DeserializeOwned>(
             "--fail-with-body",
             "--max-time",
             "15",
+            "--write-out",
+            "\n%{http_code}",
         ])
         .args(["--request", method, url]);
     if let Some(body) = body {
@@ -235,14 +283,44 @@ fn curl_json<T: DeserializeOwned>(
     }
     let output = command
         .output()
-        .map_err(|error| CliError(format!("run curl: {error}")))?;
-    if !output.status.success() {
-        return Err(CliError(
-            String::from_utf8_lossy(&output.stderr).trim().into(),
+        .map_err(|error| CurlError::Terminal(format!("run curl: {error}")))?;
+    let (body, http_status) = split_curl_response(&output.stdout);
+    if !output.status.success() || !(200..300).contains(&http_status) {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = if detail.is_empty() {
+            format!("HTTP status {http_status}")
+        } else {
+            detail
+        };
+        return Err(classify_curl_failure(
+            http_status,
+            detail,
+            output.status.code(),
         ));
     }
-    serde_json::from_slice(&output.stdout)
-        .map_err(|error| CliError(format!("decode server response: {error}")))
+    serde_json::from_slice(body)
+        .map_err(|error| CurlError::Terminal(format!("decode server response: {error}")))
+}
+
+fn classify_curl_failure(http_status: u16, detail: String, exit_code: Option<i32>) -> CurlError {
+    let retryable_network_error =
+        matches!(exit_code, Some(5 | 6 | 7 | 16 | 18 | 28 | 52 | 55 | 56));
+    if http_status >= 500 || (http_status == 0 && retryable_network_error) {
+        CurlError::Retryable(detail)
+    } else {
+        CurlError::Terminal(detail)
+    }
+}
+
+fn split_curl_response(output: &[u8]) -> (&[u8], u16) {
+    let Some(separator) = output.iter().rposition(|byte| *byte == b'\n') else {
+        return (output, 0);
+    };
+    let status = std::str::from_utf8(&output[separator + 1..])
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    (&output[..separator], status)
 }
 
 fn write_state(path: &Path, state: &LocalState) -> Result<(), CliError> {
@@ -330,6 +408,29 @@ mod tests {
         assert_eq!(coordination.sessions.len(), 1);
         assert_eq!(coordination.sessions[0].session_id, "session-1");
         assert_eq!(coordination.sessions[0].command_ack_through_seq, 3);
+    }
+
+    #[test]
+    fn polling_failures_have_terminality() {
+        assert!(matches!(
+            classify_curl_failure(0, "connection refused".into(), Some(7)),
+            CurlError::Retryable(_)
+        ));
+        assert!(matches!(
+            classify_curl_failure(503, "service unavailable".into(), Some(22)),
+            CurlError::Retryable(_)
+        ));
+        assert!(matches!(
+            classify_curl_failure(400, "bad request".into(), Some(22)),
+            CurlError::Terminal(_)
+        ));
+        assert!(matches!(
+            classify_curl_failure(0, "malformed URL".into(), Some(3)),
+            CurlError::Terminal(_)
+        ));
+        let (body, status) = split_curl_response(b"{\"status\":\"pending\"}\n200");
+        assert_eq!(body, b"{\"status\":\"pending\"}");
+        assert_eq!(status, 200);
     }
 
     #[test]
