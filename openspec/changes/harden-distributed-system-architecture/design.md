@@ -130,20 +130,22 @@ an upgraded socket outside all handshake bounds.
 
 ### Requirement concurrency and assessment commit
 
-The API contract requires `expected_revision` on every mutation of an
+The API contract requires `expected_state_version` on every mutation of an
 existing Requirement. Persistence uses one atomic compare-and-swap update or
 row-lock transaction; a zero-row update maps to a typed conflict and HTTP 409.
 The domain aggregate remains the source of lifecycle rules and is called only
 after the current row is atomically claimed. No new domain setter or
 infrastructure dependency is needed.
 
-`requirement.assessed` uses one server transaction: dedupe event, lock/current
-claim, compare event revision, run domain gates, write immutable evidence and
-its accepted/rejected validation result, apply a valid transition, persist the
-Requirement, commit, then emit the event ACK. A duplicate committed event
-repeats only its ACK. A stale or invalid event commits a rejection/dedupe
-record with no Requirement transition, then emits `event_ack(status=rejected)`; a crash
-before that commit emits no ACK.
+`requirement.assessed` uses one server transaction: validate event identity and
+sequence, dedupe event, lock/current claim, compare `requirement_revision`, run
+domain gates, write immutable evidence and its accepted/rejected validation
+result, record the accepted promotion state version, apply a valid transition,
+persist the Requirement, commit, then emit the event ACK. A duplicate committed
+event repeats only its ACK. A well-formed stale or invalid event commits a
+rejection/dedupe record with no Requirement transition, then emits
+`event_ack(status=rejected)`; identity or sequence conflicts are protocol errors
+with no ACK. A crash before commit emits no ACK.
 
 ### Session ownership and retry authority
 

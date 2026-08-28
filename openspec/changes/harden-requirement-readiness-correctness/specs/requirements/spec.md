@@ -1,11 +1,4 @@
-# requirements Specification
-
-## Purpose
-
-Owns the requirement as a durable object whose canonical content revision and
-mutable state version support legal, permission-checked lifecycle operations.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Creation produces a Draft at revision 1
 
@@ -27,7 +20,7 @@ Request Changes; Rejected→Discussing as Reopen; plus the server-validated
 Discussing→Ready edge). A successful persisted status mutation SHALL increment
 `state_version` exactly once without changing `revision`. Illegal, stale,
 assessment-rejected, or duplicate requests SHALL fail or be idempotent without
-changing Requirement state or its version tokens.
+side effects or a state-version increment.
 
 #### Scenario: Accept requires Ready
 
@@ -104,25 +97,14 @@ description, and list entries retain their non-empty validation rules.
 - **WHEN** a client submits `summary: ""` with the current expected_state_version
 - **THEN** the persisted summary is empty and the real edit increments revision and state_version once
 
-### Requirement: Queryable list with deterministic ordering
-
-The system SHALL expose listing with search over text fields, filtering by
-status and creator, and sorting by updated time — sufficient for board and list
-views without client-side full scans.
-
-#### Scenario: Board feeds itself from the API
-
-- **WHEN** a client requests requirements grouped by status
-- **THEN** results are complete and ordered deterministically per sort key
-
 ### Requirement: Existing Requirement mutations are revision-aware
 
 Every user-driven mutation of an existing Requirement SHALL require
 `expected_state_version`. Persistence SHALL compare it atomically with the
 current row before applying a domain operation. Server-owned readiness
-ingestion instead locks the current row and matches assessment evidence on
-`requirement_revision`; it increments `state_version` only for a successful
-promotion. `revision` remains the canonical structured-content revision and
+ingestion matches assessment evidence on `requirement_revision` while holding
+the current Requirement lock; it does not receive expected_state_version from
+the daemon. `revision` remains the canonical structured-content revision and
 `state_version` changes on every real persisted Requirement mutation. A stale
 state version SHALL return a conflict (normally HTTP 409) and SHALL persist no
 content, status, revision, state_version, audit, message, or other side effect.

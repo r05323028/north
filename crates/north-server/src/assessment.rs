@@ -192,7 +192,9 @@ impl From<ReadinessError> for AssessmentHttpError {
     fn from(error: ReadinessError) -> Self {
         match error {
             ReadinessError::RequirementNotFound => Self::NotFound,
-            ReadinessError::StaleAssessment { .. } | ReadinessError::NotReady => Self::Conflict,
+            ReadinessError::StaleAssessment { .. }
+            | ReadinessError::StaleStateVersion { .. }
+            | ReadinessError::NotReady => Self::Conflict,
             ReadinessError::InvalidStatus(_)
             | ReadinessError::InvalidOutcome(_)
             | ReadinessError::InvalidEvidence
@@ -206,7 +208,9 @@ impl From<ReadinessError> for AssessmentHttpError {
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct ReviewPacketResponse {
+    pub assessment_id: String,
     pub requirement_revision: u64,
+    pub requirement_state_version: u64,
     pub goal: String,
     pub scope: String,
     pub summary: String,
@@ -227,7 +231,9 @@ pub struct ReviewedRepositoryResponse {
 impl From<ReviewPacket> for ReviewPacketResponse {
     fn from(packet: ReviewPacket) -> Self {
         Self {
+            assessment_id: packet.assessment_id,
             requirement_revision: packet.requirement_revision,
+            requirement_state_version: packet.requirement_state_version,
             goal: packet.goal,
             scope: packet.scope,
             summary: packet.summary,
@@ -303,6 +309,7 @@ mod tests {
                     assessed_at_ms: 1,
                 },
                 outcome: AssessmentOutcome::Rejected,
+                accepted_state_version: Some(1),
                 rejection_reason: Some("blockers_present".into()),
                 created_at: "now".into(),
             },

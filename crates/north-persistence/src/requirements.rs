@@ -18,6 +18,7 @@ pub struct RequirementRecord {
     pub open_questions: Vec<String>,
     pub status: RequirementStatus,
     pub revision: u64,
+    pub state_version: u64,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -77,6 +78,7 @@ pub enum RequirementError {
     Conflict,
     InvalidStatus(String),
     InvalidRevision,
+    InvalidStateVersion,
     InvalidTransition(InvalidTransition),
     Edit(EditError),
 }
@@ -86,9 +88,10 @@ impl fmt::Display for RequirementError {
         match self {
             Self::Database(error) => write!(f, "database error: {error}"),
             Self::NotFound => f.write_str("requirement not found"),
-            Self::Conflict => f.write_str("requirement revision conflict"),
+            Self::Conflict => f.write_str("requirement state version conflict"),
             Self::InvalidStatus(status) => write!(f, "invalid requirement status: {status}"),
             Self::InvalidRevision => f.write_str("invalid requirement revision"),
+            Self::InvalidStateVersion => f.write_str("invalid requirement state version"),
             Self::InvalidTransition(error) => {
                 write!(
                     f,
@@ -120,6 +123,7 @@ impl From<RestoreError> for RequirementError {
     fn from(error: RestoreError) -> Self {
         match error {
             RestoreError::InvalidRevision => Self::InvalidRevision,
+            RestoreError::InvalidStateVersion => Self::InvalidStateVersion,
         }
     }
 }
@@ -148,11 +152,13 @@ impl AuthStore {
         let row = sqlx::query_as::<_, RequirementRow>(
             "INSERT INTO requirements
                 (id, title, description, summary, acceptance_criteria,
-                 assumptions, open_questions, status, revision, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 assumptions, open_questions, status, revision, state_version,
+                 created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
              RETURNING id, title, description, summary, acceptance_criteria,
-                       assumptions, open_questions, status, revision, created_by,
-                       created_at::text AS created_at, updated_at::text AS updated_at",
+                       assumptions, open_questions, status, revision, state_version,
+                       created_by, created_at::text AS created_at,
+                       updated_at::text AS updated_at",
         )
         .bind(requirement.id())
         .bind(requirement.title())
@@ -163,6 +169,10 @@ impl AuthStore {
         .bind(requirement.open_questions().to_vec())
         .bind(persisted_status(requirement.status()))
         .bind(i64::try_from(requirement.revision()).map_err(|_| RequirementError::InvalidRevision)?)
+        .bind(
+            i64::try_from(requirement.state_version())
+                .map_err(|_| RequirementError::InvalidStateVersion)?,
+        )
         .bind(requirement.created_by())
         .fetch_one(&mut *transaction)
         .await?;
@@ -184,8 +194,9 @@ impl AuthStore {
     ) -> Result<Option<RequirementRecord>, RequirementError> {
         let row = sqlx::query_as::<_, RequirementRow>(
             "SELECT id, title, description, summary, acceptance_criteria,
-                    assumptions, open_questions, status, revision, created_by,
-                    created_at::text AS created_at, updated_at::text AS updated_at
+                    assumptions, open_questions, status, revision, state_version,
+                    created_by, created_at::text AS created_at,
+                    updated_at::text AS updated_at
              FROM requirements
              WHERE id = $1",
         )
@@ -206,8 +217,9 @@ impl AuthStore {
         let status = query.status.map(persisted_status);
         let sql = format!(
             "SELECT id, title, description, summary, acceptance_criteria,
-                    assumptions, open_questions, status, revision, created_by,
-                    created_at::text AS created_at, updated_at::text AS updated_at
+                    assumptions, open_questions, status, revision, state_version,
+                    created_by, created_at::text AS created_at,
+                    updated_at::text AS updated_at
              FROM requirements
              WHERE ($1::text IS NULL OR title ILIKE '%' || $1 || '%'
                     OR description ILIKE '%' || $1 || '%'
@@ -231,15 +243,16 @@ impl AuthStore {
     pub async fn transition_requirement(
         &self,
         requirement_id: &str,
-        expected_revision: u64,
+        expected_state_version: u64,
         actor_id: &str,
         transition: RequirementTransition,
     ) -> Result<RequirementRecord, RequirementError> {
         self.transition_requirement_with_feedback(
             requirement_id,
-            expected_revision,
+            expected_state_version,
             actor_id,
             transition,
+            None,
             None,
         )
         .await
@@ -248,24 +261,49 @@ impl AuthStore {
     pub async fn transition_requirement_with_feedback(
         &self,
         requirement_id: &str,
-        expected_revision: u64,
+        expected_state_version: u64,
         actor_id: &str,
         transition: RequirementTransition,
         feedback: Option<&str>,
+        assessment_id: Option<&str>,
     ) -> Result<RequirementRecord, RequirementError> {
         let mut transaction = self.pool.begin().await?;
         let row = lock_requirement(&mut transaction, requirement_id).await?;
         let mut requirement = row.to_domain()?;
-        if requirement.revision() != expected_revision {
+        if requirement.state_version() != expected_state_version {
             return Err(RequirementError::Conflict);
+        }
+        match transition {
+            RequirementTransition::Accept
+            | RequirementTransition::Reject
+            | RequirementTransition::RequestChanges => {
+                let assessment_id = assessment_id
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or(RequirementError::Conflict)?;
+                current_review_assessment(
+                    &mut transaction,
+                    requirement.id(),
+                    requirement.revision(),
+                    requirement.state_version(),
+                    assessment_id,
+                )
+                .await?;
+            }
+            RequirementTransition::BeginDiscussion | RequirementTransition::Reopen => {
+                if assessment_id.is_some() {
+                    return Err(RequirementError::Conflict);
+                }
+            }
         }
         let from_status = requirement.status();
         transition.apply(&mut requirement)?;
-        let updated = update_requirement(&mut transaction, &requirement, expected_revision).await?;
+        let updated =
+            update_requirement(&mut transaction, &requirement, expected_state_version).await?;
         sqlx::query(
             "INSERT INTO transition_audit
-                (requirement_id, actor_id, transition, from_status, to_status, feedback)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+                (requirement_id, actor_id, transition, from_status, to_status,
+                 feedback, assessment_id, state_version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(requirement.id())
         .bind(actor_id)
@@ -273,6 +311,11 @@ impl AuthStore {
         .bind(persisted_status(from_status))
         .bind(persisted_status(requirement.status()))
         .bind(feedback)
+        .bind(assessment_id)
+        .bind(
+            i64::try_from(requirement.state_version())
+                .map_err(|_| RequirementError::InvalidStateVersion)?,
+        )
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -282,17 +325,17 @@ impl AuthStore {
     pub async fn edit_requirement(
         &self,
         requirement_id: &str,
-        expected_revision: u64,
+        expected_state_version: u64,
         edit: &RequirementEdit,
     ) -> Result<RequirementRecord, RequirementError> {
-        self.edit_requirement_with_actor(requirement_id, expected_revision, "system", edit)
+        self.edit_requirement_with_actor(requirement_id, expected_state_version, "system", edit)
             .await
     }
 
     pub async fn edit_requirement_with_actor(
         &self,
         requirement_id: &str,
-        expected_revision: u64,
+        expected_state_version: u64,
         actor_id: &str,
         edit: &RequirementEdit,
     ) -> Result<RequirementRecord, RequirementError> {
@@ -300,21 +343,23 @@ impl AuthStore {
         let row = lock_requirement(&mut transaction, requirement_id).await?;
         let original = row.clone().into_record()?;
         let mut requirement = row.to_domain()?;
-        if requirement.revision() != expected_revision {
+        if requirement.state_version() != expected_state_version {
             return Err(RequirementError::Conflict);
         }
         let was_ready = requirement.status() == RequirementStatus::Ready;
-        let revision = requirement.apply_edit(edit)?;
-        if revision == expected_revision {
+        requirement.apply_edit(edit)?;
+        if requirement.state_version() == expected_state_version {
             transaction.commit().await?;
             return Ok(original);
         }
-        let updated = update_requirement(&mut transaction, &requirement, expected_revision).await?;
+        let updated =
+            update_requirement(&mut transaction, &requirement, expected_state_version).await?;
         if was_ready {
             sqlx::query(
                 "INSERT INTO transition_audit
-                    (requirement_id, actor_id, transition, from_status, to_status, feedback)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
+                    (requirement_id, actor_id, transition, from_status, to_status,
+                     feedback, assessment_id, state_version)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(requirement.id())
             .bind(actor_id)
@@ -322,6 +367,11 @@ impl AuthStore {
             .bind(persisted_status(RequirementStatus::Ready))
             .bind(persisted_status(requirement.status()))
             .bind(Option::<&str>::None)
+            .bind(Option::<&str>::None)
+            .bind(
+                i64::try_from(requirement.state_version())
+                    .map_err(|_| RequirementError::InvalidStateVersion)?,
+            )
             .execute(&mut *transaction)
             .await?;
         }
@@ -336,8 +386,9 @@ pub(crate) async fn lock_requirement(
 ) -> Result<RequirementRow, RequirementError> {
     sqlx::query_as::<_, RequirementRow>(
         "SELECT id, title, description, summary, acceptance_criteria,
-                assumptions, open_questions, status, revision, created_by,
-                created_at::text AS created_at, updated_at::text AS updated_at
+                assumptions, open_questions, status, revision, state_version,
+                created_by, created_at::text AS created_at,
+                updated_at::text AS updated_at
          FROM requirements
          WHERE id = $1
          FOR UPDATE",
@@ -348,10 +399,43 @@ pub(crate) async fn lock_requirement(
     .ok_or(RequirementError::NotFound)
 }
 
+async fn current_review_assessment(
+    transaction: &mut Transaction<'_, Postgres>,
+    requirement_id: &str,
+    requirement_revision: u64,
+    requirement_state_version: u64,
+    assessment_id: &str,
+) -> Result<(), RequirementError> {
+    let current_id = sqlx::query_scalar::<_, String>(
+        "SELECT id
+         FROM readiness_assessments
+         WHERE id = $4
+           AND requirement_id = $1
+           AND requirement_revision = $2
+           AND accepted_state_version = $3
+           AND generation_unknown = FALSE
+           AND outcome = 'accepted'",
+    )
+    .bind(requirement_id)
+    .bind(i64::try_from(requirement_revision).map_err(|_| RequirementError::InvalidRevision)?)
+    .bind(
+        i64::try_from(requirement_state_version)
+            .map_err(|_| RequirementError::InvalidStateVersion)?,
+    )
+    .bind(assessment_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if current_id.as_deref() == Some(assessment_id) {
+        Ok(())
+    } else {
+        Err(RequirementError::Conflict)
+    }
+}
+
 pub(crate) async fn update_requirement(
     transaction: &mut Transaction<'_, Postgres>,
     requirement: &Requirement,
-    expected_revision: u64,
+    expected_state_version: u64,
 ) -> Result<RequirementRow, RequirementError> {
     let row = sqlx::query_as::<_, RequirementRow>(
         "UPDATE requirements
@@ -363,11 +447,13 @@ pub(crate) async fn update_requirement(
              open_questions = $7,
              status = $8,
              revision = $9,
+             state_version = $10,
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1 AND revision = $10
+         WHERE id = $1 AND state_version = $11
          RETURNING id, title, description, summary, acceptance_criteria,
-                   assumptions, open_questions, status, revision, created_by,
-                   created_at::text AS created_at, updated_at::text AS updated_at",
+                   assumptions, open_questions, status, revision, state_version,
+                   created_by, created_at::text AS created_at,
+                   updated_at::text AS updated_at",
     )
     .bind(requirement.id())
     .bind(requirement.title())
@@ -378,7 +464,11 @@ pub(crate) async fn update_requirement(
     .bind(requirement.open_questions().to_vec())
     .bind(persisted_status(requirement.status()))
     .bind(i64::try_from(requirement.revision()).map_err(|_| RequirementError::InvalidRevision)?)
-    .bind(i64::try_from(expected_revision).map_err(|_| RequirementError::InvalidRevision)?)
+    .bind(
+        i64::try_from(requirement.state_version())
+            .map_err(|_| RequirementError::InvalidStateVersion)?,
+    )
+    .bind(i64::try_from(expected_state_version).map_err(|_| RequirementError::InvalidStateVersion)?)
     .fetch_optional(&mut **transaction)
     .await?;
     row.ok_or(RequirementError::Conflict)
@@ -395,6 +485,7 @@ pub(crate) struct RequirementRow {
     open_questions: Vec<String>,
     status: String,
     revision: i64,
+    state_version: i64,
     created_by: String,
     created_at: String,
     updated_at: String,
@@ -424,14 +515,19 @@ impl RequirementRow {
             status: self.status()?,
             revision: u64::try_from(self.revision)
                 .map_err(|_| RequirementError::InvalidRevision)?,
+            state_version: u64::try_from(self.state_version)
+                .map_err(|_| RequirementError::InvalidStateVersion)?,
             created_by: self.created_by.clone(),
         })?)
     }
 
     pub(crate) fn into_record(self) -> Result<RequirementRecord, RequirementError> {
+        self.to_domain()?;
         let status = self.status()?;
         let revision =
             u64::try_from(self.revision).map_err(|_| RequirementError::InvalidRevision)?;
+        let state_version =
+            u64::try_from(self.state_version).map_err(|_| RequirementError::InvalidStateVersion)?;
         Ok(RequirementRecord {
             id: self.id,
             title: self.title,
@@ -442,6 +538,7 @@ impl RequirementRow {
             open_questions: self.open_questions,
             status,
             revision,
+            state_version,
             created_by: self.created_by,
             created_at: self.created_at,
             updated_at: self.updated_at,

@@ -17,16 +17,17 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | --- | --- | --- |
 | Callers cannot bypass Requirement business rules to mutate state | Enforced | private invariant-bearing fields; mutation only via operations; unit tests |
 | Lifecycle operations pin their source state (reopen only from Rejected, etc.) | Enforced | domain ops + unit tests |
-| Ready valid only for exact assessed revision | Enforced | `mark_ready` gates + unit tests |
-| Content-changing edits bump revision once; no-op edits change nothing | Enforced | `apply_edit` canonical comparison + unit tests |
-| Editing Ready demotes to Discussing (stale invalidation) | Enforced | `apply_edit` + unit tests |
-| Review packet is projection(Requirement, revision-matched assessment); stale packet unreviewable | Enforced | `ReviewPacket::project` + unit tests |
-| Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Partially Enforced | `Role::can_review` + `north-server::require_review`; existing transition consumers are owned by introduce-human-requirement-review |
+| Ready valid only for exact assessed content revision | Enforced | `mark_ready` revision gates + transactional assessment tests |
+| Content edits bump revision and state_version once; no-op edits bump neither | Enforced | `apply_edit` canonical comparison + unit/integration tests |
+| Editing Ready demotes to Discussing and advances both tokens | Enforced | `apply_edit` + integration tests |
+| Review packet binds Requirement revision/state version and assessment identity | Enforced | `ReviewPacket::project`, locked packet query, stale-review integration test |
+| Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Enforced | `Role::can_review` + server guard + assessment-bound transition integration tests |
+| Requirement access is workspace-wide in 0.1.0; no per-Requirement ACL | Enforced | authenticated routes and cross-requester integration test |
 | First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
 | Verification codes cannot be brute-forced past a bounded attempt budget | Enforced | locked transactional failed-attempt counter, five-failure consumption, PostgreSQL concurrency test |
 | Active OTP values resist database-only offline recovery | Specified | keyed OTP hashing deferred to `harden-otp-at-rest`; current SHA-256 remains documented debt |
 | Conversation is context, not source of truth | Enforced | migration 0004, requester/paginated APIs, structured-edit route, and PostgreSQL integration tests |
-| Every existing-Requirement mutation requires expected_revision | Enforced | locked persistence operations, HTTP 409 handlers, and requirement/conversation integration tests |
+| Existing-Requirement mutations require expected_state_version; revision remains content-only | Enforced | locked persistence operations, HTTP 409 handlers, and integration tests |
 | `requirement.assessed` evidence, transition, dedupe, and ACK share one commit boundary | Enforced | typed server conversion, migration 0005, event-id dedupe, post-commit ACK service, and PostgreSQL integration tests |
 
 ## Architecture & runtime

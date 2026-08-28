@@ -40,6 +40,15 @@ pub struct ReadinessAssessment {
     pub assessed_at_ms: u64,
 }
 
+/// Persisted accepted evidence paired with its stable identity and Ready
+/// generation. Persistence constructs this only after selecting one row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedReadinessAssessment {
+    pub id: String,
+    pub state_version: u64,
+    pub assessment: ReadinessAssessment,
+}
+
 /// Why a review packet cannot be projected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketError {
@@ -49,6 +58,17 @@ pub enum PacketError {
         assessment_revision: u64,
         current_revision: u64,
     },
+    /// The assessment was produced for a prior mutable Ready generation.
+    StaleStateVersion {
+        assessment_state_version: u64,
+        current_state_version: u64,
+    },
+    /// Review decisions must identify durable assessment evidence.
+    InvalidAssessmentIdentity,
+    /// Only Ready requirements can produce review packets.
+    NotReady,
+    /// Packet evidence must be an accepted Ready assessment.
+    InvalidAssessment,
 }
 
 /// Human-review handoff: a projection of the **current Requirement** plus the
@@ -64,7 +84,9 @@ pub enum PacketError {
 /// structural, not procedural.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewPacket {
+    pub assessment_id: String,
     pub requirement_revision: u64,
+    pub requirement_state_version: u64,
     pub goal: String,
     pub scope: String,
     pub summary: String,
@@ -83,25 +105,48 @@ impl ReviewPacket {
     /// or accepted.
     pub fn project(
         requirement: &Requirement,
-        latest_valid: &ReadinessAssessment,
+        evidence: &AcceptedReadinessAssessment,
     ) -> Result<Self, PacketError> {
-        if latest_valid.requirement_revision != requirement.revision() {
+        if evidence.id.trim().is_empty() {
+            return Err(PacketError::InvalidAssessmentIdentity);
+        }
+        if evidence.assessment.requirement_revision != requirement.revision() {
             return Err(PacketError::StaleAssessment {
-                assessment_revision: latest_valid.requirement_revision,
+                assessment_revision: evidence.assessment.requirement_revision,
                 current_revision: requirement.revision(),
             });
         }
+        if evidence.state_version != requirement.state_version() {
+            return Err(PacketError::StaleStateVersion {
+                assessment_state_version: evidence.state_version,
+                current_state_version: requirement.state_version(),
+            });
+        }
+        if requirement.status() != crate::status::RequirementStatus::Ready {
+            return Err(PacketError::NotReady);
+        }
+        if evidence.assessment.verdict != Verdict::Ready
+            || !evidence.assessment.blockers.is_empty()
+            || requirement
+                .acceptance_criteria()
+                .iter()
+                .all(|value| value.trim().is_empty())
+        {
+            return Err(PacketError::InvalidAssessment);
+        }
         Ok(Self {
+            assessment_id: evidence.id.clone(),
             requirement_revision: requirement.revision(),
+            requirement_state_version: requirement.state_version(),
             goal: requirement.title().to_string(),
             scope: requirement.description().to_string(),
             summary: requirement.summary().to_string(),
             acceptance_criteria: requirement.acceptance_criteria().to_vec(),
             assumptions: requirement.assumptions().to_vec(),
             open_questions: requirement.open_questions().to_vec(),
-            blockers: latest_valid.blockers.clone(),
-            assessment_assumptions: latest_valid.assumptions.clone(),
-            repositories_reviewed: latest_valid.repositories_reviewed.clone(),
+            blockers: evidence.assessment.blockers.clone(),
+            assessment_assumptions: evidence.assessment.assumptions.clone(),
+            repositories_reviewed: evidence.assessment.repositories_reviewed.clone(),
         })
     }
 }
@@ -113,6 +158,7 @@ mod tests {
     #[test]
     fn packet_projects_both_sources_when_revisions_match() {
         let mut r = Requirement::new("r1", "Login page", "Email-code login.", "u1");
+        r.begin_discussion().unwrap();
         r.apply_edit(&crate::requirement::RequirementEdit {
             summary: Some("Users log in".into()),
             acceptance_criteria: Some(vec!["code arrives".into()]),
@@ -123,7 +169,7 @@ mod tests {
         let assessment = ReadinessAssessment {
             requirement_revision: r.revision(),
             verdict: Verdict::Ready,
-            blockers: vec!["none".into()],
+            blockers: Vec::new(),
             assumptions: vec!["single tenant".into()],
             repositories_reviewed: vec![ReviewedRepository {
                 repository_id: "billing".into(),
@@ -131,12 +177,28 @@ mod tests {
             }],
             assessed_at_ms: 42,
         };
-        let packet = ReviewPacket::project(&r, &assessment).unwrap();
+        if let Err(error) = r.mark_ready(&assessment) {
+            panic!("mark ready for packet test: {error:?}");
+        }
+        let packet = match ReviewPacket::project(
+            &r,
+            &AcceptedReadinessAssessment {
+                id: "assessment-1".into(),
+                state_version: r.state_version(),
+                assessment: assessment.clone(),
+            },
+        ) {
+            Ok(packet) => packet,
+            Err(error) => panic!("matching review packet: {error:?}"),
+        };
+        assert_eq!(packet.assessment_id, "assessment-1");
+        assert_eq!(packet.requirement_revision, r.revision());
+        assert_eq!(packet.requirement_state_version, r.state_version());
         assert_eq!(packet.goal, "Login page");
         assert_eq!(packet.scope, "Email-code login.");
         assert_eq!(packet.acceptance_criteria, vec!["code arrives".to_string()]);
         assert_eq!(packet.assumptions, vec!["canonical assumption".to_string()]);
-        assert_eq!(packet.blockers, vec!["none".to_string()]);
+        assert!(packet.blockers.is_empty());
         assert_eq!(packet.repositories_reviewed.len(), 1);
     }
 
@@ -158,11 +220,113 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            ReviewPacket::project(&r, &assessment),
+            ReviewPacket::project(
+                &r,
+                &AcceptedReadinessAssessment {
+                    id: "assessment-1".into(),
+                    state_version: r.state_version(),
+                    assessment: assessment.clone(),
+                },
+            ),
             Err(PacketError::StaleAssessment {
                 assessment_revision: 1,
                 current_revision: 2,
             })
+        );
+    }
+
+    #[test]
+    fn non_ready_requirement_cannot_project_packet() {
+        let requirement = Requirement::new("r1", "Title", "Description", "u1");
+        let assessment = ReadinessAssessment {
+            requirement_revision: 1,
+            verdict: Verdict::Ready,
+            blockers: Vec::new(),
+            assumptions: Vec::new(),
+            repositories_reviewed: Vec::new(),
+            assessed_at_ms: 0,
+        };
+        assert_eq!(
+            ReviewPacket::project(
+                &requirement,
+                &AcceptedReadinessAssessment {
+                    id: "assessment-1".into(),
+                    state_version: 1,
+                    assessment,
+                },
+            ),
+            Err(PacketError::NotReady)
+        );
+    }
+
+    #[test]
+    fn stale_ready_generation_cannot_project_packet() {
+        let mut requirement = Requirement::new("r1", "Title", "Description", "u1");
+        assert!(requirement.begin_discussion().is_ok());
+        assert!(requirement
+            .apply_edit(&crate::requirement::RequirementEdit {
+                acceptance_criteria: Some(vec!["criterion".into()]),
+                ..Default::default()
+            })
+            .is_ok());
+        let assessment = ReadinessAssessment {
+            requirement_revision: requirement.revision(),
+            verdict: Verdict::Ready,
+            blockers: Vec::new(),
+            assumptions: Vec::new(),
+            repositories_reviewed: Vec::new(),
+            assessed_at_ms: 0,
+        };
+        assert!(requirement.mark_ready(&assessment).is_ok());
+        assert_eq!(
+            ReviewPacket::project(
+                &requirement,
+                &AcceptedReadinessAssessment {
+                    id: "assessment-1".into(),
+                    state_version: requirement.state_version() - 1,
+                    assessment: assessment.clone(),
+                },
+            ),
+            Err(PacketError::StaleStateVersion {
+                assessment_state_version: 3,
+                current_state_version: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_assessment_cannot_project_packet() {
+        let mut requirement = Requirement::new("r1", "Title", "Description", "u1");
+        assert!(requirement.begin_discussion().is_ok());
+        assert!(requirement
+            .apply_edit(&crate::requirement::RequirementEdit {
+                acceptance_criteria: Some(vec!["criterion".into()]),
+                ..Default::default()
+            })
+            .is_ok());
+        let valid_assessment = ReadinessAssessment {
+            requirement_revision: requirement.revision(),
+            verdict: Verdict::Ready,
+            blockers: Vec::new(),
+            assumptions: Vec::new(),
+            repositories_reviewed: Vec::new(),
+            assessed_at_ms: 0,
+        };
+        assert!(requirement.mark_ready(&valid_assessment).is_ok());
+        let invalid_assessment = ReadinessAssessment {
+            blockers: vec!["blocker".into()],
+            ..valid_assessment
+        };
+        assert_eq!(
+            ReviewPacket::project(
+                &requirement,
+                &AcceptedReadinessAssessment {
+                    id: "assessment-1".into(),
+                    state_version: requirement.state_version(),
+                    assessment: invalid_assessment,
+                },
+            ),
+            Err(PacketError::InvalidAssessment)
         );
     }
 }

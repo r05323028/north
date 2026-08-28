@@ -67,7 +67,9 @@ impl From<RequirementError> for RequirementHttpError {
             RequirementError::InvalidStatus(_)
             | RequirementError::InvalidTransition(_)
             | RequirementError::Edit(_) => Self::BadRequest,
-            RequirementError::Database(_) | RequirementError::InvalidRevision => Self::Internal,
+            RequirementError::Database(_)
+            | RequirementError::InvalidRevision
+            | RequirementError::InvalidStateVersion => Self::Internal,
         }
     }
 }
@@ -83,6 +85,7 @@ pub struct RequirementResponse {
     pub open_questions: Vec<String>,
     pub status: String,
     pub revision: u64,
+    pub state_version: u64,
     pub created_by: String,
     pub created_at: String,
     pub updated_at: String,
@@ -100,6 +103,7 @@ impl From<RequirementRecord> for RequirementResponse {
             open_questions: requirement.open_questions,
             status: requirement.status.as_str().into(),
             revision: requirement.revision,
+            state_version: requirement.state_version,
             created_by: requirement.created_by,
             created_at: requirement.created_at,
             updated_at: requirement.updated_at,
@@ -115,7 +119,7 @@ pub struct CreateRequirementRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct RequirementEditRequest {
-    pub expected_revision: Option<u64>,
+    pub expected_state_version: Option<u64>,
     pub title: Option<String>,
     pub description: Option<String>,
     pub summary: Option<String>,
@@ -126,15 +130,15 @@ pub struct RequirementEditRequest {
 
 impl RequirementEditRequest {
     fn into_domain(self) -> Result<(u64, RequirementEdit), RequirementHttpError> {
-        let expected_revision = self
-            .expected_revision
+        let expected_state_version = self
+            .expected_state_version
             .ok_or(RequirementHttpError::BadRequest)?;
         Ok((
-            expected_revision,
+            expected_state_version,
             RequirementEdit {
-                title: normalize_edit_text(self.title, 500)?,
-                description: normalize_edit_text(self.description, 10_000)?,
-                summary: normalize_edit_text(self.summary, 10_000)?,
+                title: normalize_edit_text(self.title, 500, false)?,
+                description: normalize_edit_text(self.description, 10_000, false)?,
+                summary: normalize_edit_text(self.summary, 10_000, true)?,
                 acceptance_criteria: normalize_edit_list(self.acceptance_criteria, 100, 10_000)?,
                 assumptions: normalize_edit_list(self.assumptions, 100, 10_000)?,
                 open_questions: normalize_edit_list(self.open_questions, 100, 10_000)?,
@@ -145,7 +149,8 @@ impl RequirementEditRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct TransitionRequest {
-    pub expected_revision: Option<u64>,
+    pub expected_state_version: Option<u64>,
+    pub assessment_id: Option<String>,
     pub feedback: Option<String>,
 }
 
@@ -244,10 +249,15 @@ pub async fn edit_requirement(
     Path(requirement_id): Path<String>,
     Json(payload): Json<RequirementEditRequest>,
 ) -> Result<Json<RequirementResponse>, RequirementHttpError> {
-    let (expected_revision, edit) = payload.into_domain()?;
+    let (expected_state_version, edit) = payload.into_domain()?;
     let requirement = state
         .store()
-        .edit_requirement_with_actor(&requirement_id, expected_revision, &actor.user().id, &edit)
+        .edit_requirement_with_actor(
+            &requirement_id,
+            expected_state_version,
+            &actor.user().id,
+            &edit,
+        )
         .await
         .map_err(RequirementHttpError::from)?;
     Ok(Json(requirement.into()))
@@ -264,9 +274,29 @@ async fn transition(
     if reviewer_only {
         require_review(&actor).map_err(|_| RequirementHttpError::Forbidden)?;
     }
-    let expected_revision = payload
-        .expected_revision
+    let expected_state_version = payload
+        .expected_state_version
         .ok_or(RequirementHttpError::BadRequest)?;
+    let assessment_id = payload
+        .assessment_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match operation {
+        RequirementTransition::Accept
+        | RequirementTransition::Reject
+        | RequirementTransition::RequestChanges
+            if assessment_id.is_none() =>
+        {
+            return Err(RequirementHttpError::BadRequest)
+        }
+        RequirementTransition::BeginDiscussion | RequirementTransition::Reopen
+            if assessment_id.is_some() =>
+        {
+            return Err(RequirementHttpError::BadRequest)
+        }
+        _ => {}
+    }
     let feedback = payload
         .feedback
         .map(|feedback| feedback.trim().to_owned())
@@ -283,10 +313,11 @@ async fn transition(
         .store()
         .transition_requirement_with_feedback(
             &requirement_id,
-            expected_revision,
+            expected_state_version,
             &actor.user().id,
             operation,
             feedback.as_deref(),
+            assessment_id,
         )
         .await
         .map_err(RequirementHttpError::from)?;
@@ -386,9 +417,17 @@ fn bounded_text(value: &str, max: usize) -> Option<String> {
 fn normalize_edit_text(
     value: Option<String>,
     max: usize,
+    allow_empty: bool,
 ) -> Result<Option<String>, RequirementHttpError> {
     value
-        .map(|value| bounded_text(&value, max).ok_or(RequirementHttpError::BadRequest))
+        .map(|value| {
+            let value = value.trim();
+            if value.len() > max || (!allow_empty && value.is_empty()) {
+                Err(RequirementHttpError::BadRequest)
+            } else {
+                Ok(value.to_owned())
+            }
+        })
         .transpose()
 }
 
@@ -437,7 +476,7 @@ mod tests {
     #[test]
     fn oversized_structured_edits_are_rejected() {
         assert!(RequirementEditRequest {
-            expected_revision: Some(1),
+            expected_state_version: Some(1),
             title: Some("x".repeat(501)),
             description: None,
             summary: None,
@@ -448,7 +487,7 @@ mod tests {
         .into_domain()
         .is_err());
         assert!(RequirementEditRequest {
-            expected_revision: Some(1),
+            expected_state_version: Some(1),
             title: None,
             description: None,
             summary: None,
@@ -463,7 +502,7 @@ mod tests {
     #[test]
     fn edit_values_are_trimmed_before_domain_comparison() {
         let Ok((_, edit)) = (RequirementEditRequest {
-            expected_revision: Some(1),
+            expected_state_version: Some(1),
             title: Some(" Title ".into()),
             description: Some(" Description ".into()),
             summary: Some(" Summary ".into()),
@@ -483,9 +522,41 @@ mod tests {
     }
 
     #[test]
-    fn missing_expected_revision_is_rejected() {
+    fn optional_fields_can_be_cleared() {
+        let Ok((expected, edit)) = (RequirementEditRequest {
+            expected_state_version: Some(7),
+            title: None,
+            description: None,
+            summary: Some("  ".into()),
+            acceptance_criteria: Some(Vec::new()),
+            assumptions: Some(Vec::new()),
+            open_questions: Some(Vec::new()),
+        })
+        .into_domain() else {
+            panic!("valid optional edit values");
+        };
+        assert_eq!(expected, 7);
+        assert_eq!(edit.summary.as_deref(), Some(""));
+        assert_eq!(edit.acceptance_criteria, Some(Vec::new()));
+        assert_eq!(edit.assumptions, Some(Vec::new()));
+        assert_eq!(edit.open_questions, Some(Vec::new()));
         assert!(RequirementEditRequest {
-            expected_revision: None,
+            expected_state_version: Some(7),
+            title: Some(" ".into()),
+            description: None,
+            summary: None,
+            acceptance_criteria: None,
+            assumptions: None,
+            open_questions: None,
+        }
+        .into_domain()
+        .is_err());
+    }
+
+    #[test]
+    fn missing_expected_state_version_is_rejected() {
+        assert!(RequirementEditRequest {
+            expected_state_version: None,
             title: Some("new".into()),
             description: None,
             summary: None,

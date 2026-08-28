@@ -36,6 +36,7 @@ pub struct Requirement {
     open_questions: Vec<String>,
     status: RequirementStatus,
     revision: u64,
+    state_version: u64,
     created_by: String,
 }
 
@@ -51,6 +52,7 @@ pub struct PersistedRequirement {
     pub open_questions: Vec<String>,
     pub status: RequirementStatus,
     pub revision: u64,
+    pub state_version: u64,
     pub created_by: String,
 }
 
@@ -70,6 +72,8 @@ pub struct RequirementEdit {
 pub enum RestoreError {
     /// Revisions start at one and never use zero.
     InvalidRevision,
+    /// State versions start at one and never use zero.
+    InvalidStateVersion,
 }
 
 /// Why entering `Ready` was refused.
@@ -95,6 +99,8 @@ pub enum MarkReadyError {
 pub enum EditError {
     /// Terminal states refuse direct edits; reopen or start a new requirement.
     StateForbidsEdit { status: RequirementStatus },
+    /// Version tokens cannot be incremented beyond their representable range.
+    VersionExhausted,
 }
 
 impl Requirement {
@@ -115,6 +121,7 @@ impl Requirement {
             open_questions: Vec::new(),
             status: RequirementStatus::Draft,
             revision: 1,
+            state_version: 1,
             created_by: created_by.into(),
         }
     }
@@ -123,6 +130,9 @@ impl Requirement {
     pub fn from_persisted(state: PersistedRequirement) -> Result<Self, RestoreError> {
         if state.revision == 0 {
             return Err(RestoreError::InvalidRevision);
+        }
+        if state.state_version == 0 {
+            return Err(RestoreError::InvalidStateVersion);
         }
         Ok(Self {
             id: state.id,
@@ -134,6 +144,7 @@ impl Requirement {
             open_questions: state.open_questions,
             status: state.status,
             revision: state.revision,
+            state_version: state.state_version,
             created_by: state.created_by,
         })
     }
@@ -176,6 +187,10 @@ impl Requirement {
         self.revision
     }
 
+    pub fn state_version(&self) -> u64 {
+        self.state_version
+    }
+
     pub fn created_by(&self) -> &str {
         &self.created_by
     }
@@ -193,7 +208,12 @@ impl Requirement {
                 to: next,
             });
         }
+        let next_state_version = self.state_version.checked_add(1).ok_or(InvalidTransition {
+            from: self.status,
+            to: next,
+        })?;
         self.status = next;
+        self.state_version = next_state_version;
         Ok(())
     }
 
@@ -297,13 +317,22 @@ impl Requirement {
         }
 
         let was_ready = self.status == RequirementStatus::Ready;
+        let next_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(EditError::VersionExhausted)?;
+        let next_state_version = self
+            .state_version
+            .checked_add(1)
+            .ok_or(EditError::VersionExhausted)?;
         self.title = candidate_title;
         self.description = candidate_description;
         self.summary = candidate_summary;
         self.acceptance_criteria = candidate_criteria;
         self.assumptions = candidate_assumptions;
         self.open_questions = candidate_open;
-        self.revision += 1;
+        self.revision = next_revision;
+        self.state_version = next_state_version;
         if was_ready {
             self.status = RequirementStatus::Discussing;
         }
@@ -314,7 +343,7 @@ impl Requirement {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::readiness::ReviewPacket;
+    use crate::readiness::{AcceptedReadinessAssessment, ReviewPacket};
 
     fn sample() -> Requirement {
         Requirement::new("r1", "Login page", "Users log in with email codes.", "u1")
@@ -348,6 +377,8 @@ mod tests {
         assert_eq!(r.status(), RequirementStatus::Ready);
         r.accept().unwrap();
         assert_eq!(r.status(), RequirementStatus::Accepted);
+        assert_eq!(r.revision(), 2);
+        assert_eq!(r.state_version(), 5);
     }
 
     #[test]
@@ -435,6 +466,7 @@ mod tests {
         let mut r = sample();
         discuss_with_criteria(&mut r);
         let rev_before = r.revision();
+        let state_version_before = r.state_version();
         // Empty edit.
         assert_eq!(
             r.apply_edit(&RequirementEdit::default()).unwrap(),
@@ -451,6 +483,7 @@ mod tests {
             rev_before
         );
         assert_eq!(r.revision(), rev_before);
+        assert_eq!(r.state_version(), state_version_before);
         assert_eq!(r.status(), RequirementStatus::Discussing);
     }
 
@@ -460,17 +493,28 @@ mod tests {
         discuss_with_criteria(&mut r);
         r.mark_ready(&ready_assessment(r.revision())).unwrap();
         let rev = r.revision();
+        let state_version = r.state_version();
         r.apply_edit(&RequirementEdit::default()).unwrap();
         assert_eq!(r.revision(), rev);
+        assert_eq!(r.state_version(), state_version);
         assert_eq!(r.status(), RequirementStatus::Ready);
         // The assessment is still valid.
-        assert!(ReviewPacket::project(&r, &ready_assessment(rev)).is_ok());
+        assert!(ReviewPacket::project(
+            &r,
+            &AcceptedReadinessAssessment {
+                id: "assessment-1".into(),
+                state_version: r.state_version(),
+                assessment: ready_assessment(rev),
+            },
+        )
+        .is_ok());
     }
 
     #[test]
     fn actual_edit_bumps_exactly_once() {
         let mut r = sample();
         let rev_before = r.revision();
+        let state_version_before = r.state_version();
         let rev = r
             .apply_edit(&RequirementEdit {
                 summary: Some("updated".into()),
@@ -478,6 +522,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rev, rev_before + 1);
+        assert_eq!(r.state_version(), state_version_before + 1);
     }
 
     #[test]
@@ -486,6 +531,7 @@ mod tests {
         discuss_with_criteria(&mut r);
         r.mark_ready(&ready_assessment(r.revision())).unwrap();
         let rev_before = r.revision();
+        let state_version_before = r.state_version();
         let new_rev = r
             .apply_edit(&RequirementEdit {
                 summary: Some("updated".into()),
@@ -493,6 +539,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(new_rev, rev_before + 1);
+        assert_eq!(r.state_version(), state_version_before + 1);
         assert_eq!(r.status(), RequirementStatus::Discussing);
         // Old assessment is stale by construction.
         assert!(r.mark_ready(&ready_assessment(rev_before)).is_err());
@@ -520,6 +567,27 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_zero_state_version() {
+        let state = PersistedRequirement {
+            id: "r1".into(),
+            title: "title".into(),
+            description: "description".into(),
+            summary: String::new(),
+            acceptance_criteria: Vec::new(),
+            assumptions: Vec::new(),
+            open_questions: Vec::new(),
+            status: RequirementStatus::Draft,
+            revision: 1,
+            state_version: 0,
+            created_by: "u1".into(),
+        };
+        assert_eq!(
+            Requirement::from_persisted(state),
+            Err(RestoreError::InvalidStateVersion)
+        );
+    }
+
+    #[test]
     fn accessors_expose_state_without_mutation_paths() {
         let r = sample();
         // Read-only surface compiles and returns borrowed data; there are no
@@ -529,6 +597,7 @@ mod tests {
         assert_eq!(r.created_by(), "u1");
         assert_eq!(r.status(), RequirementStatus::Draft);
         assert_eq!(r.revision(), 1);
+        assert_eq!(r.state_version(), 1);
         assert!(r.acceptance_criteria().is_empty());
     }
 }

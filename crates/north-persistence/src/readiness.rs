@@ -3,7 +3,9 @@ use crate::{
     AuthStore,
 };
 use north_domain::{
-    readiness::{ReadinessAssessment, ReviewPacket, ReviewedRepository, Verdict},
+    readiness::{
+        AcceptedReadinessAssessment, ReadinessAssessment, ReviewPacket, ReviewedRepository, Verdict,
+    },
     requirement::MarkReadyError,
     status::RequirementStatus,
 };
@@ -44,6 +46,7 @@ pub struct ReadinessAssessmentRecord {
     pub requirement_id: Option<String>,
     pub assessment: ReadinessAssessment,
     pub outcome: AssessmentOutcome,
+    pub accepted_state_version: Option<u64>,
     pub rejection_reason: Option<String>,
     pub created_at: String,
 }
@@ -75,6 +78,10 @@ pub enum ReadinessError {
         assessment_revision: u64,
         current_revision: u64,
     },
+    StaleStateVersion {
+        assessment_state_version: u64,
+        current_state_version: u64,
+    },
     NotReady,
 }
 
@@ -100,6 +107,13 @@ impl fmt::Display for ReadinessError {
             } => write!(
                 f,
                 "assessment revision {assessment_revision} does not match current revision {current_revision}"
+            ),
+            Self::StaleStateVersion {
+                assessment_state_version,
+                current_state_version,
+            } => write!(
+                f,
+                "assessment state version {assessment_state_version} does not match current state version {current_state_version}"
             ),
             Self::NotReady => f.write_str("requirement is not ready for review"),
         }
@@ -131,6 +145,7 @@ impl From<RequirementError> for ReadinessError {
             RequirementError::Conflict
             | RequirementError::InvalidTransition(_)
             | RequirementError::Edit(_) => Self::InvalidEvidence,
+            RequirementError::InvalidStateVersion => Self::InvalidEvidence,
         }
     }
 }
@@ -217,12 +232,15 @@ impl AuthStore {
             Err(RequirementError::NotFound) => {
                 let record_row = insert_assessment(
                     &mut transaction,
-                    &event,
-                    &event_requirement_id,
-                    None,
-                    assessment,
-                    AssessmentOutcome::Rejected,
-                    Some("requirement_not_found"),
+                    AssessmentInsert {
+                        event: &event,
+                        event_requirement_id: &event_requirement_id,
+                        requirement_id: None,
+                        assessment,
+                        outcome: AssessmentOutcome::Rejected,
+                        accepted_state_version: None,
+                        rejection_reason: Some("requirement_not_found"),
+                    },
                 )
                 .await?;
                 transaction.commit().await?;
@@ -234,36 +252,47 @@ impl AuthStore {
             Err(error) => return Err(ReadinessError::from(error)),
         };
         let mut requirement = row.to_domain().map_err(ReadinessError::from)?;
-        let current_revision = requirement.revision();
+        let expected_state_version = requirement.state_version();
         let (outcome, rejection_reason) = match requirement.mark_ready(assessment) {
             Ok(()) => (AssessmentOutcome::Accepted, None),
             Err(error) => (AssessmentOutcome::Rejected, Some(mark_ready_reason(&error))),
         };
+        let accepted_state_version =
+            (outcome == AssessmentOutcome::Accepted).then_some(requirement.state_version());
         let record_row = insert_assessment(
             &mut transaction,
-            &event,
-            &event_requirement_id,
-            Some(requirement_id),
-            assessment,
-            outcome,
-            rejection_reason.as_deref(),
+            AssessmentInsert {
+                event: &event,
+                event_requirement_id: &event_requirement_id,
+                requirement_id: Some(requirement_id),
+                assessment,
+                outcome,
+                accepted_state_version,
+                rejection_reason: rejection_reason.as_deref(),
+            },
         )
         .await?;
 
         if outcome == AssessmentOutcome::Accepted {
-            update_requirement(&mut transaction, &requirement, current_revision)
+            update_requirement(&mut transaction, &requirement, expected_state_version)
                 .await
                 .map_err(ReadinessError::from)?;
             sqlx::query(
                 "INSERT INTO transition_audit
-                    (requirement_id, actor_id, transition, from_status, to_status)
-                 VALUES ($1, $2, $3, $4, $5)",
+                    (requirement_id, actor_id, transition, from_status, to_status,
+                     assessment_id, state_version)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
             .bind(requirement.id())
             .bind(event_id)
             .bind("mark_ready")
             .bind(persisted_status(RequirementStatus::Discussing))
             .bind(persisted_status(requirement.status()))
+            .bind(record_row.id.as_str())
+            .bind(
+                i64::try_from(requirement.state_version())
+                    .map_err(|_| ReadinessError::InvalidEvidence)?,
+            )
             .execute(&mut *transaction)
             .await?;
         }
@@ -290,26 +319,40 @@ impl AuthStore {
         let assessment = sqlx::query_as::<_, AssessmentRow>(
             "SELECT id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
                     requirement_revision, verdict, blockers, assumptions,
-                    repositories_reviewed, outcome, rejection_reason,
+                    repositories_reviewed, outcome, accepted_state_version,
+                    rejection_reason,
                     assessed_at_ms, created_at::text AS created_at
              FROM readiness_assessments
              WHERE requirement_id = $1
                AND requirement_revision = $2
+               AND accepted_state_version = $3
+               AND generation_unknown = FALSE
                AND outcome = 'accepted'
              ORDER BY created_at DESC, id ASC
              LIMIT 1",
         )
         .bind(requirement_id)
         .bind(i64::try_from(requirement.revision()).map_err(|_| ReadinessError::InvalidRevision)?)
+        .bind(
+            i64::try_from(requirement.state_version())
+                .map_err(|_| ReadinessError::InvalidEvidence)?,
+        )
         .fetch_optional(&mut *transaction)
         .await?
         .ok_or(ReadinessError::StaleAssessment {
             assessment_revision: 0,
             current_revision: requirement.revision(),
         })?;
-        let assessment = assessment.into_record()?.assessment;
+        let assessment = assessment.into_record()?;
+        let evidence = AcceptedReadinessAssessment {
+            id: assessment.id,
+            state_version: assessment
+                .accepted_state_version
+                .ok_or(ReadinessError::InvalidEvidence)?,
+            assessment: assessment.assessment,
+        };
         let packet =
-            ReviewPacket::project(&requirement, &assessment).map_err(|error| match error {
+            ReviewPacket::project(&requirement, &evidence).map_err(|error| match error {
                 north_domain::readiness::PacketError::StaleAssessment {
                     assessment_revision,
                     current_revision,
@@ -317,6 +360,18 @@ impl AuthStore {
                     assessment_revision,
                     current_revision,
                 },
+                north_domain::readiness::PacketError::StaleStateVersion {
+                    assessment_state_version,
+                    current_state_version,
+                } => ReadinessError::StaleStateVersion {
+                    assessment_state_version,
+                    current_state_version,
+                },
+                north_domain::readiness::PacketError::InvalidAssessmentIdentity
+                | north_domain::readiness::PacketError::NotReady
+                | north_domain::readiness::PacketError::InvalidAssessment => {
+                    ReadinessError::InvalidEvidence
+                }
             })?;
         transaction.commit().await?;
         Ok(packet)
@@ -330,7 +385,8 @@ async fn assessment_by_event(
     Ok(sqlx::query_as::<_, AssessmentRow>(
         "SELECT id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
                 requirement_revision, verdict, blockers, assumptions,
-                repositories_reviewed, outcome, rejection_reason,
+                repositories_reviewed, outcome, accepted_state_version,
+                    rejection_reason,
                 assessed_at_ms, created_at::text AS created_at
          FROM readiness_assessments
          WHERE event_id = $1
@@ -370,7 +426,8 @@ async fn assessment_by_sequence(
     Ok(sqlx::query_as::<_, AssessmentRow>(
         "SELECT id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
                 requirement_revision, verdict, blockers, assumptions,
-                repositories_reviewed, outcome, rejection_reason,
+                repositories_reviewed, outcome, accepted_state_version,
+                    rejection_reason,
                 assessed_at_ms, created_at::text AS created_at
          FROM readiness_assessments
          WHERE session_id = $1 AND daemon_event_seq = $2
@@ -382,15 +439,29 @@ async fn assessment_by_sequence(
     .await?)
 }
 
+struct AssessmentInsert<'a> {
+    event: &'a AssessmentEvent<'a>,
+    event_requirement_id: &'a str,
+    requirement_id: Option<&'a str>,
+    assessment: &'a ReadinessAssessment,
+    outcome: AssessmentOutcome,
+    accepted_state_version: Option<u64>,
+    rejection_reason: Option<&'a str>,
+}
+
 async fn insert_assessment(
     transaction: &mut Transaction<'_, Postgres>,
-    event: &AssessmentEvent<'_>,
-    event_requirement_id: &str,
-    requirement_id: Option<&str>,
-    assessment: &ReadinessAssessment,
-    outcome: AssessmentOutcome,
-    rejection_reason: Option<&str>,
+    input: AssessmentInsert<'_>,
 ) -> Result<AssessmentRow, ReadinessError> {
+    let AssessmentInsert {
+        event,
+        event_requirement_id,
+        requirement_id,
+        assessment,
+        outcome,
+        accepted_state_version,
+        rejection_reason,
+    } = input;
     let assessed_at_ms =
         i64::try_from(assessment.assessed_at_ms).map_err(|_| ReadinessError::InvalidEvidence)?;
     let requirement_revision = i64::try_from(assessment.requirement_revision)
@@ -411,11 +482,13 @@ async fn insert_assessment(
         "INSERT INTO readiness_assessments
             (id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
              requirement_revision, verdict, blockers, assumptions,
-             repositories_reviewed, outcome, rejection_reason, assessed_at_ms)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             repositories_reviewed, outcome, accepted_state_version,
+             rejection_reason, assessed_at_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
                    requirement_revision, verdict, blockers, assumptions,
-                   repositories_reviewed, outcome, rejection_reason,
+                   repositories_reviewed, outcome, accepted_state_version,
+                    rejection_reason,
                    assessed_at_ms, created_at::text AS created_at",
     )
     .bind(crate::random_hex(16))
@@ -430,6 +503,12 @@ async fn insert_assessment(
     .bind(&assessment.assumptions)
     .bind(repositories_reviewed)
     .bind(outcome.as_str())
+    .bind(
+        accepted_state_version
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| ReadinessError::InvalidEvidence)?,
+    )
     .bind(rejection_reason)
     .bind(assessed_at_ms)
     .fetch_one(&mut **transaction)
@@ -450,6 +529,7 @@ struct AssessmentRow {
     assumptions: Vec<String>,
     repositories_reviewed: serde_json::Value,
     outcome: String,
+    accepted_state_version: Option<i64>,
     rejection_reason: Option<String>,
     assessed_at_ms: i64,
     created_at: String,
@@ -504,6 +584,11 @@ impl AssessmentRow {
                     .map_err(|_| ReadinessError::InvalidEvidence)?,
             },
             outcome: AssessmentOutcome::from_persisted(&self.outcome)?,
+            accepted_state_version: self
+                .accepted_state_version
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| ReadinessError::InvalidEvidence)?,
             rejection_reason: self.rejection_reason,
             created_at: self.created_at,
         })

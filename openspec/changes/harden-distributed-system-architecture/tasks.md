@@ -21,7 +21,7 @@
 - [x] 4.2 Amend `introduce-daemon-runtime-connection` and `introduce-agent-requirement-clarification` with durable `daemon_id` pinning, credential ownership/revocation, and same-daemon reconnect routing.
 - [x] 4.3 Amend `introduce-runtime-retry-and-failure-state` so server persists attempt policy/state and daemon owns only transport/local recovery mechanics.
 - [x] 4.4 Amend `introduce-configured-repositories` and `introduce-local-repository-inspection` with `disabled_at`, history-preserving identity, session/task checkout isolation, and concurrency/dirty-tree tests.
-- [x] 4.5 Amend Requirement, conversation, readiness, and human-review changes with mandatory `expected_revision`, HTTP 409 conflicts, and atomic `requirement.assessed` transaction/ACK tests.
+- [x] 4.5 Amend Requirement, conversation, readiness, and human-review changes with mandatory `expected_state_version`, HTTP 409 conflicts, and atomic `requirement.assessed` transaction/ACK tests.
 - [x] 4.6 Amend board/detail UI changes with SSE reconnect/refetch semantics and no replay-derived Requirement truth.
 
 ## 5. Validation and consistency

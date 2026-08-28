@@ -23,6 +23,22 @@ Draft ──▶ Discussing ──▶ Ready ──▶ Accepted
 | Accepted | human decision (Requirement Manager/Admin/Owner) |
 | Rejected | human decided not to take it; reopenable |
 
+## Version semantics
+
+`revision` is canonical structured-content identity. It changes only when a
+real structured edit changes title, description, summary, criteria, assumptions,
+or open questions. Readiness evidence always binds to `requirement_revision`.
+
+`state_version` is mutable Requirement-state concurrency. It starts at 1 and
+increments once for every real persisted mutation: lifecycle transition,
+readiness promotion, content edit, or Ready demotion. No-op edits, rejected
+assessments, and duplicate events do not increment either token. Existing-row
+HTTP mutations carry `expected_state_version` and stale values return HTTP 409.
+
+Review packets expose both tokens and `assessment_id`; Accept, Reject, and
+Request Changes require all relevant identity values to still match the current
+Ready state. Reopen requires the current state version but no assessment id.
+
 ## Transition ownership
 
 - `Draft → Discussing`: explicit begin-discussion operation starts clarification;

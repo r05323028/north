@@ -1,26 +1,4 @@
-# readiness Specification
-
-## Purpose
-
-Makes Ready a precise, auditable claim: an agent's verdict bound to exactly one
-content revision and one mutable Ready state generation, validated by server.
-
-## Requirements
-
-### Requirement: Assessments bind to a revision
-
-Every wire `requirement.assessed` SHALL record the requirement revision it
-targets, a typed verdict (`Ready` or `NeedsClarification`), blockers,
-assumptions, and `repositories_reviewed` entries carrying non-empty repository
-identity plus the inspected commit SHA. The server SHALL explicitly convert
-these transport values to the domain assessment; wire types SHALL remain
-domain-independent. Assessment matching SHALL use `requirement_revision`, not
-mutable `state_version`.
-
-#### Scenario: Assessment cites its sources
-
-- **WHEN** an assessment is recorded after repository inspection
-- **THEN** each reviewed repository entry includes the exact commit SHA used
+## MODIFIED Requirements
 
 ### Requirement: Server validates every gate before Ready
 
@@ -75,10 +53,10 @@ criteria, assumptions, and open questions from the canonical Requirement;
 blockers, assessment assumptions, and repositories-inspected commit SHAs from
 the latest accepted ReadinessAssessment bound to exactly that revision. The
 accepted evidence SHALL record the `state_version` created by its successful
-Ready promotion. The packet SHALL include `assessment_id`,
-`requirement_revision`, and `requirement_state_version`; persistence SHALL
-select accepted evidence for the exact current state generation, not timestamp
-order. Projection SHALL refuse any revision, state-generation, Ready-state, or
+Ready promotion. The packet SHALL include `requirement_revision`,
+`requirement_state_version`, and stable `assessment_id`; persistence SHALL select
+accepted evidence for the exact current state generation, not timestamp order.
+Projection SHALL refuse any revision, state-generation, Ready-state, or
 assessment-identity mismatch so a stale packet is never reviewable or
 acceptable. The packet SHALL NOT be stored as truth.
 

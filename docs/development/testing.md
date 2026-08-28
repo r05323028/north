@@ -75,7 +75,7 @@ member so `cargo test --workspace` executes it.
 | --- | --- | --- |
 | browser approval HTML/JSON → authenticated POST → CLI claim, exact command envelope persistence/order, daemon inbox, duplicate `message.send`, restart recovery | Integration | harden-daemon-runtime-correctness covers approval flow and exact persistence/order; durable inbox/replay remains introduce-server-daemon-protocol + daemon connection |
 | sequence gaps, late/out-of-order replay, protocol errors | Integration | introduce-server-daemon-protocol |
-| expected_revision HTTP 409 and no side effects | Integration | Implemented by requirement-domain/conversations; human-review decision coverage remains pending |
+| expected_state_version HTTP 409, assessment identity binding, and no side effects | Integration | Implemented by requirement/readiness/conversation integration tests |
 | atomic assessment evidence/transition/dedupe before event ACK | Integration | Implemented by readiness-assessment, including authenticated daemon ACK path |
 | daemon selection, pinned reconnect, credential revocation | Integration | daemon-runtime-connection |
 | server retry authority and restart-persistent attempts | Integration | runtime-retry-and-failure-state |

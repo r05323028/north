@@ -551,7 +551,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     let assessment_requirement = store
         .edit_requirement(
             &assessment_requirement_id,
-            1,
+            2,
             &RequirementEdit {
                 acceptance_criteria: Some(vec!["The assessment is session-bound".into()]),
                 ..Default::default()
@@ -560,6 +560,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .await
         .expect("add assessment criteria");
     assert_eq!(assessment_requirement.revision, 2);
+    assert_eq!(assessment_requirement.state_version, 3);
 
     let assessment_session_id = format!("assessment-session-{}", claimed.daemon_id);
     let assessment_command_id = format!("assessment-command-{}", claimed.daemon_id);
@@ -637,6 +638,8 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .expect("read assessed requirement")
         .expect("assessed requirement");
     assert_eq!(assessed.status, RequirementStatus::Ready);
+    assert_eq!(assessed.revision, 2);
+    assert_eq!(assessed.state_version, 4);
 
     socket
         .send(Message::Text(
@@ -657,11 +660,17 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             .await
             .expect("count daemon assessments");
     assert_eq!(assessment_rows, 1);
+    let duplicate_state = store
+        .requirement_by_id(&assessment_requirement_id)
+        .await
+        .expect("read duplicate assessment requirement")
+        .expect("duplicate assessment requirement");
+    assert_eq!(duplicate_state.state_version, 4);
 
     store
         .edit_requirement(
             &assessment_requirement_id,
-            2,
+            4,
             &RequirementEdit {
                 summary: Some("Changed after daemon assessment".into()),
                 ..Default::default()
@@ -703,6 +712,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .expect("stale assessed requirement");
     assert_eq!(assessed.status, RequirementStatus::Discussing);
     assert_eq!(assessed.revision, 3);
+    assert_eq!(assessed.state_version, 5);
 
     let foreign_requirement = store
         .create_requirement(
@@ -724,7 +734,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     let foreign_requirement = store
         .edit_requirement(
             &foreign_requirement.id,
-            1,
+            2,
             &RequirementEdit {
                 acceptance_criteria: Some(vec!["Foreign criterion".into()]),
                 ..Default::default()
@@ -732,8 +742,9 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         )
         .await
         .expect("add foreign criteria");
+    let foreign_event_id = format!("{assessment_event_id}-foreign");
     let foreign_event = DaemonFrame::Event(EventEnvelope {
-        event_id: format!("{assessment_event_id}-foreign"),
+        event_id: foreign_event_id.clone(),
         session_id: assessment_session_id,
         daemon_event_seq: 3,
         sent_at: "2026-01-01T00:00:02Z".into(),
@@ -766,6 +777,24 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .expect("read foreign requirement")
         .expect("foreign requirement");
     assert_eq!(foreign_state.status, RequirementStatus::Discussing);
+    assert_eq!(foreign_state.revision, 2);
+    assert_eq!(foreign_state.state_version, 3);
+    let foreign_assessments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
+            .bind(&foreign_event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count foreign assessments");
+    assert_eq!(foreign_assessments, 0);
+    let foreign_ready_audits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transition_audit
+         WHERE requirement_id = $1 AND transition = 'mark_ready'",
+    )
+    .bind(&foreign_requirement.id)
+    .fetch_one(&pool)
+    .await
+    .expect("count foreign readiness audits");
+    assert_eq!(foreign_ready_audits, 0);
     drop(socket);
     let (mut socket, _) = connect_async(format!("ws://{address}/daemon/ws"))
         .await
@@ -1131,12 +1160,11 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .execute(&pool)
         .await
         .expect("cleanup assessment session");
-    sqlx::query("DELETE FROM requirements WHERE id IN ($1, $2)")
-        .bind(&assessment_requirement_id)
+    sqlx::query("DELETE FROM requirements WHERE id = $1")
         .bind(&foreign_requirement.id)
         .execute(&pool)
         .await
-        .expect("cleanup assessment requirements");
+        .expect("cleanup foreign requirement");
 
     server.abort();
 }

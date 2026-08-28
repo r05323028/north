@@ -1,11 +1,4 @@
-# conversations Specification
-
-## Purpose
-
-Provides dialogue around a requirement while preserving structured Requirement
-state as canonical and separating content revision from mutable-state concurrency.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: One conversation per requirement
 
@@ -18,16 +11,6 @@ canonical Requirement state.
 
 - **WHEN** a user reopens a requirement after days
 - **THEN** prior messages appear in order with authors and timestamps while structured fields come from the Requirement endpoint
-
-### Requirement: Message kinds exclude raw telemetry
-
-Messages SHALL be kind requester, agent, or system. Raw tool output and model
-chain-of-thought SHALL NOT be stored as or converted into messages.
-
-#### Scenario: Tool noise stays out of chat
-
-- **WHEN** the runtime reports internal activity
-- **THEN** it never appears appended to the conversation as a message
 
 ### Requirement: Structured edits ride the domain contract
 
@@ -71,6 +54,8 @@ alter any structured field.
 
 - **WHEN** all messages are removed in a test fixture
 - **THEN** the requirement's fields, status, revision, and state_version are unchanged and fully served by the structured endpoint
+
+## ADDED Requirements
 
 ### Requirement: Conversation access follows workspace collaboration policy
 
