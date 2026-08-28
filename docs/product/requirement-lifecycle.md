@@ -35,9 +35,14 @@ readiness promotion, content edit, or Ready demotion. No-op edits, rejected
 assessments, and duplicate events do not increment either token. Existing-row
 HTTP mutations carry `expected_state_version` and stale values return HTTP 409.
 
-Review packets expose both tokens and `assessment_id`; Accept, Reject, and
-Request Changes require all relevant identity values to still match the current
-Ready state. Reopen requires the current state version but no assessment id.
+Review packets expose both tokens and `assessment_id`; while a Requirement is
+Ready and reviewable, `accepted_state_version` must equal its current
+`state_version`. Accept, Reject, and Request Changes require that exact Ready
+generation and all relevant identity values to still match. Human review then
+increments Requirement `state_version` without mutating historical evidence;
+for example, `Ready(state_version=6) → Accepted(state_version=7)` retains
+`accepted_state_version = 6`. Reopen requires the current state version but no
+assessment id.
 
 ## Transition ownership
 

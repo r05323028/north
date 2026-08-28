@@ -14,9 +14,12 @@ server at startup.
 Migrations 0003–0005 implement requirements and transition audit,
 one-to-one conversations/messages, and immutable revision-bound readiness
 evidence. Migration 0010 adds positive `requirements.state_version` with a
-backfill of 1 for existing rows. Migration 0011 records the accepted assessment
-state generation, marks unverifiable legacy generations as unknown, and replaces
-the evidence foreign-key cascade with restrictive deletion. Migrations 0007–0009 implement the daemon
+backfill of 1 for existing rows. Migration 0011 records the accepted assessment Ready-generation identity,
+marks unverifiable legacy generations as unknown, and replaces the evidence
+foreign-key cascade with restrictive deletion. `accepted_state_version` equals
+`requirements.state_version` only while that Requirement remains Ready and
+reviewable; later review transitions advance the Requirement without mutating
+historical evidence. Migrations 0007–0009 implement the daemon
 registration/setup-request, verification-attempt, execution-session/outbox
 records, and requirement binding used to authorize assessment events. Readiness evidence
 rows are append-only; a database trigger rejects direct updates/deletes, and

@@ -25,6 +25,8 @@ internal naming) does NOT block Ready unless it materially changes product behav
 
 ```text
 assessment.requirement_revision == requirement.revision
+
+While a Requirement is Ready and reviewable:
 accepted_assessment.accepted_state_version == requirement.state_version
 ```
 
@@ -37,6 +39,15 @@ every real persisted mutation, including lifecycle transitions, successful Ready
 promotion, content edits, and Ready demotion. It does not change on no-op edits,
 rejected assessments, or duplicate events. Existing-Requirement HTTP mutations
 use `expected_state_version`; stale callers receive HTTP 409 with no side effects.
+
+`accepted_state_version` is assigned once when an accepted assessment promotes a
+Discussing Requirement to Ready. It identifies that Ready generation; it is not
+a mutable pointer and the historical assessment never changes. Human review
+transitions subsequently advance the Requirement token without changing the
+evidence, for example `Ready(state_version=6) -> Accepted(state_version=7)`
+retains `accepted_state_version = 6`. Exact-generation equality is required when
+constructing a review packet or validating Accept, Reject, or Request Changes,
+not as a universal invariant for terminal or later lifecycle states.
 
 ## Concurrent API and event handling
 

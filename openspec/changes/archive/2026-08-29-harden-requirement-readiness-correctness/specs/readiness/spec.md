@@ -58,7 +58,11 @@ Ready promotion. The packet SHALL include `requirement_revision`,
 accepted evidence for the exact current state generation, not timestamp order.
 Projection SHALL refuse any revision, state-generation, Ready-state, or
 assessment-identity mismatch so a stale packet is never reviewable or
-acceptable. The packet SHALL NOT be stored as truth.
+acceptable. Equality between `accepted_state_version` and the Requirement's
+current `state_version` is required only while that exact Ready generation is
+current and reviewable. A later human review transition increments the
+Requirement token without mutating historical assessment evidence. The packet
+SHALL NOT be stored as truth.
 
 #### Scenario: Reviewer skips the transcript
 

@@ -20,7 +20,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Ready valid only for exact assessed content revision | Enforced | `mark_ready` revision gates + transactional assessment tests |
 | Content edits bump revision and state_version once; no-op edits bump neither | Enforced | `apply_edit` canonical comparison + unit/integration tests |
 | Editing Ready demotes to Discussing and advances both tokens | Enforced | `apply_edit` + integration tests |
-| Review packet binds Requirement revision/state version and assessment identity | Enforced | `ReviewPacket::project`, locked packet query, stale-review integration test |
+| Review packet binds Requirement revision/state version and assessment identity | Enforced | `ReviewPacket::project`, locked packet query, stale-review integration test; generation equality is scoped to Ready reviewability |
 | Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Enforced | `Role::can_review` + server guard + assessment-bound transition integration tests |
 | Requirement access is workspace-wide in 0.1.0; no per-Requirement ACL | Enforced | authenticated routes and cross-requester integration test |
 | First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
