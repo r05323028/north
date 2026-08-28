@@ -69,6 +69,8 @@ member so `cargo test --workspace` executes it.
 | E2E | Not implemented — browser approval UI is covered at HTTP integration; Playwright workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
+PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants.
+
 ## Required future proofs
 
 | Contract | Primary layer | Owning change |

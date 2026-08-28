@@ -141,8 +141,8 @@ async fn legacy_readiness_upgrade_backfills_generations_conservatively() {
         .expect("set isolated migration search path");
 
     // Test-only helper: execute the same migration SQL used by the production
-    // sqlx migrator, stopping at legacy readiness schema 0005 before applying
-    // the real 0010 and 0011 upgrade migrations.
+    // sqlx migrator. Legacy readiness fixtures are inserted after 0005, before
+    // runtime and state/readiness upgrade migrations run.
     for (name, sql) in [
         (
             "0001_email_auth",
@@ -290,6 +290,32 @@ async fn legacy_readiness_upgrade_backfills_generations_conservatively() {
         Some("needs more detail"),
     )
     .await;
+
+    for (name, sql) in [
+        (
+            "0007_daemon_runtime",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../migrations/0007_daemon_runtime.sql"
+            )),
+        ),
+        (
+            "0008_runtime_hardening",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../migrations/0008_runtime_hardening.sql"
+            )),
+        ),
+        (
+            "0009_execution_session_requirement",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../migrations/0009_execution_session_requirement.sql"
+            )),
+        ),
+    ] {
+        apply_migration(&mut connection, name, sql).await;
+    }
 
     apply_migration(
         &mut connection,

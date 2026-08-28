@@ -43,6 +43,7 @@ database_integration() {
   cargo test -p north-server --test requirements -- --ignored
   cargo test -p north-server --test conversations_readiness -- --ignored
   cargo test -p north-server --test daemon_runtime -- --ignored
+  cargo test -p north-server --test migration_upgrade -- --ignored
   cargo test -p north-transport-integration --test websocket
 }
 
