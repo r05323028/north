@@ -469,12 +469,25 @@ impl AuthStore {
         session_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
         let row = sqlx::query_as::<_, SessionOwnerRow>(
-            "SELECT daemon_id FROM execution_sessions WHERE id = $1",
+            "SELECT daemon_id, requirement_id FROM execution_sessions WHERE id = $1",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.and_then(|row| row.daemon_id))
+    }
+
+    pub async fn session_requirement(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, PersistenceError> {
+        let row = sqlx::query_as::<_, SessionRequirementRow>(
+            "SELECT requirement_id FROM execution_sessions WHERE id = $1",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|row| row.requirement_id))
     }
 
     pub async fn start_session_with_command<F>(
@@ -487,9 +500,30 @@ impl AuthStore {
     where
         F: FnOnce(&str, u64) -> Result<String, PersistenceError> + Send,
     {
+        self.start_session_with_command_for_requirement(
+            session_id,
+            command_id,
+            required_capabilities,
+            None,
+            build_payload,
+        )
+        .await
+    }
+
+    pub async fn start_session_with_command_for_requirement<F>(
+        &self,
+        session_id: &str,
+        command_id: &str,
+        required_capabilities: &[String],
+        requirement_id: Option<&str>,
+        build_payload: F,
+    ) -> Result<PinnedCommand, PersistenceError>
+    where
+        F: FnOnce(&str, u64) -> Result<String, PersistenceError> + Send,
+    {
         let mut transaction = self.pool.begin().await?;
         let existing = sqlx::query_as::<_, SessionOwnerRow>(
-            "SELECT daemon_id
+            "SELECT daemon_id, requirement_id
              FROM execution_sessions
              WHERE id = $1
              FOR UPDATE",
@@ -499,6 +533,27 @@ impl AuthStore {
         .await?;
 
         let daemon_id = if let Some(existing) = existing {
+            if existing
+                .requirement_id
+                .as_deref()
+                .zip(requirement_id)
+                .is_some_and(|(bound, requested)| bound != requested)
+            {
+                return Err(PersistenceError::SessionRequirementMismatch);
+            }
+            if let Some(requirement_id) =
+                requirement_id.filter(|_| existing.requirement_id.is_none())
+            {
+                sqlx::query(
+                    "UPDATE execution_sessions
+                     SET requirement_id = $2
+                     WHERE id = $1",
+                )
+                .bind(session_id)
+                .bind(requirement_id)
+                .execute(&mut *transaction)
+                .await?;
+            }
             if let Some(daemon_id) = existing.daemon_id {
                 daemon_id
             } else {
@@ -514,11 +569,12 @@ impl AuthStore {
         } else {
             let daemon_id = choose_eligible_daemon(&mut transaction, required_capabilities).await?;
             sqlx::query(
-                "INSERT INTO execution_sessions (id, daemon_id)
-                 VALUES ($1, $2)",
+                "INSERT INTO execution_sessions (id, daemon_id, requirement_id)
+                 VALUES ($1, $2, $3)",
             )
             .bind(session_id)
             .bind(&daemon_id)
+            .bind(requirement_id)
             .execute(&mut *transaction)
             .await?;
             daemon_id
@@ -667,6 +723,12 @@ struct SessionReconcileRow {
 #[derive(Debug, FromRow)]
 struct SessionOwnerRow {
     daemon_id: Option<String>,
+    requirement_id: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct SessionRequirementRow {
+    requirement_id: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -680,13 +742,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capabilities_round_trip_without_runtime_types() {
+    fn capabilities_round_trip_without_runtime_types() -> Result<(), PersistenceError> {
         let capabilities = vec!["agent".into(), "repository:read".into()];
-        let encoded = encode_capabilities(&capabilities).expect("encode capabilities");
-        assert_eq!(
-            decode_capabilities(&encoded).expect("decode capabilities"),
-            capabilities
-        );
+        let encoded = encode_capabilities(&capabilities)?;
+        assert_eq!(decode_capabilities(&encoded)?, capabilities);
+        Ok(())
     }
 
     #[test]

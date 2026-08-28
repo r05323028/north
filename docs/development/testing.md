@@ -65,7 +65,7 @@ member so `cargo test --workspace` executes it.
 | Layer | Status |
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
-| Integration | Partially implemented — real Axum↔tokio-tungstenite and PostgreSQL-backed daemon lifecycle coverage; durable coordination proofs remain pending |
+| Integration | Partially implemented — PostgreSQL-backed requirements, conversations, readiness, and daemon lifecycle coverage; general durable coordination proofs remain pending |
 | E2E | Not implemented — browser approval UI is covered at HTTP integration; Playwright workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
@@ -75,8 +75,8 @@ member so `cargo test --workspace` executes it.
 | --- | --- | --- |
 | browser approval HTML/JSON → authenticated POST → CLI claim, exact command envelope persistence/order, daemon inbox, duplicate `message.send`, restart recovery | Integration | harden-daemon-runtime-correctness covers approval flow and exact persistence/order; durable inbox/replay remains introduce-server-daemon-protocol + daemon connection |
 | sequence gaps, late/out-of-order replay, protocol errors | Integration | introduce-server-daemon-protocol |
-| expected_revision HTTP 409 and no side effects | Integration | requirement-domain/conversations/human-review |
-| atomic assessment evidence/transition/dedupe before event ACK | Integration | readiness-assessment |
+| expected_revision HTTP 409 and no side effects | Integration | Implemented by requirement-domain/conversations; human-review decision coverage remains pending |
+| atomic assessment evidence/transition/dedupe before event ACK | Integration | Implemented by readiness-assessment, including authenticated daemon ACK path |
 | daemon selection, pinned reconnect, credential revocation | Integration | daemon-runtime-connection |
 | server retry authority and restart-persistent attempts | Integration | runtime-retry-and-failure-state |
 | concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
@@ -92,8 +92,9 @@ runnable test exists and passes.
 ```bash
 ./scripts/validate.sh fast   # fmt, clippy, unit + architecture, web lint/typecheck, openspec
 ./scripts/validate.sh unit   # unit + architecture
-./scripts/validate.sh ci     # full workspace gate + web build + specs
-./scripts/validate.sh integration | e2e | smoke   # explicit 'not yet' until real
+./scripts/validate.sh ci     # full workspace + PostgreSQL integration + web build; requires NORTH_TEST_DATABASE_URL
+./scripts/validate.sh integration   # PostgreSQL-backed suites; requires NORTH_TEST_DATABASE_URL
+./scripts/validate.sh e2e | smoke    # explicit 'not yet' until real
 ```
 
 ## Web (apps/web)

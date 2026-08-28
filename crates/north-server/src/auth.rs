@@ -135,7 +135,8 @@ impl From<PersistenceError> for AuthHttpError {
             | PersistenceError::NoEligibleDaemon
             | PersistenceError::InvalidCapabilities
             | PersistenceError::InvalidCommandPayload
-            | PersistenceError::InvalidSessionState => Self::Internal,
+            | PersistenceError::InvalidSessionState
+            | PersistenceError::SessionRequirementMismatch => Self::Internal,
         }
     }
 }
@@ -175,6 +176,7 @@ pub fn router(state: AuthState) -> Router {
     let protected = Router::new()
         .route("/auth/logout", post(logout))
         .merge(crate::roles::router())
+        .merge(crate::requirements::router())
         .merge(crate::daemon::protected_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

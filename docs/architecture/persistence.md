@@ -11,8 +11,13 @@ server at startup.
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
 | Durable coordination | daemon registrations, `session.daemon_id`, session execution state/attempts, server command outbox, event dedupe/rejection records, sequence watermarks | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
-Migrations 0007 and 0008 implement the daemon registration/setup-request,
-verification-attempt, and minimal execution-session/outbox records.
+Migrations 0003–0005 implement requirements and transition audit,
+one-to-one conversations/messages, and immutable revision-bound readiness
+evidence. Migrations 0007–0009 implement the daemon registration/setup-
+request, verification-attempt, execution-session/outbox records, and
+requirement binding used to authorize assessment events. Readiness evidence
+rows are append-only; a database trigger rejects direct updates/deletes, while
+requirement deletion preserves evidence and nulls only its resolved foreign key.
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.
 The server updates liveness only for the authenticated connection identity;

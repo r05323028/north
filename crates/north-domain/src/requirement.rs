@@ -39,6 +39,21 @@ pub struct Requirement {
     created_by: String,
 }
 
+/// Complete state needed to reconstitute a Requirement from durable storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedRequirement {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub summary: String,
+    pub acceptance_criteria: Vec<String>,
+    pub assumptions: Vec<String>,
+    pub open_questions: Vec<String>,
+    pub status: RequirementStatus,
+    pub revision: u64,
+    pub created_by: String,
+}
+
 /// Content edit applied via [`Requirement::apply_edit`]. `None` fields are unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequirementEdit {
@@ -48,6 +63,13 @@ pub struct RequirementEdit {
     pub acceptance_criteria: Option<Vec<String>>,
     pub assumptions: Option<Vec<String>>,
     pub open_questions: Option<Vec<String>>,
+}
+
+/// Why persisted Requirement state could not be reconstituted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreError {
+    /// Revisions start at one and never use zero.
+    InvalidRevision,
 }
 
 /// Why entering `Ready` was refused.
@@ -95,6 +117,25 @@ impl Requirement {
             revision: 1,
             created_by: created_by.into(),
         }
+    }
+
+    /// Reconstitutes state read from persistence without exposing setters.
+    pub fn from_persisted(state: PersistedRequirement) -> Result<Self, RestoreError> {
+        if state.revision == 0 {
+            return Err(RestoreError::InvalidRevision);
+        }
+        Ok(Self {
+            id: state.id,
+            title: state.title,
+            description: state.description,
+            summary: state.summary,
+            acceptance_criteria: state.acceptance_criteria,
+            assumptions: state.assumptions,
+            open_questions: state.open_questions,
+            status: state.status,
+            revision: state.revision,
+            created_by: state.created_by,
+        })
     }
 
     // ---- Read-only accessors (no generic setters exist) ----

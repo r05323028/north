@@ -1,9 +1,11 @@
+# conversations Specification
+
 ## Purpose
 
 Provides the dialogue around a requirement while guaranteeing the structured
 requirement stays the single source of truth.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: One conversation per requirement
 
@@ -29,12 +31,18 @@ chain-of-thought SHALL NOT be stored as or converted into messages.
 
 Editing structured requirement fields through the conversation surface SHALL
 apply the same domain rules as direct edits: one revision increment per
-accepted edit, Ready demotion on edit, refusal in terminal states.
+accepted edit, Ready demotion on edit, refusal in terminal states, and an
+atomic `expected_revision` check.
 
 #### Scenario: Edit from conversation view bumps revision
 
 - **WHEN** a requester updates assumptions from the detail pane
 - **THEN** the returned revision is previous+1 and any Ready state demoted
+
+#### Scenario: Stale conversation edit is conflict-safe
+
+- **WHEN** the detail view submits an edit for an older revision
+- **THEN** HTTP 409 is returned without changing structured state or appending a message
 
 ### Requirement: Structured state is readable without replay
 
@@ -47,15 +55,3 @@ Archiving or pruning messages SHALL NOT alter any structured field.
 - **WHEN** all messages are removed in a test fixture
 - **THEN** the requirement's fields, status, and revision are unchanged and
 fully served by the structured endpoint
-
-### Requirement: Structured edits reject stale revisions
-
-The structured-edit endpoint SHALL require `expected_revision` and use the
-same atomic revision check as direct Requirement edits. A stale edit SHALL
-return HTTP 409 and SHALL NOT append a message, bump revision, demote status,
-or write an audit row.
-
-#### Scenario: Conversation edit loses a revision race
-
-- **WHEN** the detail view sends an edit for revision 12 after another actor committed revision 13
-- **THEN** the endpoint returns HTTP 409 and structured state plus conversation history remain unchanged

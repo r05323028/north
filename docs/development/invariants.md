@@ -25,9 +25,9 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
 | Verification codes cannot be brute-forced past a bounded attempt budget | Enforced | locked transactional failed-attempt counter, five-failure consumption, PostgreSQL concurrency test |
 | Active OTP values resist database-only offline recovery | Specified | keyed OTP hashing deferred to `harden-otp-at-rest`; current SHA-256 remains documented debt |
-| Conversation is context, not source of truth | Specified | pending introduce-requirement-conversations; persistence/API test required |
-| Every existing-Requirement mutation requires expected_revision | Specified | harden-distributed-system-architecture; server/persistence CAS + HTTP 409 test pending |
-| `requirement.assessed` evidence, transition, dedupe, and ACK share one commit boundary | Specified | harden-distributed-system-architecture; readiness integration test pending |
+| Conversation is context, not source of truth | Enforced | migration 0004, requester/paginated APIs, structured-edit route, and PostgreSQL integration tests |
+| Every existing-Requirement mutation requires expected_revision | Enforced | locked persistence operations, HTTP 409 handlers, and requirement/conversation integration tests |
+| `requirement.assessed` evidence, transition, dedupe, and ACK share one commit boundary | Enforced | typed server conversion, migration 0005, event-id dedupe, post-commit ACK service, and PostgreSQL integration tests |
 
 ## Architecture & runtime
 
@@ -45,7 +45,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Command ACK means durable daemon acceptance, not runtime completion | Specified | harden-distributed-system-architecture; protocol integration test pending |
 | Command/event ids and independent directional sequences detect gaps and harmless duplicates | Specified | harden-distributed-system-architecture; protocol replay/gap tests pending |
 | Protocol 0.1.x rejects incompatible/unknown frames deterministically | Partially Enforced | codec validation, terminal supervisor handling, and real protocol-failure test; production coordinator error/replay handling pending |
-| Active session is durably pinned to one daemon; no automatic live migration | Partially Enforced | migrations 0007/0008, `AuthStore::start_session_with_command`, `DaemonRuntime::persist_and_dispatch_command`, reconnect/offline/revocation integration coverage; full durable delivery pending |
+| Active session is durably pinned to one daemon; no automatic live migration | Partially Enforced | migrations 0007–0009, `AuthStore::start_session_with_command`, requirement-bound session context, `DaemonRuntime::persist_and_dispatch_command`, reconnect/offline/revocation integration coverage; full durable delivery pending |
 | Multi-server connection ownership epochs are enforced | Specified | single-server 0.1.0 only; HA ownership epochs deferred |
 | Durable command redelivery and ACK replay survive process failure | Specified | durable inbox/journal and replay deferred to protocol/runtime follow-ups |
 | Single-server restart invalidates stale daemon connection leases | Enforced | `build_app` clears `connected_at`/`connection_id` before serving; restart/reconnect integration coverage |
@@ -84,7 +84,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | WebSocket ping/pong does not replace North heartbeat | Enforced | adapter tests, authenticated heartbeat persistence, 45-second stale-status expiry, and protocol/docs |
 | Transport errors stay distinct from North protocol errors | Enforced | `TransportError`/`ConnectionError` variants and adapter tests |
 | `session.start` carries server-assembled requirement, bounded conversation, and enabled repository metadata | Partially Enforced | `north-server::assemble_session_start` + unit test; persistence/session coordinator pending |
-| `requirement.assessed` carries typed verdict/evidence, not opaque assessment text | Enforced | `north-protocol` validation/round-trip tests and explicit server/domain conversion; persistence transaction pending |
+| `requirement.assessed` carries typed verdict/evidence, not opaque assessment text | Enforced | `north-protocol` validation/round-trip tests, explicit server/domain conversion, immutable evidence persistence, and post-commit ACK handling |
 | Daemon application traffic waits for welcome, reconciliation, and coordination readiness | Enforced | explicit supervisor phases plus real transport gating integration test |
 | Protocol/auth failures stop daemon reconnect | Partially Enforced | terminal failure classification, protocol-failure test, authenticated/revoked integration coverage; durable replay remains pending |
 | `north-domain` and `north-protocol` obey positive dependency allowlists | Enforced | Cargo metadata allowlist tests |

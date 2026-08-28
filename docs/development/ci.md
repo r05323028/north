@@ -9,7 +9,7 @@ checks, never replacements.
 | --- | --- |
 | `pr-title` | PR title must be a Conventional Commit (squash-merge makes it the canonical subject on `main`) |
 | `rust` | fmt --check · clippy `-D warnings` · unit tests + architecture checks |
-| `daemon-integration` | PostgreSQL-backed daemon lifecycle integration tests |
+| `daemon-integration` | PostgreSQL-backed requirements, conversations, readiness, and daemon lifecycle integration tests |
 | `web` | lint · typecheck · production build (`apps/web`) |
 | `openspec` | `openspec validate --all --strict` |
 | `gate` | succeeds only when all required jobs succeed |
@@ -32,7 +32,9 @@ they exist, treat a red `gate` as an absolute merge blocker regardless.
 ## Local parity
 
 `./scripts/pre-push-validation.sh` runs native checks then replays one real
-workflow job through [act](https://github.com/nektos/act) in Docker.
+workflow job through [act](https://github.com/nektos/act) in Docker. The
+`daemon-integration` job delegates its database suites to
+`./scripts/validate.sh integration`.
 
 Known limitations of act parity (documented, not hidden):
 

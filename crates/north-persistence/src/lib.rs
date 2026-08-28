@@ -11,11 +11,24 @@ pub use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{error::Error, fmt};
 use subtle::ConstantTimeEq;
 
+mod conversations;
 mod daemon;
+mod readiness;
+mod requirements;
+pub use conversations::{
+    ConversationError, ConversationPage, ConversationRecord, MessageKind, MessageRecord,
+};
 pub use daemon::{
     AuthenticatedDaemon, DaemonRegistration, DaemonSessionState, DaemonSetupClaim,
     DaemonSetupPreview, DaemonSetupRequest, DaemonSetupState, PinnedCommand,
     DAEMON_SETUP_CLEANUP_BATCH_SIZE, DAEMON_SETUP_RETENTION_SECONDS, DAEMON_SETUP_TTL_SECONDS,
+};
+pub use readiness::{
+    AssessmentOutcome, ReadinessAssessmentRecord, ReadinessAssessmentResult, ReadinessError,
+};
+pub use requirements::{
+    RequirementError, RequirementListQuery, RequirementRecord, RequirementSort,
+    RequirementTransition,
 };
 
 pub use sqlx::postgres::PgPoolOptions as PoolOptions;
@@ -57,6 +70,7 @@ pub enum PersistenceError {
     InvalidCapabilities,
     InvalidCommandPayload,
     InvalidSessionState,
+    SessionRequirementMismatch,
 }
 
 impl fmt::Display for PersistenceError {
@@ -78,6 +92,9 @@ impl fmt::Display for PersistenceError {
             Self::InvalidCapabilities => f.write_str("invalid daemon capabilities"),
             Self::InvalidCommandPayload => f.write_str("invalid durable command payload"),
             Self::InvalidSessionState => f.write_str("invalid durable session state"),
+            Self::SessionRequirementMismatch => {
+                f.write_str("session is bound to another requirement")
+            }
         }
     }
 }
@@ -100,7 +117,8 @@ impl Error for PersistenceError {
             | Self::NoEligibleDaemon
             | Self::InvalidCapabilities
             | Self::InvalidCommandPayload
-            | Self::InvalidSessionState => None,
+            | Self::InvalidSessionState
+            | Self::SessionRequirementMismatch => None,
         }
     }
 }

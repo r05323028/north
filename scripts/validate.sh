@@ -31,6 +31,21 @@ rust_full() {
   cargo test --workspace
 }
 
+database_integration() {
+  # Real component-boundary tests. PostgreSQL URL is an explicit prerequisite.
+  if [[ -z "${NORTH_TEST_DATABASE_URL:-}" ]]; then
+    printf 'validate.sh: integration requires NORTH_TEST_DATABASE_URL.\n' >&2
+    exit 2
+  fi
+  if [[ "${1:-run-persistence}" != "skip-persistence" ]]; then
+    cargo test -p north-persistence --all-targets
+  fi
+  cargo test -p north-server --test requirements -- --ignored
+  cargo test -p north-server --test conversations_readiness -- --ignored
+  cargo test -p north-server --test daemon_runtime -- --ignored
+  cargo test -p north-transport-integration --test websocket
+}
+
 case "$PROFILE" in
 fast)
   rust_fast
@@ -45,9 +60,7 @@ unit)
   printf '(frontend unit layer: not yet implemented — see testing.md)\n'
   ;;
 integration)
-  # Real component-boundary tests (server+persistence+DB, host-git workspace,
-  # protocol round-trips). Arrives with introduce-email-auth-and-owner-bootstrap.
-  unsupported
+  database_integration
   ;;
 e2e)
   # Full user-workflow tests across assembled North (Playwright when UI lands).
@@ -58,8 +71,9 @@ smoke)
   unsupported
   ;;
 ci)
-  # Complete merge gate mirror: full workspace tests plus production build.
+  # Complete merge gate mirror: full workspace and database tests plus build.
   rust_full
+  database_integration skip-persistence
   web_lint_tc
   (cd apps/web && npm run build)
   openspec validate --all --strict

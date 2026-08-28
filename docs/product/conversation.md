@@ -24,4 +24,12 @@ is a notification hint only. After disconnect/reconnect, the detail view
 refetches canonical Requirement and conversation state over HTTP; it never
 reconstructs specification truth by replaying the stream.
 
+## Durable API boundary
+
+Migration 0004 creates exactly one conversation for each Requirement. Requester
+messages are appended through the conversation API and reads use deterministic
+paged ordering. The structured edit route reuses `Requirement::apply_edit`; it
+never infers specification state from transcript content. Agent/system messages
+remain server-owned typed facts, not raw tool output.
+
 Related: docs/product/readiness.md, docs/architecture/server-daemon-protocol.md.

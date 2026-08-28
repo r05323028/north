@@ -25,7 +25,8 @@ Draft ──▶ Discussing ──▶ Ready ──▶ Accepted
 
 ## Transition ownership
 
-- `Draft → Discussing`: requester message / clarification begins.
+- `Draft → Discussing`: explicit begin-discussion operation starts clarification;
+requester messages provide conversation context.
 - `Discussing → Ready`: agent readiness assessment verdict, validated by the server.
 - `Ready → Accepted`, `Ready → Rejected`, `Ready → Discussing` (Request Changes):
   human reviewers only.
