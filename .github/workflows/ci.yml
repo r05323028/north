@@ -39,9 +39,7 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: ./scripts/validate.sh rust
 
   daemon-integration:
     name: Daemon runtime integration
@@ -88,9 +86,9 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm run build
+      - name: Run web validation
+        working-directory: .
+        run: ./scripts/validate.sh web
 
   openspec:
     name: OpenSpec validation
@@ -105,7 +103,7 @@ jobs:
       # zizmor: ignore[adhoc-packages]
       # OpenSpec CLI is intentionally bootstrapped for this validation job.
       - run: npm install -g @fission-ai/openspec@1.9.0
-      - run: openspec validate --all --strict
+      - run: ./scripts/validate.sh specs
 
   gate:
     name: merge gate

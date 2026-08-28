@@ -1,15 +1,32 @@
-## 1. Types
+# Tasks
 
-- [x] 1.1 Add envelope fields and direction-specific frame enums with `command_id`/`event_id`, `session_id`, directional sequence, `schema_version`, and exact `protocol_version` hello/welcome. JSON codec validates the pure wire values.
-- [x] 1.2 Add `command_ack`, event ACK accepted/rejected status, reconciliation watermark, and `protocol.error` frames; round-trip serialization tests cover every frame family.
+## 1. Types and control frames
 
-## 2. Durable delivery semantics
+- [x] 1.1 Add distinct `CommandEnvelope`/`EventEnvelope` fields with `command_id`/`event_id`, `session_id`, directional sequence, `sent_at`, and `schema_version`; keep connection/control schemas separate and validate exact `protocol_version` hello/welcome. JSON codec validates the pure wire values.
+- [x] 1.2 Add baseline `command_ack`, event ACK accepted/rejected status, reconciliation watermark, and `protocol.error` payload/frame coverage for the existing catalog.
+- [ ] 1.3 Make `protocol.error` bidirectional: add the `DaemonFrame` variant, preserve the `ServerFrame` variant, define no-severity terminal semantics, and add round-trip/validation tests for both directions.
 
-- [ ] 2.1 Implement server command outbox persistence before dispatch; resend unaccepted rows with the original id/sequence.
-- [ ] 2.2 Implement daemon durable command inbox/processed journal; duplicate `message.send` tests prove one runtime submission across reconnect/restart and define `dispatch_started` recovery.
-- [ ] 2.3 Implement daemon event journal replay and server post-commit `event_ack(status=accepted)`/durable-rejection `event_ack(status=rejected)`; test duplicate assessment and ACK-after-commit behavior.
-- [ ] 2.4 Implement per-session directional sequence allocation, gap buffering/reconciliation, contiguous+sparse ACKs, late-frame no-op, and safe high-water compaction.
-- [ ] 2.5 Reject incompatible/unknown frames deterministically with `protocol.error`; test no side effect and retained unacknowledged work.
+## 2. Durable delivery slices
+
+- [ ] 2.1 Define durable command-outbox schema with immutable envelope/payload digest, globally unique `command_id`, unique `(session_id, server_command_seq)`, and retained ACK/tombstone fields.
+- [ ] 2.2 Implement transactional server sequence allocation plus outbox insertion; prove rollback does not consume a sequence value or create a committed hole.
+- [ ] 2.3 Implement durable server `command_ack` processing, identity/digest validation, contiguous `command_ack_through_seq`, and ACK conflict handling.
+- [ ] 2.4 Implement ascending resend of unacknowledged outbox rows with original ID, sequence, session, and serialized payload; test lost ACK/reconnect.
+- [ ] 2.5 Implement daemon durable command inbox keyed by global `command_id` and `(session_id, server_command_seq)` with payload digest and duplicate lookup.
+- [ ] 2.6 Implement daemon `received` → `dispatch_started` → `terminal` state transitions; persist `dispatch_started` before runtime invocation and record completed/failed/unknown outcome metadata.
+- [ ] 2.7 Implement restart recovery: continue `received`, reattach `dispatch_started` by stable runtime operation identity, and never blindly resubmit an unknown side-effecting operation.
+- [ ] 2.8 Emit and journal explicit unknown execution outcome as `session.failed { recoverable: false }` with stable command/runtime identity and server-owned next-step policy.
+- [ ] 2.9 Enforce `message.send` command/message identity mapping, immutable content, and at-most-one automatic runtime submission across reconnect and daemon restart.
+- [ ] 2.10 Implement atomic daemon event-sequence allocation plus journal append; prove failed append leaves no committed sequence hole.
+- [ ] 2.11 Implement ascending event replay from the daemon journal with original event ID/sequence/payload and durable replay eligibility.
+- [ ] 2.12 Implement server event transaction: identity/digest dedupe, immutable evidence/business effect or durable rejection, and ACK only after commit.
+- [ ] 2.13 Implement terminal `event_ack(status=accepted)` and `event_ack(status=rejected)` handling; rejected ACK must not retry and both outcomes must update reconciliation state.
+- [ ] 2.14 Add command/event same-ID, same-sequence, payload-mismatch, and cross-sequence conflict checks with no side effect and no ACK for conflicting frames.
+- [ ] 2.15 Implement per-session bounded gap buffering/reconciliation with `max_gap_buffer_entries_per_session`, no business effect before gaps close, and retryable overflow behavior.
+- [ ] 2.16 Implement reconciliation merge for command watermark, event contiguous watermark, sparse event ACKs, ascending command resend, ascending event replay, and late duplicate inertness.
+- [ ] 2.17 Persist command/event watermarks and ID/digest tombstones across daemon/server restart; prove no late replay can reapply a business effect.
+- [ ] 2.18 Implement safe compaction: payload removal only at durable boundaries, retained `processed_through_seq`, retained event dedupe protection, and no time-only tombstone expiry for relevant sessions.
+- [ ] 2.19 Add fault-injection integration tests for lost ACKs, reconnect, daemon restart after each journal state, crash-after-dispatch unknown outcome, gap overflow, duplicate delivery, and compaction/restart.
 
 ## 3. Boundaries and validation
 
@@ -37,4 +54,5 @@
 - [x] 6.3 Bound post-upgrade hello and coordinator admission deadlines in the Axum adapter.
 - [x] 6.4 Remove protocol-error severity state and define every `protocol.error` as terminal to the current connection.
 - [x] 6.5 Add real Axum↔tokio-tungstenite integration tests for empty/multi-session snapshots, gating, protocol failure, and admission backpressure.
-- [x] 6.6 Align architecture/docs/OpenSpec contracts and retain durable outbox/journal/session coordination as pending work.
+- [x] 6.6 Align architecture/docs/OpenSpec contracts; durable outbox/journal/session coordination remain this change's unchecked implementation scope.
+- [ ] 6.7 Add bidirectional protocol-error integration tests proving daemon-reported and server-reported violations close only the current connection and retain unacknowledged durable work.

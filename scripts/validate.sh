@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unified validation entrypoint (docs/development/testing.md defines layers).
-# Usage: ./scripts/validate.sh [fast|unit|integration|e2e|smoke|ci]
+# Usage: ./scripts/validate.sh [fast|rust|web|specs|unit|integration|e2e|smoke|ci]
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -23,6 +23,10 @@ rust_fast() {
 
 web_lint_tc() {
   (cd apps/web && npm run lint && npm run typecheck)
+}
+
+web_full() {
+  (cd apps/web && npm run lint && npm run typecheck && npm run build)
 }
 
 rust_full() {
@@ -53,6 +57,15 @@ fast)
   web_lint_tc
   openspec validate --all --strict
   ;;
+rust)
+  rust_full
+  ;;
+web)
+  web_full
+  ;;
+specs)
+  openspec validate --all --strict
+  ;;
 unit)
   # Unit layer: small units, minimal externals. Frontend unit tests do not
   # exist yet; they arrive with introduce-requirement-board.
@@ -75,12 +88,11 @@ ci)
   # Complete merge gate mirror: full workspace and database tests plus build.
   rust_full
   database_integration skip-persistence
-  web_lint_tc
-  (cd apps/web && npm run build)
+  web_full
   openspec validate --all --strict
   ;;
 *)
-  printf 'unknown profile: %s\nusage: %s [fast|unit|integration|e2e|smoke|ci]\n' "$PROFILE" "$0" >&2
+  printf 'unknown profile: %s\nusage: %s [fast|rust|web|specs|unit|integration|e2e|smoke|ci]\n' "$PROFILE" "$0" >&2
   exit 2
   ;;
 esac

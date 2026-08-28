@@ -83,11 +83,22 @@ No application-level "check then insert" races.
 
 ## Repository identity
 
-Configured repositories contain metadata only: id, name, URL, description,
-timestamps, and nullable `disabled_at`. Normal Remove sets `disabled_at`; it
-does not hard-delete a row referenced by assessment evidence. New inspections
-exclude disabled rows, while historical id + metadata + exact commit SHA remain
-human-readable.
+Configured repositories contain metadata only: immutable UUID `id`, trimmed
+editable `name`, persistence-only normalized name key, immutable-after-create
+URL, editable `description`, timestamps, and nullable `disabled_at`. The
+normalized name is unique across enabled and disabled rows. Server validation
+bounds/trims metadata and rejects HTTPS userinfo, URL passwords, and SSH/SCP
+users other than literal `git`; daemon-host Git configuration remains the
+credential boundary.
+
+Normal Remove always sets `disabled_at`, including for an unreferenced row, and
+never hard-deletes it. Re-enable clears `disabled_at` on the same identity.
+Management reads include enabled and disabled rows for Admin/Owner; new
+inspection/session catalogs include only `disabled_at IS NULL`, with
+`name_normalized ASC, id ASC` ordering. Readiness evidence retains repository
+ID and exact full commit SHA, so historical metadata remains human-readable
+without active-catalog membership. URL replacement requires disable-old/create-
+new to keep repository identity stable.
 
 ## Ownership mapping
 

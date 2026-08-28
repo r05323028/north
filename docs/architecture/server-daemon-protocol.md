@@ -1,10 +1,10 @@
 # Server ↔ daemon protocol
 
-Canonical message catalog: `crates/north-protocol/src/lib.rs` + OpenSpec change
-`introduce-server-daemon-protocol`, hardened by
-`harden-distributed-system-architecture`. This doc fixes the wire and
-reconciliation contract; it does not make the server or daemon own each
-other's business logic.
+Canonical message catalog: `crates/north-protocol/src/lib.rs` + the active
+`introduce-server-daemon-protocol` contract. Daemon connection and distributed
+architecture guardrails are established prerequisites in the canonical OpenSpec
+specs. This doc fixes the wire and reconciliation contract; it does not make
+the server or daemon own each other's business logic.
 
 ## Transport boundary
 
@@ -63,7 +63,7 @@ under the same name.
 
 ```text
 Connection/control frames
-  daemon → server : hello/registration, heartbeat, command_ack
+  daemon → server : hello/registration, heartbeat, command_ack, protocol.error
   server → daemon : welcome, event_ack(status=accepted), event_ack(status=rejected),
                     reconciliation snapshot, protocol.error
 
@@ -73,6 +73,11 @@ Server commands (server → daemon ONLY)
 Daemon events (daemon → server ONLY)
   session.started · agent.message · agent.activity · requirement.assessed
   session.completed · session.failed
+
+`protocol.error` is bidirectional connection/control traffic. The sender reports
+that its peer violated the North protocol: daemon → server reports a server
+violation, and server → daemon reports a daemon violation. It has no severity
+field, and sending or receiving it closes only the current connection.
 ```
 
 `command_ack` means the daemon durably recorded the command for processing;
@@ -130,12 +135,18 @@ journals, replay, gap reconciliation, and high-watermark compaction remain pendi
 implemented by the server readiness path. Statements in this section use normative language for that target
 unless they describe current transport behavior explicitly.
 
-Every command/event carries:
+Only delivery envelopes carry envelope fields:
 
-- stable `command_id` or `event_id` for idempotency;
-- `session_id` and a direction-specific sequence (`server_command_seq` or
-  `daemon_event_seq`) for ordering and gap detection;
-- `sent_at`, `type`, `payload`, and `schema_version`.
+- Every `CommandEnvelope` carries `command_id`, `session_id`,
+  `server_command_seq`, `sent_at`, `schema_version`, and a typed
+  command.
+- Every `EventEnvelope` carries `event_id`, `session_id`,
+  `daemon_event_seq`, `sent_at`, `schema_version`, and a typed event.
+- Connection/control frames use their own schemas and do not require
+  `session_id`. `hello`, `welcome`, `heartbeat`, the finite
+  `ReconcileSnapshot`, and `protocol.error` are connection-level frames.
+  `command_ack` and `event_ack` copy the target identity, session, and
+  sequence, but are acknowledgements rather than envelopes.
 
 The current session-routing foundation persists an execution-session owner and
 server command outbox row atomically before dispatch through
@@ -146,50 +157,88 @@ command inbox/processed-ledger durability, and duplicate runtime suppression
 remain owned by the durable-delivery implementation.
 
 The durable-delivery contract requires daemon events to be journaled before
-transmission. The readiness path deduplicates assessment event ids and their
-per-session sequence inside the same transaction as validation/evidence/business
-state, and rejects event-id or sequence identity reuse. Successful assessment
-ACKs follow commit. General unacknowledged event journaling and replay after
-reconnect remain pending.
+transmission. Command and event sequence allocation commits atomically with the
+corresponding outbox/journal record; a failed transaction cannot create a
+committed sequence hole. The server command outbox and daemon event journal
+retain the original stable ID, sequence, serialized payload, and payload digest
+for replay.
+
+Daemon command records move monotonically through `received`,
+`dispatch_started`, and `terminal`. `received` is durable receipt and may
+produce `command_ack`; `dispatch_started` is committed before a runtime
+operation; terminal records completed, failed, or unknown outcome. A crash
+between dispatch and outcome first attempts reattachment by
+`runtime_operation_id = command_id`. If outcome remains unknowable, the
+daemon emits journaled `session.failed` with `recoverable: false`,
+`execution_outcome_unknown`, the command/runtime identity, and
+`automatic_resubmit=false`. It never blindly resubmits a side-effecting
+operation. This is an execution fact, not a protocol error; server policy owns
+the next step.
+
+The readiness path deduplicates assessment event IDs and their per-session
+sequence inside the same transaction as validation/evidence/business state, and
+rejects event-ID or sequence identity reuse. `event_ack(status=accepted)` and
+`event_ack(status=rejected)` both mean terminal transport handling for that
+exact event. Accepted follows business commit; rejected follows a durable
+well-formed rejection such as stale revision. A rejected ACK never requests
+retry. Rollback, protocol error, or no ACK leaves the original event
+replay-eligible.
 
 ## Sequence and reconnect rules
 
-`server_command_seq` and `daemon_event_seq` are independent monotonic counters,
-scoped to one session and direction. They start at 1; the durable-delivery layer
-will persist each assigned value with the relevant outbox/journal record. Each
-`SessionReconcileState` in the connection-level snapshot carries
-`command_ack_through_seq`, `event_ack_through_seq`, and a strictly ascending,
-unique sparse event sequence list above the event watermark when processing is
-non-contiguous.
+`command_id` and `event_id` are globally unique opaque identities in their
+respective namespaces. `server_command_seq` and `daemon_event_seq` are
+independent monotonic counters scoped to one session and direction. They start
+at 1 and commit atomically with their outbox/journal record. The durable stores
+must enforce unique ID and `(session_id, sequence)` mappings; generation alone
+is not a uniqueness guarantee.
 
-- A duplicate id+sequence is harmless and receives the known ACK again.
-- One sequence with a different id is a protocol error.
-- The durable-delivery contract permits an out-of-order frame to be durably
-  buffered, but it will not be applied until the missing sequence is
-  replayed/reconciled.
-- A late frame at or below an acknowledged contiguous sequence is inert.
-- The durable-delivery layer will replay buffered daemon events in ascending
-  `daemon_event_seq`; server command retries will retain ascending
-  `server_command_seq`.
-- The durable-delivery contract permits processed command rows to be compacted
-  only after terminal session reconciliation proves a contiguous watermark. A
-  durable per-session `processed_through_seq` tombstone will remain, so old
-  duplicates stay inert.
+Each `SessionReconcileState` carries `command_ack_through_seq`,
+`event_ack_through_seq`, and a strictly ascending, unique sparse event
+sequence list above the event watermark when handling is non-contiguous.
+`command_ack_through_seq` means every command at or below it is durably known
+by the daemon, based only on server-recorded durable command ACKs.
+`event_ack_through_seq` means every daemon event at or below it is durably
+handled by the server; sparse entries are individually handled events.
+
+- A duplicate with same ID, sequence, and payload is inert and receives the
+  known ACK again.
+- Same sequence with a different ID, same ID with a different sequence, or same
+  ID/sequence with a different payload is a protocol/integrity error with no
+  business effect.
+- A valid out-of-order frame may be durably buffered, but cannot affect business
+  state until the gap closes. Pending durable/in-memory records are bounded by
+  the configured `max_gap_buffer_entries_per_session` (default 256). Overflow
+  withholds ACK and closes the connection at a retryable reconciliation boundary;
+  it is not a protocol error.
+- The server resends unacknowledged outbox commands in ascending
+  `server_command_seq` with their original ID/sequence/payload.
+- The daemon replays unacknowledged event journal records in ascending
+  `daemon_event_seq`, after applying the snapshot's event watermark and sparse
+  ACKs. ACKed event payloads are not replayed.
 
 IDs answer “is this the same delivery?” Sequences answer “is this the next
 ordered delivery?” Neither replaces the other.
 
+Payloads may be compacted only after the corresponding durable delivery
+boundary. Server command, daemon command, daemon event, and server event-dedupe
+stores retain high-water state plus compact ID/digest tombstones so late
+duplicates remain inert and cannot reapply business effects. The daemon's
+`processed_through_seq` is not expired by time alone while the session remains
+relevant. Requirement Accepted/Rejected never by itself authorizes transport
+compaction; execution-session delivery state does.
+
 ## Compatibility and errors
 
 A protocol-version mismatch receives `protocol.error(incompatible_protocol)`
-and the connection closes before session traffic. Unknown command/event types
-or unsupported schema versions receive explicit `protocol.error`, cause no side
-effect, and close the connection. `protocol.error` carries no severity
-discriminator: every protocol error is terminal for this connection, while the
-host decides whether
-an equivalent future connection may be attempted. When durable delivery is
-implemented, unacknowledged outbox/journal messages will stay eligible for replay;
-peers will not silently reinterpret unknown payloads.
+from the receiver's direction-specific frame enum and the connection closes
+before session traffic. Unknown command/event types, unsupported schema
+versions, and identity/payload conflicts receive explicit `protocol.error`,
+cause no side effect, and close the connection. `protocol.error` is present in
+both `ServerFrame` and `DaemonFrame`; it carries no severity discriminator and
+is terminal to the current connection. The host decides whether an equivalent
+future connection may be attempted. Unacknowledged outbox/journal messages
+remain eligible for replay; peers never silently reinterpret unknown payloads.
 
 ## Liveness and error boundaries
 

@@ -92,11 +92,14 @@ runnable test exists and passes.
 ## Profiles
 
 ```bash
-./scripts/validate.sh fast   # fmt, clippy, unit + architecture, web lint/typecheck, openspec
-./scripts/validate.sh unit   # unit + architecture
-./scripts/validate.sh ci     # full workspace + PostgreSQL integration + web build; requires NORTH_TEST_DATABASE_URL
-./scripts/validate.sh integration   # PostgreSQL-backed suites; requires NORTH_TEST_DATABASE_URL
-./scripts/validate.sh e2e | smoke    # explicit 'not yet' until real
+./scripts/validate.sh fast        # fmt, clippy, unit + architecture, web lint/typecheck, openspec
+./scripts/validate.sh rust        # full Rust merge-gate validation
+./scripts/validate.sh web         # web lint, typecheck, and production build
+./scripts/validate.sh specs       # strict OpenSpec validation
+./scripts/validate.sh unit        # unit + architecture
+./scripts/validate.sh ci          # full workspace + PostgreSQL integration + web build; requires NORTH_TEST_DATABASE_URL
+./scripts/validate.sh integration # PostgreSQL-backed suites; requires NORTH_TEST_DATABASE_URL
+./scripts/validate.sh e2e | smoke # explicit 'not yet' until real
 ```
 
 ## Web (apps/web)
