@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 north-domain = { path = "../north-domain" }
 north-persistence = { path = "../north-persistence" }
-axum = { version = "0.8.4", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+axum = { version = "0.8.4", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }

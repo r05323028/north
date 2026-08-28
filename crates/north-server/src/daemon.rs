@@ -360,8 +360,8 @@ impl DaemonRuntime {
             .inner
             .receiver
             .lock()
-            .expect("daemon receiver lock")
-            .take();
+            .ok()
+            .and_then(|mut receiver| receiver.take());
         let Some(mut receiver) = receiver else {
             return;
         };
@@ -513,6 +513,36 @@ impl DaemonRuntime {
                             send_protocol_error(&connection.outbound, "daemon_identity_mismatch", "event session owner rejected").await;
                             return;
                         }
+                        if let north_protocol::Event::RequirementAssessed(payload) = &event.event {
+                            if !self
+                                .session_matches_requirement(&event.session_id, &payload.requirement_id)
+                                .await
+                            {
+                                send_protocol_error(
+                                    &connection.outbound,
+                                    "assessment_requirement_mismatch",
+                                    "assessment requirement is not bound to event session",
+                                )
+                                .await;
+                                return;
+                            }
+                            match crate::assessment::handle_requirement_assessed(&self.inner.store, &event).await {
+                                Ok(ack) => {
+                                    if connection.outbound.send(ServerFrame::EventAck(ack)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                                Err(_) => {
+                                    send_protocol_error(
+                                        &connection.outbound,
+                                        "assessment_processing_failed",
+                                        "assessment was not durably handled",
+                                    )
+                                    .await;
+                                    return;
+                                }
+                            }
+                        }
                     }
                     Some(DaemonFrame::CommandAck(ack)) => {
                         if self.inner.store.touch_daemon(daemon_id, connection_id).await.is_err()
@@ -542,13 +572,18 @@ impl DaemonRuntime {
         let envelope_command_id = command_id.clone();
         let envelope_session_id = session_id.clone();
         let command = request.command.clone();
+        let requirement_id = match &command {
+            Command::SessionStart(start) => Some(start.requirement.id.clone()),
+            _ => None,
+        };
         let pinned = self
             .inner
             .store
-            .start_session_with_command(
+            .start_session_with_command_for_requirement(
                 &session_id,
                 &command_id,
                 required_capabilities,
+                requirement_id.as_deref(),
                 move |_daemon_id, server_command_seq| {
                     ServerFrame::Command(CommandEnvelope {
                         command_id: envelope_command_id.clone(),
@@ -631,6 +666,16 @@ impl DaemonRuntime {
             .is_some_and(|owner| owner == daemon_id)
     }
 
+    async fn session_matches_requirement(&self, session_id: &str, requirement_id: &str) -> bool {
+        self.inner
+            .store
+            .session_requirement(session_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|bound| bound == requirement_id)
+    }
+
     pub async fn close_daemon(&self, daemon_id: &str, connection_id: &str) {
         let live = {
             let mut connections = self.inner.live.lock().await;
@@ -684,6 +729,7 @@ fn store_error(error: PersistenceError) -> DaemonHttpError {
         | PersistenceError::InvalidSetup
         | PersistenceError::InvalidCommandPayload
         | PersistenceError::InvalidSessionState
+        | PersistenceError::SessionRequirementMismatch
         | PersistenceError::NoEligibleDaemon
         | PersistenceError::InvalidRole(_)
         | PersistenceError::InvalidCode

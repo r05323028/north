@@ -11,8 +11,21 @@ server at startup.
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
 | Durable coordination | daemon registrations, `session.daemon_id`, session execution state/attempts, server command outbox, event dedupe/rejection records, sequence watermarks | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
-Migrations 0007 and 0008 implement the daemon registration/setup-request,
-verification-attempt, and minimal execution-session/outbox records.
+Migrations 0003–0005 implement requirements and transition audit,
+one-to-one conversations/messages, and immutable revision-bound readiness
+evidence. Migration 0010 adds positive `requirements.state_version` with a
+backfill of 1 for existing rows. Migration 0011 records the accepted assessment Ready-generation identity,
+marks unverifiable legacy generations as unknown, and replaces the evidence
+foreign-key cascade with restrictive deletion. `accepted_state_version` equals
+`requirements.state_version` only while that Requirement remains Ready and
+reviewable; later review transitions advance the Requirement without mutating
+historical evidence. Migrations 0007–0009 implement the daemon
+registration/setup-request, verification-attempt, execution-session/outbox
+records, and requirement binding used to authorize assessment events. Readiness evidence
+rows are append-only; a database trigger rejects direct updates/deletes, and
+migration 0011 makes Requirement deletion restrictive so evidence never changes
+via an `ON DELETE SET NULL` cascade. Requirements with readiness evidence must
+be retained (or receive a future tombstone design).
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.
 The server updates liveness only for the authenticated connection identity;
@@ -39,12 +52,17 @@ Invariants:
   for resend until `command_ack` is durably recorded. The current foundation
   serializes the complete command envelope once and dispatches that persisted
   representation; durable resend and ACK processing remain future work.
-- Every mutation of an existing Requirement uses an atomic `expected_revision`
-  check; stale callers receive a conflict with no side effects.
-- `requirement.assessed` dedupe, revision validation, domain gates, immutable
-  evidence, lifecycle transition, and resulting row update share one
-  transaction. Event ACK follows commit; invalid/stale facts commit a durable
-  rejection record before `event_ack(status=rejected)`.
+- `revision` identifies canonical structured content; `state_version` identifies
+  mutable Requirement state. Existing-row mutations atomically compare
+  `expected_state_version`; real mutations increment state_version once, while
+  content edits increment revision too. Stale callers receive a conflict with
+  no side effects.
+- `requirement.assessed` continues matching `requirement_revision`, while
+  dedupe, domain gates, immutable evidence, successful state-version lifecycle
+  transition, and resulting row update share one transaction. Event identity or
+  sequence conflicts are protocol errors without an ACK; well-formed
+  invalid/stale facts commit a durable rejection record before
+  `event_ack(status=rejected)`.
 
 ## First-owner bootstrap
 

@@ -47,6 +47,8 @@ multiple concurrent assessments.
 
 ## Impact
 
+- Migrations 0005 and 0009: immutable readiness evidence and requirement-bound
+  execution sessions.
 - Affected docs: docs/product/readiness.md (canonical);
   docs/development/invariants.md row 4 gains end-to-end enforcement note.
 - Dependencies on earlier changes: introduce-requirement-conversations.

@@ -51,15 +51,17 @@ the requirement history.
 - **WHEN** anyone inspects an Accepted requirement later
 - **THEN** the accepting reviewer and timestamp are retrievable
 
-### Requirement: Review mutations require expected_revision
+### Requirement: Review mutations require expected_state_version
 
-Accept, Reject, Request Changes, and Reopen SHALL require `expected_revision`.
-The server SHALL atomically compare it with the current Requirement and the
-revision-matched assessment before applying the domain operation. A mismatch
-SHALL return HTTP 409 and SHALL write no decision, feedback, audit row, or
-lifecycle transition.
+Accept, Reject, Request Changes, and Reopen SHALL require `expected_state_version`.
+Accept, Reject, and Request Changes SHALL also carry the packet's `assessment_id`.
+The server SHALL atomically compare state_version, current content revision,
+Ready state generation, and the current accepted assessment identity before
+applying the domain operation. Reopen needs no assessment_id. A mismatch SHALL
+return HTTP 409 and SHALL write no decision, feedback, audit row, or lifecycle
+transition.
 
 #### Scenario: Review race loses safely
 
-- **WHEN** a reviewer submits Accept for revision 12 after an edit committed revision 13
+- **WHEN** a reviewer submits Accept for state_version 12 or assessment_id A after a newer Ready generation commits
 - **THEN** the server returns HTTP 409 and no approval or audit row is written

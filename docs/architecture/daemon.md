@@ -63,8 +63,9 @@ explicitly identified as implemented.
 - The current authentication flow accepts one user-owned daemon registration,
   associates it with its configured identity and capabilities, updates
   heartbeat-based application liveness, and supports owner/admin revocation.
-- Migrations 0007 and 0008 store setup requests, registrations, execution-session
-  owners, the server command outbox, and bounded verification-attempt state.
+- Migrations 0007–0009 store setup requests, registrations, requirement-bound
+  execution sessions, the server command outbox, and bounded verification-attempt
+  state.
   Plaintext credentials remain on daemon hosts; the server stores hashes only.
   Setup rows older than the retention window are removed opportunistically in
   bounded indexed batches.

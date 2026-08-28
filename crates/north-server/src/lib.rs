@@ -7,15 +7,25 @@ use std::{error::Error, fmt};
 pub mod assessment;
 pub mod auth;
 pub mod context;
+pub mod conversations;
 pub mod daemon;
+pub mod requirements;
 pub mod roles;
 pub mod transport;
 
-pub use assessment::readiness_assessment_from_wire;
+/// Convert wire readiness evidence through the server-owned domain boundary.
+pub fn readiness_assessment_from_wire(
+    wire: &north_protocol::RequirementAssessed,
+    assessed_at_ms: u64,
+) -> Result<north_domain::readiness::ReadinessAssessment, north_protocol::FrameError> {
+    assessment::readiness_assessment_from_wire(wire, assessed_at_ms)
+}
 pub use auth::{
     auth_middleware, router as auth_router, AuthState, CodeDelivery, CurrentUser, DeliveryError,
     LogCodeDelivery, RequestCodeRequest, VerifyCodeRequest, CODE_REQUEST_MIN_INTERVAL_SECONDS,
 };
+pub use conversations::{ConversationHttpError, ConversationResponse, MessageResponse};
+pub use requirements::{RequirementHttpError, RequirementResponse};
 pub use roles::{
     assign_user_role, authorize_role_assignment, current_user, require_admin, require_review,
     RoleHttpError,

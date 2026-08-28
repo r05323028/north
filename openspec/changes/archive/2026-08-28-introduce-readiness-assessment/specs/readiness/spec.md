@@ -73,7 +73,7 @@ the packet request
 
 ### Requirement: Assessment ingestion acknowledges only a committed result
 
-For `requirement.assessed`, the server SHALL deduplicate the event, load/lock
+For `requirement.assessed`, the server SHALL require the event session to be bound to the payload Requirement, then deduplicate the event, load/lock
 the current Requirement, validate the event revision, run domain readiness
 gates, persist immutable evidence with its accepted/rejected result, apply any
 valid transition, persist the resulting row, and commit as one transaction.
@@ -86,3 +86,8 @@ its effect.
 
 - **WHEN** the server receives a current-revision assessment or a stale assessment
 - **THEN** it commits the corresponding effect or rejection/dedupe record before sending the matching event ACK
+
+#### Scenario: Session cannot assess another requirement
+
+- **WHEN** an authenticated daemon sends an assessment for a Requirement different from its bound session
+- **THEN** the server rejects the event before any evidence or lifecycle state changes

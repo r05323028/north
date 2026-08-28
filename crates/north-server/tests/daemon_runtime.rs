@@ -4,13 +4,14 @@ use axum::{
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
-use north_domain::role::Role;
+use north_domain::{requirement::RequirementEdit, role::Role, status::RequirementStatus};
 use north_persistence::{
     AuthStore, PersistenceError, PoolOptions, DAEMON_SETUP_CLEANUP_BATCH_SIZE,
 };
 use north_protocol::{
-    encode_daemon_frame, Command, CommandAck, DaemonFrame, Heartbeat, MessageSend,
-    ProtocolErrorFrame, ServerFrame, SCHEMA_VERSION,
+    encode_daemon_frame, Command, CommandAck, DaemonFrame, Event, EventAckStatus, EventEnvelope,
+    Heartbeat, MessageSend, ProtocolErrorFrame, ReadinessVerdictWire, RequirementAssessed,
+    RequirementContext, ReviewedRepositoryWire, ServerFrame, SessionStart, SCHEMA_VERSION,
 };
 use north_server::{
     auth_router, build_app, AuthState, CommandRequest, DaemonResponse, LogCodeDelivery,
@@ -528,6 +529,293 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     assert_eq!(envelope.command_id, command_id);
     assert_eq!(envelope.session_id, session_id);
     assert_eq!(envelope.server_command_seq, pinned.server_command_seq);
+
+    let assessment_requirement = store
+        .create_requirement(
+            "Daemon assessment",
+            "Only its bound daemon session may assess this requirement",
+            &requester.user.id,
+        )
+        .await
+        .expect("create assessment requirement");
+    let assessment_requirement_id = assessment_requirement.id.clone();
+    store
+        .transition_requirement(
+            &assessment_requirement_id,
+            1,
+            &requester.user.id,
+            north_persistence::RequirementTransition::BeginDiscussion,
+        )
+        .await
+        .expect("begin assessment requirement");
+    let assessment_requirement = store
+        .edit_requirement(
+            &assessment_requirement_id,
+            2,
+            &RequirementEdit {
+                acceptance_criteria: Some(vec!["The assessment is session-bound".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("add assessment criteria");
+    assert_eq!(assessment_requirement.revision, 2);
+    assert_eq!(assessment_requirement.state_version, 3);
+
+    let assessment_session_id = format!("assessment-session-{}", claimed.daemon_id);
+    let assessment_command_id = format!("assessment-command-{}", claimed.daemon_id);
+    let assessment_command = CommandRequest {
+        command_id: assessment_command_id,
+        session_id: assessment_session_id.clone(),
+        command: Command::SessionStart(SessionStart {
+            requirement: RequirementContext {
+                id: assessment_requirement.id.clone(),
+                revision: assessment_requirement.revision,
+                title: assessment_requirement.title.clone(),
+                description: assessment_requirement.description.clone(),
+                summary: assessment_requirement.summary.clone(),
+                acceptance_criteria: assessment_requirement.acceptance_criteria.clone(),
+                assumptions: assessment_requirement.assumptions.clone(),
+                open_questions: assessment_requirement.open_questions.clone(),
+            },
+            conversation: north_protocol::ConversationContext { excerpt: vec![] },
+            repositories: vec![],
+        }),
+    };
+    runtime
+        .persist_and_dispatch_command(
+            assessment_command,
+            std::slice::from_ref(&required_capability),
+        )
+        .await
+        .expect("bind assessment session");
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Command(_)
+    ));
+    assert_eq!(
+        store
+            .session_requirement(&assessment_session_id)
+            .await
+            .expect("assessment session binding"),
+        Some(assessment_requirement_id.clone())
+    );
+
+    let assessment_event_id = format!("assessment-event-{}", claimed.daemon_id);
+    let assessment_event = DaemonFrame::Event(EventEnvelope {
+        event_id: assessment_event_id.clone(),
+        session_id: assessment_session_id.clone(),
+        daemon_event_seq: 1,
+        sent_at: "2026-01-01T00:00:00Z".into(),
+        schema_version: SCHEMA_VERSION,
+        event: Event::RequirementAssessed(RequirementAssessed {
+            requirement_id: assessment_requirement_id.clone(),
+            requirement_revision: 2,
+            verdict: ReadinessVerdictWire::Ready,
+            blockers: vec![],
+            assumptions: vec!["Daemon owns session".into()],
+            repositories_reviewed: vec![ReviewedRepositoryWire {
+                repository_id: "north".into(),
+                commit_sha: "abc123".into(),
+            }],
+        }),
+    });
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&assessment_event)
+                .expect("encode assessment event")
+                .into(),
+        ))
+        .await
+        .expect("send assessment event");
+    let ServerFrame::EventAck(ack) = next_server_frame(&mut socket).await else {
+        panic!("expected accepted assessment ACK");
+    };
+    assert_eq!(ack.status, EventAckStatus::Accepted);
+    let assessed = store
+        .requirement_by_id(&assessment_requirement_id)
+        .await
+        .expect("read assessed requirement")
+        .expect("assessed requirement");
+    assert_eq!(assessed.status, RequirementStatus::Ready);
+    assert_eq!(assessed.revision, 2);
+    assert_eq!(assessed.state_version, 4);
+
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&assessment_event)
+                .expect("encode duplicate assessment event")
+                .into(),
+        ))
+        .await
+        .expect("send duplicate assessment event");
+    let ServerFrame::EventAck(duplicate_ack) = next_server_frame(&mut socket).await else {
+        panic!("expected duplicate assessment ACK");
+    };
+    assert_eq!(duplicate_ack.status, EventAckStatus::Accepted);
+    let assessment_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
+            .bind(&assessment_event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count daemon assessments");
+    assert_eq!(assessment_rows, 1);
+    let duplicate_state = store
+        .requirement_by_id(&assessment_requirement_id)
+        .await
+        .expect("read duplicate assessment requirement")
+        .expect("duplicate assessment requirement");
+    assert_eq!(duplicate_state.state_version, 4);
+
+    store
+        .edit_requirement(
+            &assessment_requirement_id,
+            4,
+            &RequirementEdit {
+                summary: Some("Changed after daemon assessment".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("demote assessed requirement");
+    let stale_event = DaemonFrame::Event(EventEnvelope {
+        event_id: format!("{assessment_event_id}-stale"),
+        session_id: assessment_session_id.clone(),
+        daemon_event_seq: 2,
+        sent_at: "2026-01-01T00:00:01Z".into(),
+        schema_version: SCHEMA_VERSION,
+        event: Event::RequirementAssessed(RequirementAssessed {
+            requirement_id: assessment_requirement_id.clone(),
+            requirement_revision: 2,
+            verdict: ReadinessVerdictWire::Ready,
+            blockers: vec![],
+            assumptions: vec![],
+            repositories_reviewed: vec![],
+        }),
+    });
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&stale_event)
+                .expect("encode stale assessment event")
+                .into(),
+        ))
+        .await
+        .expect("send stale assessment event");
+    let ServerFrame::EventAck(stale_ack) = next_server_frame(&mut socket).await else {
+        panic!("expected stale assessment ACK");
+    };
+    assert_eq!(stale_ack.status, EventAckStatus::Rejected);
+    let assessed = store
+        .requirement_by_id(&assessment_requirement_id)
+        .await
+        .expect("read stale assessed requirement")
+        .expect("stale assessed requirement");
+    assert_eq!(assessed.status, RequirementStatus::Discussing);
+    assert_eq!(assessed.revision, 3);
+    assert_eq!(assessed.state_version, 5);
+
+    let foreign_requirement = store
+        .create_requirement(
+            "Foreign assessment",
+            "Session binding must reject this target",
+            &requester.user.id,
+        )
+        .await
+        .expect("create foreign requirement");
+    store
+        .transition_requirement(
+            &foreign_requirement.id,
+            1,
+            &requester.user.id,
+            north_persistence::RequirementTransition::BeginDiscussion,
+        )
+        .await
+        .expect("begin foreign requirement");
+    let foreign_requirement = store
+        .edit_requirement(
+            &foreign_requirement.id,
+            2,
+            &RequirementEdit {
+                acceptance_criteria: Some(vec!["Foreign criterion".into()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("add foreign criteria");
+    let foreign_event_id = format!("{assessment_event_id}-foreign");
+    let foreign_event = DaemonFrame::Event(EventEnvelope {
+        event_id: foreign_event_id.clone(),
+        session_id: assessment_session_id,
+        daemon_event_seq: 3,
+        sent_at: "2026-01-01T00:00:02Z".into(),
+        schema_version: SCHEMA_VERSION,
+        event: Event::RequirementAssessed(RequirementAssessed {
+            requirement_id: foreign_requirement.id.clone(),
+            requirement_revision: foreign_requirement.revision,
+            verdict: ReadinessVerdictWire::Ready,
+            blockers: vec![],
+            assumptions: vec![],
+            repositories_reviewed: vec![],
+        }),
+    });
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&foreign_event)
+                .expect("encode foreign assessment event")
+                .into(),
+        ))
+        .await
+        .expect("send foreign assessment event");
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::ProtocolError(ProtocolErrorFrame { code, .. })
+            if code == "assessment_requirement_mismatch"
+    ));
+    let foreign_state = store
+        .requirement_by_id(&foreign_requirement.id)
+        .await
+        .expect("read foreign requirement")
+        .expect("foreign requirement");
+    assert_eq!(foreign_state.status, RequirementStatus::Discussing);
+    assert_eq!(foreign_state.revision, 2);
+    assert_eq!(foreign_state.state_version, 3);
+    let foreign_assessments: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
+            .bind(&foreign_event_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count foreign assessments");
+    assert_eq!(foreign_assessments, 0);
+    let foreign_ready_audits: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transition_audit
+         WHERE requirement_id = $1 AND transition = 'mark_ready'",
+    )
+    .bind(&foreign_requirement.id)
+    .fetch_one(&pool)
+    .await
+    .expect("count foreign readiness audits");
+    assert_eq!(foreign_ready_audits, 0);
+    drop(socket);
+    let (mut socket, _) = connect_async(format!("ws://{address}/daemon/ws"))
+        .await
+        .expect("reconnect after assessment rejection");
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&hello(&claimed.daemon_id, &claimed.credential))
+                .expect("encode post-assessment hello")
+                .into(),
+        ))
+        .await
+        .expect("send post-assessment hello");
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Welcome(_)
+    ));
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Reconcile(_)
+    ));
+
     let second_response = app
         .clone()
         .oneshot(request(
@@ -867,14 +1155,26 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
+    sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
+        .bind(format!("assessment-session-{}", claimed.daemon_id))
+        .execute(&pool)
+        .await
+        .expect("cleanup assessment session");
+    sqlx::query("DELETE FROM requirements WHERE id = $1")
+        .bind(&foreign_requirement.id)
+        .execute(&pool)
+        .await
+        .expect("cleanup foreign requirement");
+
     server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
 async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
-    let Ok(database_url) = env::var("NORTH_TEST_DATABASE_URL") else {
-        return;
+    let database_url = match env::var("NORTH_TEST_DATABASE_URL") {
+        Ok(value) => value,
+        Err(_) => panic!("NORTH_TEST_DATABASE_URL is required for daemon integration tests"),
     };
     let _database_test_guard = database_test_lock().await;
     let pool = PoolOptions::new()

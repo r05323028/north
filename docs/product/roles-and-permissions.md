@@ -2,12 +2,28 @@
 
 Four instance roles, highest first: **Owner > Admin > Requirement Manager > Requester**.
 
+## North 0.1.0 collaboration policy
+
+North 0.1.0 uses workspace-wide Requirement visibility and collaboration.
+Authenticated users can view and converse on workspace Requirements. There is no
+per-Requirement ownership or ACL enforcement; these are instance-role
+permissions, not Requirement ownership checks.
+
 | Ability | Requester | Req. Manager | Admin | Owner |
 | --- | --- | --- | --- | --- |
-| Sign up / log in, create requirements, converse, edit allowed requirements, view status/outcome | ✓ | ✓ | ✓ | ✓ |
-| Review Ready requirements: Accept / Reject / Request Changes / Reopen | – | ✓ | ✓ | ✓ |
+| Create Requirements | ✓ | ✓ | ✓ | ✓ |
+| View workspace Requirements, status, and outcome | ✓ | ✓ | ✓ | ✓ |
+| Converse on workspace Requirements | ✓ | ✓ | ✓ | ✓ |
+| Edit non-terminal workspace Requirements | ✓ | ✓ | ✓ | ✓ |
+| Begin discussion | ✓ | ✓ | ✓ | ✓ |
+| Review Ready Requirements: Accept / Reject / Request Changes / Reopen | – | ✓ | ✓ | ✓ |
 | Configure repositories, manage daemon settings, instance settings | – | – | ✓ | ✓ |
 | Assign roles to users | – | – | ✓* | ✓ |
+
+Requester abilities are to create, view, converse, edit non-terminal workspace
+Requirements, begin discussion, and view status/outcome. Requirement Managers,
+Admins, and Owners have those same collaborative abilities and additionally
+perform reviewer-only lifecycle actions.
 
 \* Admins may grant everything except Owner; Owner grants anything.
 

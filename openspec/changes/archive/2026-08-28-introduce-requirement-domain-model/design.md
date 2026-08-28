@@ -15,7 +15,8 @@ wraps it in durable storage + API without duplicating rules.
   domain operation. A zero-row match maps to a typed conflict/HTTP 409 and
   writes no audit or lifecycle effect. The domain remains the only mutation
   path; no generic setter is added.
-- Transition audit rows record actor, from/to, timestamp (minimal auditability).
+- Transition audit rows record actor, from/to, optional reviewer feedback, and
+  timestamp (minimal auditability).
 - Agent-driven entry into Ready is deliberately NOT implemented here — it
   arrives with introduce-readiness-assessment; until then no endpoint can set
   Ready, keeping the assessment contract authoritative.

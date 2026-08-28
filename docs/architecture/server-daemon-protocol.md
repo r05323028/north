@@ -124,10 +124,10 @@ builds these DTOs and filters disabled repositories.
 ## Envelope and delivery contract
 
 The durable-delivery rules below define the North 0.1 target contract. The wire
-representation and transport boundaries exist today, but the durable server
-command outbox, daemon command/event journals, ACK-after-commit persistence,
-replay, gap reconciliation, and high-watermark compaction remain pending
-implementation. Statements in this section use normative language for that target
+representation and transport boundaries exist today. General durable command/event
+journals, replay, gap reconciliation, and high-watermark compaction remain pending;
+`requirement.assessed` evidence, dedupe, revision gates, and post-commit ACKs are
+implemented by the server readiness path. Statements in this section use normative language for that target
 unless they describe current transport behavior explicitly.
 
 Every command/event carries:
@@ -146,10 +146,11 @@ command inbox/processed-ledger durability, and duplicate runtime suppression
 remain owned by the durable-delivery implementation.
 
 The durable-delivery contract requires daemon events to be journaled before
-transmission. The server will deduplicate event ids inside the same transaction
-as validation/evidence/business state. Successful ACKs will follow commit;
-unacknowledged daemon events will remain buffered and will be replayed after
-reconnect.
+transmission. The readiness path deduplicates assessment event ids and their
+per-session sequence inside the same transaction as validation/evidence/business
+state, and rejects event-id or sequence identity reuse. Successful assessment
+ACKs follow commit. General unacknowledged event journaling and replay after
+reconnect remain pending.
 
 ## Sequence and reconnect rules
 
@@ -229,10 +230,10 @@ Reconnect receives one reconciliation
 snapshot for the same identity; revocation leaves the session pinned. Full server
 retry/failure handling remains pending.
 
-The target durable-delivery flow is: Agent produces a readiness assessment →
-daemon emits `requirement.assessed` → server will deduplicate and lock the
-current Requirement, validate event revision and domain gates, persist typed
-verdict, blockers, assumptions, and reviewed repository SHAs plus any valid
-transition, commit, then send `event_ack(status=accepted)` (or commit a
-rejection and send `event_ack(status=rejected)`). The daemon never writes
+The implemented readiness flow is: Agent produces a readiness assessment →
+daemon emits `requirement.assessed` → server deduplicates and locks the
+session-bound Requirement, validates event revision and domain gates, persists
+typed verdict, blockers, assumptions, and reviewed repository SHAs plus any
+valid transition, commits, then sends `event_ack(status=accepted)` (or commits
+a rejection and sends `event_ack(status=rejected)`). The daemon never writes
 Requirement state directly.

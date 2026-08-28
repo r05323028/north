@@ -7,12 +7,14 @@ enforced by domain code that already exists (`mark_ready`, `apply_edit`).
 
 ## Decisions
 
-- `requirement.assessed` events carry stable id/sequence. Server handling is
+- `requirement.assessed` events carry stable id/sequence and are accepted only
+  for the Requirement bound to their execution session. Server handling is
   one transaction: dedupe, lock the current Requirement, validate the event
   revision, run domain gates, persist immutable evidence with accepted/rejected
   result, apply a valid transition, persist the row, commit, then send
-  `event_ack(status=accepted)` or `event_ack(status=rejected)`. A duplicate committed event repeats
-  only its ACK; a rollback emits no ACK.
+`event_ack(status=accepted)` or `event_ack(status=rejected)`. A duplicate
+committed event repeats only its original ACK; identity conflicts are rejected
+and a rollback emits no ACK.
 - `requirement.assessed` events carry typed wire fields:
   `ReadinessVerdictWire`, blockers, assumptions, and
   `ReviewedRepositoryWire { repository_id, commit_sha }`. `north-server`
