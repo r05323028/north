@@ -31,26 +31,28 @@ page-size invariant that the API does not define.
   canonical, and navigates to its detail route. No wizard or optimistic
   lifecycle prediction is needed.
 
-## Shared notification path
+## Shared browser notification path
 
-`introduce-agent-requirement-clarification` owns one authenticated
-`GET /events` SSE producer/endpoint. Board/list subscribe to the categories
-relevant to collection invalidation, at minimum `requirement.changed`; the
-server may also publish `conversation.changed`, `readiness.changed`,
-`activity.changed`, and `session.changed` for the detail UI.
+This change owns one authenticated `GET /events` SSE producer/endpoint and its
+initial `requirement.changed` category. It emits only a lightweight hint after
+the canonical Requirement transaction commits. Board/list fetches
+`GET /requirements` on initial load, focus/refocus, and EventSource reconnect.
+On any notification, they may refetch once or coalesce nearby hints, but never
+patch a card from SSE data. `Last-Event-ID` is not a correctness contract; no
+browser stream replay is required. Producer failures do not roll back canonical
+server mutations.
 
-On initial load, focus/refocus, and EventSource reconnect, board/list fetch
-`GET /requirements` again. On any notification, they may refetch once or
-coalesce nearby hints, but never patch a card from SSE data. `Last-Event-ID` is
-not a correctness contract; no browser stream replay is required. Producer
-failures do not roll back canonical server mutations.
+`introduce-agent-requirement-clarification` extends this same endpoint with
+`conversation.changed`, `readiness.changed`, `activity.changed`, and
+`session.changed` after its corresponding canonical transactions. It does not
+create another endpoint, event bus, browser event store, or WebSocket path.
 
 ## Explicit boundary
 
-Board/list owns browser rendering, query state, subscription, and refetch. The
-clarification change owns the server notification source and canonical runtime
-read models. No browser WebSocket, daemon connection, durable browser event
-store, or second SSE producer is added.
+Board/list owns browser rendering, query state, subscription, base `/events`
+transport, and refetch. Clarification owns its canonical runtime read models
+and extends the shared notification categories. No browser WebSocket, daemon
+connection, durable browser event store, or second SSE producer is added.
 
 ## Test foundation
 

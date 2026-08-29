@@ -84,14 +84,17 @@ introduced. The runtime never receives or operates in the reusable cache.
 Dependency position:
 
 ```text
+introduce-requirement-board
+  └─ base authenticated GET /events + requirement.changed
+
 introduce-local-repository-inspection
-                |
-                v
-introduce-agent-requirement-clarification
-          |                   |
-          v                   v
-introduce-requirement-board   introduce-requirement-conversation-ui
+  └─> introduce-agent-requirement-clarification
+       └─ extends Board's shared /events categories
+
+introduce-requirement-board + introduce-agent-requirement-clarification
+  └─> introduce-requirement-conversation-ui
 ```
 
-`introduce-runtime-retry-and-failure-state` is a later extension, not a
-prerequisite for this change or its consumers.
+Board's base browser invalidation is independent of repository inspection and
+clarification runtime. `introduce-runtime-retry-and-failure-state` is a later
+extension, not a prerequisite for this change or its consumers.

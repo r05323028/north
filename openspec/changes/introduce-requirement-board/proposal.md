@@ -26,10 +26,11 @@ This change does not reimplement, paginate, or redesign those APIs.
 - List view with server-backed search, status/creator filters, updated sorting,
   status/ownership columns, and the same navigation.
 - Minimal title+description creation flow that opens the created Requirement.
-- HTTP reads plus the shared authenticated SSE notification endpoint. The
-  server-side invalidation source is explicitly owned by
-  `introduce-agent-requirement-clarification`; this change owns board/list
-  consumption and canonical refetch behavior, not a second producer.
+- HTTP reads plus the shared authenticated SSE notification endpoint. This
+  change owns the base `GET /events` mechanism and initial
+  `requirement.changed` notification; clarification extends the same producer
+  with its additional categories. Board/list owns consumption and canonical
+  refetch behavior, not browser state reconstruction.
 - Frontend test foundation and one grouping/query interaction test.
 
 ## Collection scale decision for North 0.1.0
@@ -41,22 +42,26 @@ not add client pagination, cursor semantics, or virtualization. Collection
 scale hardening is a separate prerequisite/change if the single-instance
 bounded product scope stops being sufficient.
 
-## SSE ownership and invalidation path
+## Shared browser SSE ownership and invalidation path
 
-The complete path is:
+This change establishes one authenticated browser SSE endpoint, `GET /events`,
+with `requirement.changed` as its initial notification category. The producer
+emits a lightweight hint only after the canonical server transaction commits.
+The complete board path is:
 
 ```text
 north-server canonical commit
-        -> lightweight authenticated SSE notification
-        -> board/list refetch GET /requirements
-        -> render returned canonical Requirement rows
+-> lightweight authenticated GET /events notification
+-> board/list refetch GET /requirements
+-> render returned canonical Requirement rows
 ```
 
-SSE notifications are not a browser event log, Requirement truth, WebSocket,
-or replay source. Missed or duplicate hints are harmless because HTTP refetch
-wins. `introduce-agent-requirement-clarification` owns the common server
-producer/endpoint and categories; board/list must consume that contract and
-must not reconstruct state from notification payloads.
+The endpoint is notification-only, non-authoritative, non-durable, and not a
+WebSocket or replay log. `Last-Event-ID` is not required for correctness;
+missed, duplicate, delayed, or out-of-order hints are harmless because HTTP
+refetch wins. `introduce-agent-requirement-clarification` extends this same
+producer with clarification categories after its canonical transactions. It
+does not create another endpoint or event store.
 
 ## UI scope
 
@@ -79,21 +84,23 @@ None. Requirement HTTP semantics already exist.
 ## Impact and dependencies
 
 - Established prerequisites: requirement domain/concurrency and role contracts.
-- Shared backend prerequisite: clarification-runtime's canonical SSE producer
-  and endpoint; base board/list HTTP rendering remains independently
-  implementable from current APIs.
-- Downstream/adjacent: conversation/detail UI may use the same notification
-  endpoint and canonical Requirement API, but does not depend on board code.
+- This change owns the base authenticated `/events` producer and
+  `requirement.changed`; board/list does not depend on clarification or local
+  repository inspection.
+- Clarification extends this endpoint with clarification categories;
+  conversation/detail UI consumes the shared endpoint plus clarification reads.
 - `introduce-runtime-retry-and-failure-state` is not required for board/list.
 
 Dependency graph:
 
 ```text
+introduce-requirement-board
+  └─ base GET /events + requirement.changed
+
 introduce-local-repository-inspection
-                |
-                v
-introduce-agent-requirement-clarification
-          |                   |
-          v                   v
-introduce-requirement-board   introduce-requirement-conversation-ui
+  └─> introduce-agent-requirement-clarification
+       └─ extends Board's shared /events categories
+
+introduce-requirement-board + introduce-agent-requirement-clarification
+  └─> introduce-requirement-conversation-ui
 ```

@@ -8,9 +8,12 @@
 
 ## 2. Conversation
 
-- [ ] 2.1 Render persisted requester/agent/system messages and post through the canonical message endpoint; preserve returned message identity and durable-first semantics.
-- [ ] 2.2 Distinguish initial start-context message from later `message.send` messages through the clarification orchestration contract; never submit the initial message twice.
-- [ ] 2.3 Add reconnect/refocus refetch for conversation and prove agent messages survive missed SSE hints.
+- [ ] 2.1 Render persisted requester/agent/system messages; keep `POST /requirements/{id}/conversation/messages` persistence-only and preserve returned message identity.
+- [ ] 2.2 For an initial message, call `POST /requirements/{id}/clarification/start` with `message_id` and `expected_state_version`; never submit that message as `message.send`.
+- [ ] 2.3 For a later persisted message, call `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`; prove repeated dispatch reuses one command mapping and creates no second message.
+- [ ] 2.4 Call `POST /requirements/{id}/clarification/cancel` for cancellation; render returned operational status without changing Requirement content/lifecycle.
+- [ ] 2.5 Preserve persisted messages and refetch the detail bundle on start HTTP 409 or operational unavailability; never retry with a newer state version.
+- [ ] 2.6 Add reconnect/refocus refetch for conversation and prove agent messages survive missed SSE hints.
 
 ## 3. Overview and concurrency
 

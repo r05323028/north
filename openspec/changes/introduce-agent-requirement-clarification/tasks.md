@@ -2,16 +2,16 @@
 
 ## 1. Server orchestration and context
 
-- [ ] 1.1 Add one clarification-run service that reuses current daemon selection/pinning and durable command APIs; persist owner, Requirement binding, repository IDs, and `session.start` before dispatch.
+- [ ] 1.1 Add one clarification-run service that creates/reuses the server-owned run before daemon selection; on assignment, atomically persist owner, Requirement binding, repository IDs, and `session.start` before dispatch, while no-owner starts retain an unassigned unavailable run with no start command.
 - [ ] 1.2 Assemble immutable Requirement snapshot, bounded/relevant conversation excerpt, and enabled repository metadata through existing server DTO conversion; remove any checkout/credential/domain values from the wire input.
-- [ ] 1.3 Define the coarse one-run session projection (`starting`, `running`, `completed`, `unavailable`) plus cancellation intent without adding retry state, attempt count, budget, backoff, or final `Failed` policy.
+- [ ] 1.3 Define the latest-run session projection (`starting`, `running`, `completed`, `unavailable`) plus cancellation intent; return `{ "session": null }` only before any clarification run exists, without adding retry state, attempt count, budget, backoff, or final `Failed` policy.
 - [ ] 1.4 Ensure any Draft → Discussing start transition uses the caller's `expected_state_version`; stale conflict creates no session command while preserving the already-persisted requester message.
 
 ## 2. Requester message and command ordering
 
 - [ ] 2.1 Keep requester persistence first; for the initial message include the persisted identity/content in `session.start` context and do not create a second `message.send` command.
-- [ ] 2.2 For later messages create/reuse the durable message-to-command mapping and dispatch/replay the exact `message.send` envelope through existing outbox/journal semantics.
-- [ ] 2.3 Add idempotent cancellation command handling and prove duplicate/replayed cancellation cannot invoke runtime twice.
+- [ ] 2.2 For later messages create/reuse the durable message-to-command mapping and dispatch/replay the exact `message.send` envelope through existing outbox/journal semantics; expose it through the explicit authenticated dispatch operation.
+- [ ] 2.3 Add the explicit authenticated clarification cancellation operation and prove duplicate/replayed cancellation cannot invoke runtime twice.
 
 ## 3. Daemon runtime boundary
 
@@ -28,12 +28,12 @@
 ## 5. Canonical reads and browser invalidation
 
 - [ ] 5.1 Add server read models/endpoints for latest readiness (`current` flag), persisted coarse activity, and minimal session/runtime status; keep existing Requirement/conversation/review-packet reads authoritative.
-- [ ] 5.2 Add one authenticated post-commit SSE producer/endpoint with requirement, conversation, readiness, activity, and session notification categories; keep payloads non-authoritative and non-replay-based.
-- [ ] 5.3 Test missed, duplicate, and reconnect hints by refetching HTTP state rather than applying stream payloads.
+- [ ] 5.2 Extend the Board-owned authenticated `/events` producer with post-commit `conversation.changed`, `readiness.changed`, `activity.changed`, and `session.changed` categories; keep payloads non-authoritative and non-replay-based and add no endpoint or event store.
+- [ ] 5.3 Test clarification category hints by refetching HTTP state rather than applying stream payloads; prove the shared producer has one endpoint and no Last-Event-ID correctness dependency.
 
 ## 6. Guards and integration
 
-- [ ] 6.1 Test no eligible daemon/runtime availability leaves Requirement lifecycle and revision/state_version unchanged while preserving durable messages.
+- [ ] 6.1 Test no eligible daemon/runtime availability creates/reuses an unassigned run, preserves durable messages, and leaves Requirement lifecycle/revision/state_version unchanged except for the explicit valid Draft → Discussing transition.
 - [ ] 6.2 Test revision edit during a run makes the old assessment stale and produces durable rejection without a Requirement mutation.
 - [ ] 6.3 Test duplicate command/event delivery, reconnect, agent-message persistence, coarse activity persistence, and atomic assessment ACK ordering.
 - [ ] 6.4 Run architecture checks proving no browser WebSocket, no SDK dependency in protocol/domain, no daemon business retry authority, and no second SSE/source-of-truth path.
@@ -42,3 +42,11 @@
 
 - [ ] 7.1 Run targeted Rust/PostgreSQL integration tests and relevant web checks.
 - [ ] 7.2 Run full required validation and `openspec validate --all --strict`.
+
+## 8. Explicit HTTP intent boundaries
+
+- [ ] 8.1 Keep `POST /requirements/{id}/conversation/messages` persistence-only; prove it returns a durable `message_id` without runtime lookup, run creation, or daemon command.
+- [ ] 8.2 Add authenticated `POST /requirements/{id}/clarification/start` with persisted-message validation, `expected_state_version`, explicit Draft → Discussing behavior, start-context assembly, idempotent repeat/start-message rules, no duplicate `message.send`, and unassigned no-daemon response.
+- [ ] 8.3 Add authenticated later-message dispatch by `message_id`; prove Requirement/conversation/run ownership, one durable message-to-command mapping, and idempotent replay without a second conversation message.
+- [ ] 8.4 Add authenticated `POST /requirements/{id}/clarification/cancel`; prove one durable `session.cancel` command/intent, pinned-owner behavior, unassigned handling, idempotency, and no Requirement mutation.
+- [ ] 8.5 Add HTTP integration scenarios for stale start conflict, no-daemon run identity, explicit unavailable restart reuse, assigned-owner disconnect, duplicate dispatch, and repeated cancellation.

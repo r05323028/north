@@ -3,8 +3,9 @@
 ## 1. Foundation
 
 - [ ] 1.1 Add the authenticated web API client for existing Requirement create/list/detail routes; preserve server query names and response version fields.
-- [ ] 1.2 Add the minimal SSE consumer for the shared `/events` endpoint; document that the server producer/categories belong to clarification-runtime and that notifications trigger refetch only.
-- [ ] 1.3 Add the existing web test setup plus grouping/query-control tests.
+- [ ] 1.2 Add the shared authenticated `GET /events` producer with post-commit `requirement.changed` hints; keep it lightweight, notification-only, non-durable, and independent of clarification. `Last-Event-ID` is not a correctness dependency.
+- [ ] 1.3 Add the minimal board/list SSE consumer for `/events`; notifications trigger refetch only and never patch cards.
+- [ ] 1.4 Add the existing web test setup plus grouping/query-control tests.
 
 ## 2. Board and list
 

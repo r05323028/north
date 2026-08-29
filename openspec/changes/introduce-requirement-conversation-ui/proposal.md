@@ -11,7 +11,9 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
 - Deep-linkable `/requirements/[id]` route with Conversation, Overview, and
   Activity tabs.
 - Conversation uses the persisted conversation API for requester and agent
-  messages. SSE only hints that a refetch may be useful.
+  messages. Initial clarification explicitly calls `POST
+  /clarification/start` after persistence; later messages explicitly call the
+  clarification dispatch operation. SSE only hints that a refetch may be useful.
 - Overview renders canonical Requirement fields, readiness/repository evidence,
   lifecycle status, content revision, and the minimal clarification session
   status supplied by the backend.
@@ -26,9 +28,13 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
 ## Backend contract consumed
 
 This change consumes existing `GET /requirements/{id}` and paged conversation
-reads/writes plus the clarification change's canonical readiness, activity,
-session, and shared SSE notification reads. It does not interpret daemon frames,
-SSE replay, or a future retry state machine as product truth.
+reads plus the existing persistence-only
+`POST /requirements/{id}/conversation/messages`. It then uses clarification's
+explicit authenticated `start`, message `dispatch`, and `cancel` mutations,
+plus its canonical readiness, activity, and latest-run reads. It consumes the
+Board-owned shared `GET /events` endpoint and clarification's added categories;
+it does not interpret daemon frames, SSE replay, or a future retry state machine
+as product truth.
 
 ## Execution-status boundary
 
@@ -60,22 +66,27 @@ advanced execution controls, or new Requirement business transitions.
 
 - Upstream: archived conversation/readiness/concurrency contracts and current
   Requirement/conversation HTTP APIs.
-- Required downstream backend: `introduce-agent-requirement-clarification`
-  provides persisted agent messages, readiness read model, coarse activity,
-  minimal session status, and the shared SSE producer/endpoint.
-- `introduce-requirement-board` may link to this detail route, but board code is
-  not a prerequisite for the detail surface.
+- Required backend: `introduce-agent-requirement-clarification` provides
+  persisted agent messages, explicit clarification mutations, readiness read
+  model, coarse activity, and latest-run status.
+- `introduce-requirement-board` provides the shared authenticated `GET /events`
+  infrastructure and `requirement.changed`; this detail UI consumes it but does
+  not depend on Board rendering code.
+- Clarification extends Board's `/events` categories with conversation,
+  readiness, activity, and session hints.
 - `introduce-runtime-retry-and-failure-state` is a later UI extension, not an
   initial dependency.
 
 Dependency graph:
 
 ```text
+introduce-requirement-board
+  └─ base GET /events + requirement.changed
+
 introduce-local-repository-inspection
-                |
-                v
-introduce-agent-requirement-clarification
-          |                   |
-          v                   v
-introduce-requirement-board   introduce-requirement-conversation-ui
+  └─> introduce-agent-requirement-clarification
+       └─ extends shared /events categories
+
+introduce-requirement-board + introduce-agent-requirement-clarification
+  └─> introduce-requirement-conversation-ui
 ```

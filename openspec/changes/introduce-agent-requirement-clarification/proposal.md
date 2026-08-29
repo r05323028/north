@@ -31,6 +31,10 @@ move ACK ownership, or duplicate reconciliation/retry rules.
   then create a stable `message.send` command using its persisted identity;
   initial-run messages belong in `session.start` context instead of being sent
   twice.
+- Explicit authenticated application mutations: the existing conversation
+  message operation persists history only; `clarification/start` starts from a
+  persisted message and `expected_state_version`; later message dispatch and
+  cancellation explicitly create/reuse their durable protocol commands.
 - One concrete daemon runtime adapter behind North's internal execution seam;
   SDK lifecycle details stay inside the daemon and `north-domain`/
   `north-protocol` remain SDK-independent.
@@ -42,22 +46,55 @@ move ACK ownership, or duplicate reconciliation/retry rules.
   a Requirement mutation.
 - Canonical HTTP read models for persisted messages, latest/current readiness,
   coarse activity, and minimal session/runtime status.
-- Authenticated browser SSE notification production from post-commit server
-  changes. SSE is a hint; HTTP remains the source of Requirement, conversation,
-  assessment, activity, and session truth.
+- Clarification categories on the Board-owned authenticated browser SSE
+  producer at `GET /events`, emitted after clarification transactions commit.
+  SSE is a hint; HTTP remains the source of Requirement, conversation,
+  assessment, activity, and session truth. This change does not create the base
+  endpoint or another notification store.
+
+## Authenticated HTTP mutation boundary
+
+Application intent uses explicit authenticated mutations; the existing conversation
+message endpoint remains persistence-only:
+
+```text
+POST /requirements/{id}/conversation/messages
+  -> durable requester message + message_id; no runtime effect
+POST /requirements/{id}/clarification/start
+  { message_id, expected_state_version }
+  -> create/reuse run; start context; no duplicate message.send
+POST /requirements/{id}/clarification/messages/{message_id}/dispatch
+  -> create/reuse one durable message.send
+POST /requirements/{id}/clarification/cancel
+  -> create/reuse one durable session.cancel command/intent
+```
+
+`clarification/start` validates the persisted start message and state-version
+precondition before any run or command mutation. A valid start with no eligible
+daemon still returns its unassigned unavailable run. Later dispatch never
+creates another conversation message. Cancellation targets the latest applicable
+run and never changes Requirement lifecycle or content. `GET
+/requirements/{id}/session` means latest clarification run: it returns
+`{ "session": null }` only before any run exists, and returns unassigned,
+assigned/offline, or completed run projections otherwise. No generic command API
+is introduced.
 
 ## Minimal execution scope
 
 This change supports one clarification execution and its minimal persisted
-session facts: requirement/session binding, owner when selected, durable
-commands/events, cancellation intent, coarse starting/running/completed/
-unavailable projection, and runtime facts. An unavailable start creates or
-retains an unassigned coarse run record; it never creates a fake daemon
-execution. It does
-**not** introduce the later execution
-retry state machine, attempt accounting, retry budget, server backoff policy,
-or terminal execution `Failed` decision. `session.resume` remains an existing
-execution-recovery command; this change does not decide when to issue it.
+run facts: requirement/run binding, nullable daemon owner until assignment,
+durable commands/events, cancellation intent, coarse
+starting/running/completed/unavailable projection, and runtime facts. A valid
+`clarification/start` creates or reuses the latest unassigned run before daemon
+selection. With no eligible daemon, that run has `daemon_id = null`, status
+`unavailable`, and no `session.start` command; its run identity is still
+returned with the operational-unavailable result. Once assigned, the daemon
+pin is immutable and durable commands stay bound to it across disconnects.
+This does
+**not** introduce the later execution retry state machine, attempt accounting,
+retry budget, server backoff policy, or terminal execution `Failed` decision.
+`session.resume` remains an existing execution-recovery command; this change
+does not decide when to issue it.
 
 No eligible daemon or an unavailable runtime is operational unavailability. It
 must not mark the Requirement failed or invent a business transition; any
@@ -88,21 +125,24 @@ source mutation, PR creation, or new credential/provenance subsystem.
 
 - Upstream: configured repository catalog, local repository inspection, merged
   server↔daemon protocol, requirement/conversation/readiness domain contracts,
-  and durable delivery/session ownership.
-- Downstream: board/list and conversation/detail UI consume the HTTP read models
-  and shared SSE endpoint. Board HTTP rendering may be developed independently,
-  but live invalidation depends on this change's server notification producer.
+  Board-owned base `/events`, and durable delivery/session ownership.
+- Downstream: conversation/detail UI consumes this change's HTTP read models
+  and clarification SSE categories. Board/list rendering and its
+  `requirement.changed` invalidation remain independently usable without this
+  change.
 - The later `introduce-runtime-retry-and-failure-state` change may extend the
   session read model and UI but is not an initial UI prerequisite.
 
 Dependency graph:
 
 ```text
+introduce-requirement-board
+  └─ base GET /events + requirement.changed
+
 introduce-local-repository-inspection
-                |
-                v
-introduce-agent-requirement-clarification
-          |                   |
-          v                   v
-introduce-requirement-board   introduce-requirement-conversation-ui
+  └─> introduce-agent-requirement-clarification
+       └─ extends shared /events categories
+
+introduce-requirement-board + introduce-agent-requirement-clarification
+  └─> introduce-requirement-conversation-ui
 ```

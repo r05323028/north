@@ -65,11 +65,13 @@ client-predicted lifecycle/version values.
 
 ### Requirement: Browser transport is HTTP plus notification-only SSE
 
-Board and list SHALL use HTTP for canonical reads/mutations and the shared
-authenticated SSE endpoint for lightweight invalidation hints. The server-side
-SSE producer SHALL be the single producer owned by
-`introduce-agent-requirement-clarification`; this change SHALL not add another
-producer. The frontend SHALL never open a WebSocket.
+Board and list SHALL use HTTP for canonical reads/mutations and this change's
+single authenticated `GET /events` SSE endpoint for lightweight invalidation
+hints. The base producer SHALL emit `requirement.changed` only after the
+canonical Requirement transaction commits. `Last-Event-ID` SHALL not be
+required for correctness. `introduce-agent-requirement-clarification` may
+extend this same producer with clarification categories, but SHALL not create
+another endpoint or producer. The frontend SHALL never open a WebSocket.
 
 The invalidation path SHALL be:
 
@@ -84,6 +86,11 @@ canonical north-server commit
 
 - **WHEN** a server-side action changes a visible Requirement's status and emits a `requirement.changed` hint
 - **THEN** an open board/list refetches canonical HTTP data and reflects the returned status without applying the hint as a state patch
+
+#### Scenario: Base SSE does not depend on clarification
+
+- **WHEN** the board/list is used before clarification runtime is available
+- **THEN** the authenticated `GET /events` endpoint can still deliver `requirement.changed` hints and the board/list can refetch `GET /requirements`
 
 ### Requirement: Missed and duplicate hints are harmless
 

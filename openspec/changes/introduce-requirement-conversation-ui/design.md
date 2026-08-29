@@ -21,13 +21,20 @@ The readiness response supplies the latest immutable assessment and its
 are server projections, not transport caches. The existing Ready-only
 `review-packet` remains a separate reviewer projection.
 
-## Tabs
+## Tabs and explicit clarification mutations
 
 - **Conversation**: render persisted requester/agent/system messages in the
-  existing deterministic order. Post through the canonical message endpoint;
-  render the returned persisted message immediately. A start-of-run message
-  follows clarification orchestration's durable-first/start-context rule; a
-  later message uses `message.send` only after its message row exists.
+  existing deterministic order. Posting through
+  `POST /requirements/{id}/conversation/messages` persists one requester
+  message only and returns its `message_id`; it never invokes the runtime.
+  For an initial clarification message, call
+  `POST /requirements/{id}/clarification/start` with that ID and the current
+  `expected_state_version`. For a later message, call
+  `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`.
+  The cancel control calls
+  `POST /requirements/{id}/clarification/cancel`. The UI uses canonical run
+  state and explicit operation responses to select these actions; it never
+  infers initial versus later solely from transcript contents.
 - **Overview**: render title, description, summary, acceptance criteria,
   assumptions, open questions, lifecycle status, content revision, current
   readiness, and cited repositories from HTTP responses. Never derive fields by
@@ -52,10 +59,11 @@ Rejected edits surface the server error.
 
 ## Reconnect and notification behavior
 
-The shared authenticated SSE endpoint emits lightweight categories such as
-`requirement.changed`, `conversation.changed`, `readiness.changed`,
-`activity.changed`, and `session.changed`. On any relevant hint, disconnect,
-EventSource reconnect, browser refocus, or page reload, refetch:
+The page consumes the Board-owned authenticated `GET /events` endpoint. The
+clarification change adds `conversation.changed`, `readiness.changed`,
+`activity.changed`, and `session.changed` to that shared producer; these are
+hints only. On any relevant hint, disconnect, EventSource reconnect, browser
+refocus, or page reload, refetch:
 
 1. Requirement;
 2. conversation page(s);
@@ -64,7 +72,8 @@ EventSource reconnect, browser refocus, or page reload, refetch:
 5. minimal session/runtime status.
 
 The page can coalesce refetches. It must not use `Last-Event-ID` or stream
-history as a correctness dependency and must never open a WebSocket.
+history as a correctness dependency and must never open a WebSocket. It does
+not add an SSE endpoint or browser event store.
 
 ## Privacy and scope guards
 

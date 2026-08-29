@@ -84,9 +84,12 @@ hygiene bounded to the daemon-owned disposable namespace.
 ## Dependency graph
 
 ```text
-local inspection  ->  clarification orchestration
-clarification     ->  board HTTP/SSE consumer
-clarification     ->  conversation/detail HTTP/SSE consumer
+introduce-requirement-board
+  -> base browser GET /events + requirement.changed (independent)
+introduce-local-repository-inspection
+  -> clarification orchestration
+introduce-requirement-board + introduce-agent-requirement-clarification
+  -> conversation/detail consumer
 ```
 
 The later retry/failure change may extend runtime status handling but is not

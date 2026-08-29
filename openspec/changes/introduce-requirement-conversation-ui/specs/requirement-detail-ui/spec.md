@@ -19,15 +19,38 @@ offer Conversation, Overview, and Activity tabs.
 - **WHEN** the detail page loads or regains focus
 - **THEN** it refetches the Requirement, conversation, readiness, activity, and session reads and renders each from its corresponding canonical response
 
-### Requirement: Conversation is persisted and durable-first
+### Requirement: Conversation persistence and clarification intent are separate
 
 Conversation SHALL render requester and agent messages returned by the canonical
-conversation API. Posting a requester message SHALL follow clarification's
-ordering: persist the message first, then enqueue/replay its durable runtime
-command using the persisted message identity. The initial message that starts a
-run SHALL be represented in `session.start` context and SHALL not be submitted
-again as `message.send`. Duplicate/replayed delivery of that persisted message
-SHALL not add another logical message or runtime submission.
+conversation API. `POST /requirements/{id}/conversation/messages` SHALL persist
+one requester message and return its `message_id`; it SHALL not infer runtime
+intent, start a run, choose a daemon, or create `session.start`/`message.send`.
+
+For an initial clarification message, the UI SHALL call
+`POST /requirements/{id}/clarification/start` with the persisted `message_id`
+and current `expected_state_version`. For a later message, it SHALL call
+`POST /requirements/{id}/clarification/messages/{message_id}/dispatch`. The
+initial message SHALL be represented in `session.start` context and SHALL not
+be submitted again as `message.send`. The cancel control SHALL call
+`POST /requirements/{id}/clarification/cancel`. The UI SHALL choose initial
+`start` versus later `dispatch` from canonical run state and explicit operation
+state, never solely from transcript contents. Duplicate/replayed command
+delivery SHALL not add another logical message or runtime submission.
+
+#### Scenario: Posting history does not invoke runtime
+
+- **WHEN** a requester posts `POST /requirements/{id}/conversation/messages`
+- **THEN** the persisted requester message is returned and no run or daemon command is created
+
+#### Scenario: Initial message starts explicitly
+
+- **WHEN** the UI has persisted message M and calls clarification/start with M's ID and the current expected_state_version
+- **THEN** the server creates/reuses the clarification run, includes M in `session.start` context when assigned, and creates no `message.send` for M
+
+#### Scenario: Later message dispatch is explicit
+
+- **WHEN** the UI persists later message M and calls the message dispatch operation
+- **THEN** the server creates/reuses exactly one durable `message.send` mapping for M and does not create another conversation message
 
 #### Scenario: Agent reply survives transport loss
 
@@ -36,8 +59,13 @@ SHALL not add another logical message or runtime submission.
 
 #### Scenario: Unavailable dispatch does not erase a message
 
-- **WHEN** requester message persistence succeeds but no eligible daemon can receive its command
+- **WHEN** requester message persistence succeeds but clarification start/dispatch cannot reach a daemon
 - **THEN** the message remains visible in canonical conversation history and the UI shows operational unavailability separately from message loss
+
+#### Scenario: Stale start preserves persisted history
+
+- **WHEN** clarification/start returns HTTP 409 for the submitted expected_state_version
+- **THEN** the UI keeps the already-persisted message, refetches canonical detail reads, and does not retry with a newer state version
 
 ### Requirement: Overview renders structured state without transcript derivation
 
