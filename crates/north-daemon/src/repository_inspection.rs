@@ -1,0 +1,2267 @@
+//! Host-Git source preparation for daemon-side repository inspection.
+//!
+//! This module owns local source material and disposable checkouts only. It
+//! does not access server persistence, store credentials, or decide business
+//! state.
+
+use north_protocol::{RepositoryContext, ReviewedRepositoryWire};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsStr,
+    fmt::{self, Write as _},
+    fs,
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+};
+
+/// Git subcommands exposed to runtime inspection. Everything else is denied.
+pub const READ_ONLY_GIT_COMMANDS: &[&str] = &[
+    "cat-file",
+    "describe",
+    "diff",
+    "log",
+    "ls-files",
+    "rev-parse",
+    "show",
+    "status",
+];
+
+const WORKSPACE_PREFIX: &str = "workspace-";
+const WORKSPACE_MARKER: &str = "north-workspace-identity";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FsIdentity {
+    first: u64,
+    second: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceIdentity {
+    name: String,
+    workspace: FsIdentity,
+    git_directory: FsIdentity,
+    marker: FsIdentity,
+}
+
+struct CheckoutContext<'a> {
+    cache_root: &'a Path,
+    cache_root_identity: FsIdentity,
+    cache: &'a Path,
+    workspace_root: &'a Path,
+    workspace_root_identity: FsIdentity,
+    workspace: &'a Path,
+    commit_sha: &'a str,
+}
+
+static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectionPhase {
+    Authorization,
+    Cache,
+    Workspace,
+    Revision,
+    Runtime,
+    Cancellation,
+    DirtyTree,
+    Cleanup,
+}
+
+impl fmt::Display for InspectionPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            Self::Authorization => "authorization",
+            Self::Cache => "cache",
+            Self::Workspace => "workspace",
+            Self::Revision => "revision",
+            Self::Runtime => "runtime",
+            Self::Cancellation => "cancellation",
+            Self::DirtyTree => "dirty-tree",
+            Self::Cleanup => "cleanup",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Failure facts keep runtime failure, contamination, and cleanup failure
+/// separate so callers do not mistake one for another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectionError {
+    pub phase: InspectionPhase,
+    pub reason: String,
+    pub contamination: Option<String>,
+    pub cleanup_failure: Option<String>,
+}
+
+impl InspectionError {
+    fn new(phase: InspectionPhase, reason: impl Into<String>) -> Self {
+        Self {
+            phase,
+            reason: reason.into(),
+            contamination: None,
+            cleanup_failure: None,
+        }
+    }
+
+    pub fn is_contaminated(&self) -> bool {
+        matches!(self.phase, InspectionPhase::DirtyTree) || self.contamination.is_some()
+    }
+
+    pub fn cleanup_failed(&self) -> bool {
+        self.cleanup_failure.is_some() || matches!(self.phase, InspectionPhase::Cleanup)
+    }
+}
+
+impl fmt::Display for InspectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "repository inspection {}: {}", self.phase, self.reason)?;
+        if let Some(contamination) = &self.contamination {
+            write!(f, "; contamination: {contamination}")?;
+        }
+        if let Some(cleanup_failure) = &self.cleanup_failure {
+            write!(f, "; cleanup failed: {cleanup_failure}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for InspectionError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupFailure {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CleanupReport {
+    pub removed: Vec<PathBuf>,
+    pub failures: Vec<CleanupFailure>,
+}
+
+impl CleanupReport {
+    pub fn is_clean(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
+/// Cooperative cancellation handle passed to a runtime adapter.
+#[derive(Debug, Clone, Default)]
+pub struct InspectionCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl InspectionCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Host-Git source metadata. Production callers should construct this through
+/// [`RepositorySource::from_context`], which is the server-wire boundary;
+/// [`RepositorySource::new`] also supports local Git fixtures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositorySource {
+    pub repository_id: String,
+    pub url: String,
+}
+
+impl RepositorySource {
+    pub fn new(repository_id: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            repository_id: repository_id.into(),
+            url: url.into(),
+        }
+    }
+
+    pub fn from_context(context: &RepositoryContext) -> Result<Self, InspectionError> {
+        let source = Self::new(&context.repository_id, &context.url);
+        source.validate()?;
+        if !server_repository_location(&source.url) {
+            return Err(InspectionError::new(
+                InspectionPhase::Authorization,
+                "repository context URL is outside server Git URL policy",
+            ));
+        }
+        Ok(source)
+    }
+
+    fn validate(&self) -> Result<(), InspectionError> {
+        if self.repository_id.trim().is_empty() {
+            return Err(InspectionError::new(
+                InspectionPhase::Authorization,
+                "repository ID is empty",
+            ));
+        }
+        if self.url.trim().is_empty() || self.url.chars().any(char::is_whitespace) {
+            return Err(InspectionError::new(
+                InspectionPhase::Authorization,
+                "repository URL is empty or contains whitespace",
+            ));
+        }
+        if !credential_free_location(&self.url) {
+            return Err(InspectionError::new(
+                InspectionPhase::Authorization,
+                "repository URL contains credentials or query data",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Immutable repository authorization copied from one server-assembled run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunAuthorization {
+    session_id: String,
+    repositories: Vec<RepositorySource>,
+}
+
+impl RunAuthorization {
+    pub fn new(
+        session_id: impl Into<String>,
+        repositories: Vec<RepositorySource>,
+    ) -> Result<Self, InspectionError> {
+        let session_id = session_id.into();
+        if session_id.trim().is_empty() {
+            return Err(InspectionError::new(
+                InspectionPhase::Authorization,
+                "authorization session ID is empty",
+            ));
+        }
+        let mut repository_ids = HashSet::with_capacity(repositories.len());
+        for repository in &repositories {
+            repository.validate()?;
+            if !repository_ids.insert(&repository.repository_id) {
+                return Err(InspectionError::new(
+                    InspectionPhase::Authorization,
+                    format!(
+                        "repository {:?} is authorized more than once",
+                        repository.repository_id
+                    ),
+                ));
+            }
+        }
+        Ok(Self {
+            session_id,
+            repositories,
+        })
+    }
+
+    pub fn from_session_start(
+        session_id: impl Into<String>,
+        start: &north_protocol::SessionStart,
+    ) -> Result<Self, InspectionError> {
+        let repositories = start
+            .repositories
+            .iter()
+            .map(RepositorySource::from_context)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(session_id, repositories)
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn repositories(&self) -> &[RepositorySource] {
+        &self.repositories
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectionRequest {
+    pub session_id: String,
+    pub task_id: String,
+    pub repository: RepositorySource,
+}
+
+impl InspectionRequest {
+    pub fn new(
+        session_id: impl Into<String>,
+        task_id: impl Into<String>,
+        repository: RepositorySource,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            task_id: task_id.into(),
+            repository,
+        }
+    }
+
+    fn validate(&self) -> Result<(), InspectionError> {
+        if self.session_id.trim().is_empty() || self.task_id.trim().is_empty() {
+            return Err(InspectionError::new(
+                InspectionPhase::Authorization,
+                "session and task IDs are required",
+            ));
+        }
+        self.repository.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedWorkspace {
+    session_id: String,
+    repository_id: String,
+    repository_url: String,
+    commit_sha: String,
+    workspace_root: PathBuf,
+    workspace_root_identity: FsIdentity,
+    workspace_identity: WorkspaceIdentity,
+    git_config: Vec<u8>,
+    path: PathBuf,
+}
+
+impl PreparedWorkspace {
+    pub fn repository_id(&self) -> &str {
+        &self.repository_id
+    }
+
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn read_git(
+        &self,
+        authorization: &RunAuthorization,
+        args: &[String],
+    ) -> Result<String, InspectionError> {
+        let source = RepositorySource::new(&self.repository_id, &self.repository_url);
+        validate_authorized_source(&self.session_id, &source, authorization)?;
+        validate_workspace_path(
+            &self.workspace_root,
+            self.workspace_root_identity,
+            &self.path,
+        )
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+        validate_git_config(self)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Runtime, reason))?;
+        run_read_git(self, args)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectionResult {
+    pub repository_id: String,
+    pub commit_sha: String,
+}
+
+impl InspectionResult {
+    pub fn reviewed_repository(&self) -> ReviewedRepositoryWire {
+        ReviewedRepositoryWire {
+            repository_id: self.repository_id.clone(),
+            commit_sha: self.commit_sha.clone(),
+        }
+    }
+}
+
+/// Cache and workspace roots are daemon-owned mode-0700 namespaces. Direct
+/// child allocation and canonical rechecks reject ordinary path redirection;
+/// North 0.1 does not claim kernel-level sandboxing against a privileged actor.
+#[derive(Clone)]
+pub struct RepositoryInspector {
+    cache_root: PathBuf,
+    cache_root_identity: FsIdentity,
+    workspace_root: PathBuf,
+    workspace_root_identity: FsIdentity,
+    locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+}
+
+impl fmt::Debug for RepositoryInspector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RepositoryInspector")
+            .field("cache_root", &self.cache_root)
+            .field("workspace_root", &self.workspace_root)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RepositoryInspector {
+    /// Create an inspector with separate reusable-cache and disposable roots.
+    /// Overlapping roots are rejected so startup cleanup cannot delete cache
+    /// material.
+    pub fn new(
+        cache_root: impl Into<PathBuf>,
+        workspace_root: impl Into<PathBuf>,
+    ) -> Result<Self, InspectionError> {
+        let cache_root = cache_root.into();
+        let workspace_root = workspace_root.into();
+        reject_symlink_root(&cache_root, InspectionPhase::Cache)?;
+        reject_symlink_root(&workspace_root, InspectionPhase::Workspace)?;
+        fs::create_dir_all(&cache_root).map_err(|error| {
+            InspectionError::new(
+                InspectionPhase::Cache,
+                format!("create cache root {}: {error}", cache_root.display()),
+            )
+        })?;
+        fs::create_dir_all(&workspace_root).map_err(|error| {
+            InspectionError::new(
+                InspectionPhase::Workspace,
+                format!(
+                    "create workspace root {}: {error}",
+                    workspace_root.display()
+                ),
+            )
+        })?;
+        reject_symlink_root(&cache_root, InspectionPhase::Cache)?;
+        reject_symlink_root(&workspace_root, InspectionPhase::Workspace)?;
+        restrict_root_permissions(&cache_root).map_err(|error| {
+            InspectionError::new(
+                InspectionPhase::Cache,
+                format!("restrict cache root {}: {error}", cache_root.display()),
+            )
+        })?;
+        restrict_root_permissions(&workspace_root).map_err(|error| {
+            InspectionError::new(
+                InspectionPhase::Workspace,
+                format!(
+                    "restrict workspace root {}: {error}",
+                    workspace_root.display()
+                ),
+            )
+        })?;
+        let cache_root = fs::canonicalize(&cache_root).map_err(|error| {
+            InspectionError::new(
+                InspectionPhase::Cache,
+                format!("resolve cache root {}: {error}", cache_root.display()),
+            )
+        })?;
+        let workspace_root = fs::canonicalize(&workspace_root).map_err(|error| {
+            InspectionError::new(
+                InspectionPhase::Workspace,
+                format!(
+                    "resolve workspace root {}: {error}",
+                    workspace_root.display()
+                ),
+            )
+        })?;
+        if roots_overlap(&cache_root, &workspace_root) {
+            return Err(InspectionError::new(
+                InspectionPhase::Workspace,
+                "cache and disposable workspace roots must not overlap",
+            ));
+        }
+        let cache_root_identity = directory_identity(&cache_root)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        let workspace_root_identity = directory_identity(&workspace_root)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+        Ok(Self {
+            cache_root,
+            cache_root_identity,
+            workspace_root,
+            workspace_root_identity,
+            locks: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    pub fn cache_root(&self) -> &Path {
+        &self.cache_root
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    /// Return one repository's cache namespace. Runtime adapters should not
+    /// pass this path to their provider; use [`PreparedWorkspace::path`].
+    pub fn repository_cache_path(&self, repository_id: &str) -> PathBuf {
+        self.cache_root.join(path_component(repository_id))
+    }
+
+    /// Remove stale, clearly named disposable workspaces without following
+    /// symlinks or scanning outside the dedicated workspace root.
+    pub fn startup_cleanup(&self) -> CleanupReport {
+        if let Err(reason) =
+            validate_root_identity(&self.workspace_root, self.workspace_root_identity)
+        {
+            return CleanupReport {
+                removed: Vec::new(),
+                failures: vec![CleanupFailure {
+                    path: self.workspace_root.clone(),
+                    reason,
+                }],
+            };
+        }
+        cleanup_stale_workspaces(&self.workspace_root, self.workspace_root_identity)
+    }
+
+    /// Prepare a detached, independently mutable checkout. The per-repository
+    /// lock remains held through cache mutation, clone, and revision checks.
+    pub fn prepare(
+        &self,
+        request: &InspectionRequest,
+        authorization: &RunAuthorization,
+    ) -> Result<PreparedWorkspace, InspectionError> {
+        validate_repository_selection(request, authorization)?;
+        self.prepare_unchecked(request)
+    }
+
+    fn validate_cache_root(&self) -> Result<(), InspectionError> {
+        validate_root_identity(&self.cache_root, self.cache_root_identity)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))
+    }
+
+    fn validate_workspace_root(&self) -> Result<(), InspectionError> {
+        validate_root_identity(&self.workspace_root, self.workspace_root_identity)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))
+    }
+
+    fn validate_roots(&self) -> Result<(), InspectionError> {
+        self.validate_cache_root()?;
+        self.validate_workspace_root()
+    }
+
+    fn prepare_unchecked(
+        &self,
+        request: &InspectionRequest,
+    ) -> Result<PreparedWorkspace, InspectionError> {
+        request.validate()?;
+        self.validate_roots()?;
+        let lock = self.lock_for(&request.repository.repository_id);
+        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let cache = self.ensure_cache(&request.repository)?;
+        self.validate_cache_root()?;
+        validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        let commit_sha = resolve_commit(&cache, &self.cache_root, self.cache_root_identity, None)?;
+        let path = self.allocate_workspace(request)?;
+        let mut checkout_identity = None;
+        if let Err(mut error) = create_checkout(
+            CheckoutContext {
+                cache_root: &self.cache_root,
+                cache_root_identity: self.cache_root_identity,
+                cache: &cache,
+                workspace_root: &self.workspace_root,
+                workspace_root_identity: self.workspace_root_identity,
+                workspace: &path,
+                commit_sha: &commit_sha,
+            },
+            &mut checkout_identity,
+        ) {
+            if let Some(identity) = checkout_identity.as_ref() {
+                if let Err(cleanup_failure) = remove_owned_workspace_path(
+                    &self.workspace_root,
+                    &path,
+                    self.workspace_root_identity,
+                    identity,
+                ) {
+                    error.cleanup_failure = Some(cleanup_failure);
+                }
+            } else {
+                error.cleanup_failure = Some(
+                    "workspace ownership was not established; path retained for startup cleanup"
+                        .into(),
+                );
+            }
+            return Err(error);
+        }
+        let workspace_identity = match checkout_identity {
+            Some(identity) => identity,
+            None => {
+                return Err(InspectionError {
+                    phase: InspectionPhase::Workspace,
+                    reason: "checkout identity was not captured".into(),
+                    contamination: None,
+                    cleanup_failure: Some(
+                        "workspace ownership was not established; path retained for startup cleanup"
+                            .into(),
+                    ),
+                });
+            }
+        };
+        let git_config = match read_git_config(&path) {
+            Ok(git_config) => git_config,
+            Err(reason) => {
+                let mut error = InspectionError::new(InspectionPhase::Workspace, reason);
+                if let Err(cleanup_failure) = remove_owned_workspace_path(
+                    &self.workspace_root,
+                    &path,
+                    self.workspace_root_identity,
+                    &workspace_identity,
+                ) {
+                    error.cleanup_failure = Some(cleanup_failure);
+                }
+                return Err(error);
+            }
+        };
+        Ok(PreparedWorkspace {
+            session_id: request.session_id.clone(),
+            repository_id: request.repository.repository_id.clone(),
+            repository_url: request.repository.url.clone(),
+            commit_sha,
+            workspace_root: self.workspace_root.clone(),
+            workspace_root_identity: self.workspace_root_identity,
+            workspace_identity,
+            git_config,
+            path,
+        })
+    }
+
+    /// Enforce the immutable server-supplied run repository set before any
+    /// cache access or workspace creation.
+    pub fn prepare_authorized(
+        &self,
+        request: &InspectionRequest,
+        authorization: &RunAuthorization,
+    ) -> Result<PreparedWorkspace, InspectionError> {
+        self.prepare(request, authorization)
+    }
+
+    pub fn dispose(&self, workspace: PreparedWorkspace) -> Result<(), InspectionError> {
+        remove_owned_workspace_path(
+            &workspace.workspace_root,
+            &workspace.path,
+            workspace.workspace_root_identity,
+            &workspace.workspace_identity,
+        )
+        .map_err(|reason| {
+            InspectionError::new(
+                InspectionPhase::Cleanup,
+                format!("remove {}: {reason}", workspace.path.display()),
+            )
+        })
+    }
+
+    /// Run runtime callback with only disposable checkout path, then apply
+    /// dirty-tree detection and cleanup on every normal terminal path. The
+    /// synchronous callback is fully awaited before cleanup; adapters must
+    /// stop/await child work before returning after cancellation.
+    pub fn inspect<F>(
+        &self,
+        request: &InspectionRequest,
+        authorization: &RunAuthorization,
+        runtime: F,
+    ) -> Result<InspectionResult, InspectionError>
+    where
+        F: FnOnce(&Path) -> Result<(), String>,
+    {
+        let cancellation = InspectionCancellation::new();
+        self.inspect_with_cancellation(request, authorization, &cancellation, |path, _| {
+            runtime(path)
+        })
+    }
+
+    pub fn inspect_authorized<F>(
+        &self,
+        request: &InspectionRequest,
+        authorization: &RunAuthorization,
+        runtime: F,
+    ) -> Result<InspectionResult, InspectionError>
+    where
+        F: FnOnce(&Path) -> Result<(), String>,
+    {
+        self.inspect(request, authorization, runtime)
+    }
+
+    /// Cancellation is cooperative at this synchronous boundary: no cleanup
+    /// starts while the runtime callback is still using the checkout.
+    pub fn inspect_with_cancellation<F>(
+        &self,
+        request: &InspectionRequest,
+        authorization: &RunAuthorization,
+        cancellation: &InspectionCancellation,
+        runtime: F,
+    ) -> Result<InspectionResult, InspectionError>
+    where
+        F: FnOnce(&Path, &InspectionCancellation) -> Result<(), String>,
+    {
+        validate_repository_selection(request, authorization)?;
+        let workspace = self.prepare_unchecked(request)?;
+        let primary_failure = if cancellation.is_cancelled() {
+            Some((
+                InspectionPhase::Cancellation,
+                "inspection cancelled before runtime dispatch".to_owned(),
+            ))
+        } else {
+            match catch_unwind(AssertUnwindSafe(|| runtime(workspace.path(), cancellation))) {
+                Ok(Ok(())) if cancellation.is_cancelled() => Some((
+                    InspectionPhase::Cancellation,
+                    "inspection cancelled".to_owned(),
+                )),
+                Ok(Ok(())) => None,
+                Ok(Err(reason)) if cancellation.is_cancelled() => Some((
+                    InspectionPhase::Cancellation,
+                    non_empty_reason(reason, "inspection cancelled"),
+                )),
+                Ok(Err(reason)) => Some((
+                    InspectionPhase::Runtime,
+                    non_empty_reason(reason, "runtime inspection failed"),
+                )),
+                Err(_) => Some((
+                    InspectionPhase::Runtime,
+                    "runtime inspection panicked".to_owned(),
+                )),
+            }
+        };
+        self.finish(workspace, primary_failure)
+    }
+
+    fn lock_for(&self, repository_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks
+            .entry(repository_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn ensure_cache(&self, source: &RepositorySource) -> Result<PathBuf, InspectionError> {
+        self.validate_cache_root()?;
+        let repository_root = create_owned_child(
+            &self.cache_root,
+            self.cache_root_identity,
+            path_component(&source.repository_id),
+            InspectionPhase::Cache,
+        )?;
+        let cache = repository_root.join("source.git");
+        if fs::symlink_metadata(&cache)
+            .map(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
+            .unwrap_or(false)
+        {
+            return Err(InspectionError::new(
+                InspectionPhase::Cache,
+                format!("repository cache {} is not a directory", cache.display()),
+            ));
+        }
+        if cache.exists() {
+            validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
+                .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+            sanitize_local_git_config(&cache, &self.cache_root, self.cache_root_identity, None)
+                .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+            let remote = git_output(
+                &cache,
+                &self.cache_root,
+                self.cache_root_identity,
+                None,
+                None,
+                vec!["remote", "get-url", "origin"],
+            )
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+            if remote.trim() != source.url.trim() {
+                return Err(InspectionError::new(
+                    InspectionPhase::Cache,
+                    "repository cache origin does not match configured source",
+                ));
+            }
+            validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
+                .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+            git_output(
+                &cache,
+                &self.cache_root,
+                self.cache_root_identity,
+                None,
+                None,
+                vec!["remote", "update", "--prune"],
+            )
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+            return Ok(cache);
+        }
+
+        let temporary = repository_root.join(format!(
+            ".source-{}-{}",
+            std::process::id(),
+            next_workspace_sequence()
+        ));
+        validate_cache_namespace(&self.cache_root, self.cache_root_identity, &repository_root)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        ensure_path_absent(&temporary)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        let clone = git_output(
+            &self.cache_root,
+            &self.cache_root,
+            self.cache_root_identity,
+            None,
+            Some((&self.workspace_root, self.workspace_root_identity)),
+            vec![
+                "clone".to_owned(),
+                "--mirror".to_owned(),
+                "--".to_owned(),
+                source.url.clone(),
+                temporary.to_string_lossy().into_owned(),
+            ],
+        );
+        if let Err(reason) = clone {
+            let mut error = InspectionError::new(InspectionPhase::Cache, reason);
+            if fs::symlink_metadata(&temporary).is_ok() {
+                error.cleanup_failure = Some(
+                    "temporary repository cache ownership was not established; path retained"
+                        .into(),
+                );
+            }
+            return Err(error);
+        }
+        let staging_identity = match validate_cache_staging_path(
+            &self.cache_root,
+            self.cache_root_identity,
+            &repository_root,
+            &temporary,
+        ) {
+            Ok(identity) => identity,
+            Err(reason) => {
+                let mut error = InspectionError::new(InspectionPhase::Cache, reason);
+                if fs::symlink_metadata(&temporary).is_ok() {
+                    error.cleanup_failure = Some(
+                        "temporary repository cache ownership was not established; path retained"
+                            .into(),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        if let Err(reason) = ensure_path_absent(&cache) {
+            let mut error = InspectionError::new(InspectionPhase::Cache, reason);
+            if let Err(cleanup_failure) = remove_owned_cache_staging_path(
+                &self.cache_root,
+                self.cache_root_identity,
+                &repository_root,
+                &temporary,
+                staging_identity,
+            ) {
+                error.cleanup_failure = Some(cleanup_failure);
+            }
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(&temporary, &cache) {
+            let mut failure = InspectionError::new(
+                InspectionPhase::Cache,
+                format!("install repository cache {}: {error}", cache.display()),
+            );
+            if let Err(cleanup_failure) = remove_owned_cache_staging_path(
+                &self.cache_root,
+                self.cache_root_identity,
+                &repository_root,
+                &temporary,
+                staging_identity,
+            ) {
+                failure.cleanup_failure = Some(cleanup_failure);
+            }
+            return Err(failure);
+        }
+        validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        sanitize_local_git_config(&cache, &self.cache_root, self.cache_root_identity, None)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        Ok(cache)
+    }
+
+    fn allocate_workspace(&self, request: &InspectionRequest) -> Result<PathBuf, InspectionError> {
+        self.validate_workspace_root()?;
+        let prefix = format!(
+            "{WORKSPACE_PREFIX}{}-{}-{}-",
+            path_component(&request.session_id),
+            path_component(&request.task_id),
+            path_component(&request.repository.repository_id)
+        );
+        loop {
+            let path = self.workspace_root.join(format!(
+                "{prefix}{}-{}",
+                std::process::id(),
+                next_workspace_sequence()
+            ));
+            match fs::symlink_metadata(&path) {
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path),
+                Err(error) => {
+                    return Err(InspectionError::new(
+                        InspectionPhase::Workspace,
+                        format!("inspect workspace destination {}: {error}", path.display()),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn finish(
+        &self,
+        workspace: PreparedWorkspace,
+        primary_failure: Option<(InspectionPhase, String)>,
+    ) -> Result<InspectionResult, InspectionError> {
+        let result = InspectionResult {
+            repository_id: workspace.repository_id.clone(),
+            commit_sha: workspace.commit_sha.clone(),
+        };
+        let mut failure =
+            primary_failure.map(|(phase, reason)| InspectionError::new(phase, reason));
+        match dirty_details_for_workspace(&workspace) {
+            Ok(Some(details)) => {
+                if let Some(error) = failure.as_mut() {
+                    error.contamination = Some(details);
+                } else {
+                    failure = Some(InspectionError {
+                        phase: InspectionPhase::DirtyTree,
+                        reason: "unexpected changes detected in disposable checkout".into(),
+                        contamination: Some(details),
+                        cleanup_failure: None,
+                    });
+                }
+            }
+            Ok(None) => {}
+            Err(reason) => {
+                if let Some(error) = failure.as_mut() {
+                    error.contamination =
+                        Some(format!("workspace integrity check failed: {reason}"));
+                } else {
+                    failure = Some(InspectionError::new(
+                        InspectionPhase::DirtyTree,
+                        format!("workspace integrity check failed: {reason}"),
+                    ));
+                }
+            }
+        }
+        if let Err(reason) = remove_owned_workspace_path(
+            &workspace.workspace_root,
+            &workspace.path,
+            workspace.workspace_root_identity,
+            &workspace.workspace_identity,
+        ) {
+            if let Some(error) = failure.as_mut() {
+                error.cleanup_failure = Some(reason);
+            } else {
+                failure = Some(InspectionError::new(
+                    InspectionPhase::Cleanup,
+                    format!("remove {}: {reason}", workspace.path.display()),
+                ));
+            }
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(result),
+        }
+    }
+}
+
+/// Reject an inspection identity not present in the immutable run context.
+pub fn validate_repository_selection(
+    request: &InspectionRequest,
+    authorization: &RunAuthorization,
+) -> Result<(), InspectionError> {
+    validate_authorized_source(&request.session_id, &request.repository, authorization)
+}
+
+fn validate_authorized_source(
+    session_id: &str,
+    source: &RepositorySource,
+    authorization: &RunAuthorization,
+) -> Result<(), InspectionError> {
+    if session_id != authorization.session_id {
+        return Err(InspectionError::new(
+            InspectionPhase::Authorization,
+            "inspection session does not match run authorization",
+        ));
+    }
+    match authorization
+        .repositories
+        .iter()
+        .find(|repository| repository.repository_id == source.repository_id)
+    {
+        None => Err(InspectionError::new(
+            InspectionPhase::Authorization,
+            format!(
+                "repository {:?} is not authorized for this run",
+                source.repository_id
+            ),
+        )),
+        Some(repository) if repository.url != source.url => Err(InspectionError::new(
+            InspectionPhase::Authorization,
+            "repository URL does not match run authorization",
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// Execute one Git read operation from the disposable checkout. Runtime code
+/// cannot use this helper for checkout mutation, push, fetch, or worktrees.
+fn run_read_git(workspace: &PreparedWorkspace, args: &[String]) -> Result<String, InspectionError> {
+    if !read_git_allowed(args) {
+        return Err(InspectionError::new(
+            InspectionPhase::Runtime,
+            "Git command is outside the read-only allowlist",
+        ));
+    }
+    git_output(
+        workspace.path(),
+        &workspace.workspace_root,
+        workspace.workspace_root_identity,
+        Some(&workspace.workspace_identity),
+        None,
+        args.to_vec(),
+    )
+    .map_err(|reason| InspectionError::new(InspectionPhase::Runtime, reason))
+}
+
+fn read_git_allowed(args: &[String]) -> bool {
+    let Some(command) = args.first().map(String::as_str) else {
+        return false;
+    };
+    READ_ONLY_GIT_COMMANDS.contains(&command)
+        && !args.iter().skip(1).any(|argument| {
+            argument.starts_with("-c")
+                || argument == "--config"
+                || argument.starts_with("--config=")
+                || argument == "--config-env"
+                || argument.starts_with("--config-env=")
+                || argument.starts_with("-C")
+                || argument.starts_with("--git-dir")
+                || argument.starts_with("--work-tree")
+                || argument.starts_with("--super-prefix")
+                || argument.starts_with("--exec-path")
+                || argument.starts_with("--upload-pack")
+                || argument == "--ext-diff"
+                || argument == "--textconv"
+                || argument == "--no-index"
+                || argument.starts_with("--output")
+                || argument == "-o"
+                || argument.starts_with("-o")
+        })
+}
+
+const GIT_OBJECT_ID_HEX_WIDTHS: &[usize] = &[20 * 2, 32 * 2];
+
+fn complete_commit_sha(value: &str) -> bool {
+    GIT_OBJECT_ID_HEX_WIDTHS.contains(&value.len())
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn server_repository_location(url: &str) -> bool {
+    url.starts_with("https://") || url.starts_with("ssh://") || url.starts_with("git@")
+}
+
+fn credential_free_location(url: &str) -> bool {
+    if url.contains(['?', '#']) {
+        return false;
+    }
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url
+            .split_once('@')
+            .is_none_or(|(user, host)| user == "git" && !host.contains('@'));
+    };
+    let Some((authority, _)) = rest.split_once('/') else {
+        return false;
+    };
+    match scheme {
+        "https" => !authority.contains('@'),
+        "ssh" => authority
+            .split_once('@')
+            .is_none_or(|(user, host)| user == "git" && !host.contains('@')),
+        _ => !authority.contains('@'),
+    }
+}
+
+fn resolve_commit(
+    repository: &Path,
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    workspace_identity: Option<&WorkspaceIdentity>,
+) -> Result<String, InspectionError> {
+    let sha = git_output(
+        repository,
+        root,
+        expected_root_identity,
+        workspace_identity,
+        None,
+        ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"],
+    )
+    .map_err(|reason| InspectionError::new(InspectionPhase::Revision, reason))?
+    .trim()
+    .to_owned();
+    // Git returns its canonical object spelling here. Re-resolving the
+    // captured value below rejects an abbreviated result without assuming a
+    // particular object-ID width.
+    if !complete_commit_sha(&sha) {
+        return Err(InspectionError::new(
+            InspectionPhase::Revision,
+            "Git returned an invalid full commit object ID",
+        ));
+    }
+    let canonical = git_output(
+        repository,
+        root,
+        expected_root_identity,
+        workspace_identity,
+        None,
+        vec![
+            "rev-parse".to_owned(),
+            "--verify".to_owned(),
+            "--end-of-options".to_owned(),
+            format!("{sha}^{{commit}}"),
+        ],
+    )
+    .map_err(|reason| InspectionError::new(InspectionPhase::Revision, reason))?
+    .trim()
+    .to_owned();
+    if canonical != sha || !canonical.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(InspectionError::new(
+            InspectionPhase::Revision,
+            "Git did not return a complete canonical commit object ID",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn metadata_identity(metadata: &fs::Metadata) -> FsIdentity {
+    #[cfg(unix)]
+    {
+        FsIdentity {
+            first: metadata.dev(),
+            second: metadata.ino(),
+        }
+    }
+    #[cfg(windows)]
+    {
+        FsIdentity {
+            first: metadata.volume_serial_number().unwrap_or_default() as u64,
+            second: metadata.file_index(),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        FsIdentity {
+            first: metadata.len(),
+            second: 0,
+        }
+    }
+}
+
+fn directory_identity(path: &Path) -> Result<FsIdentity, String> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("configured root is not a real directory".into());
+    }
+    Ok(metadata_identity(&metadata))
+}
+
+fn validate_root_identity(root: &Path, expected: FsIdentity) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("configured root was replaced by a non-directory or symlink".into());
+    }
+    if metadata_identity(&metadata) != expected {
+        return Err("configured root was replaced".into());
+    }
+    let canonical = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    if canonical != root {
+        return Err("configured root was redirected".into());
+    }
+    Ok(())
+}
+
+fn validate_cache_namespace(
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+) -> Result<(), String> {
+    validate_root_identity(root, expected_root_identity)?;
+    let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let metadata = fs::symlink_metadata(repository_root).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("repository cache namespace is not a real directory".into());
+    }
+    let canonical = fs::canonicalize(repository_root).map_err(|error| error.to_string())?;
+    if canonical.parent() != Some(root.as_path()) {
+        return Err("repository cache namespace is outside daemon-owned root".into());
+    }
+    Ok(())
+}
+
+fn ensure_path_absent(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err("Git destination already exists".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn validate_cache_staging_path(
+    cache_root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+    staging: &Path,
+) -> Result<FsIdentity, String> {
+    validate_cache_namespace(cache_root, expected_root_identity, repository_root)?;
+    let metadata = fs::symlink_metadata(staging).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("temporary repository cache is not an owned directory".into());
+    }
+    if staging.parent() != Some(repository_root) {
+        return Err("temporary repository cache is not a direct child of its namespace".into());
+    }
+    let canonical_root = fs::canonicalize(repository_root).map_err(|error| error.to_string())?;
+    let canonical = fs::canonicalize(staging).map_err(|error| error.to_string())?;
+    if canonical.parent() != Some(canonical_root.as_path())
+        || !canonical
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with(".source-"))
+    {
+        return Err("temporary repository cache resolves outside daemon-owned root".into());
+    }
+    Ok(metadata_identity(&metadata))
+}
+
+fn remove_owned_cache_staging_path(
+    cache_root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+    path: &Path,
+    expected_staging_identity: FsIdentity,
+) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            let current_identity = validate_cache_staging_path(
+                cache_root,
+                expected_root_identity,
+                repository_root,
+                path,
+            )?;
+            if current_identity != expected_staging_identity {
+                return Err("temporary repository cache identity changed".into());
+            }
+            remove_owned_cache_path(repository_root, path)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn validate_cache_path(
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    cache: &Path,
+) -> Result<(), String> {
+    validate_root_identity(root, expected_root_identity)?;
+    let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let repository_root = cache
+        .parent()
+        .ok_or_else(|| "cache path has no repository namespace".to_owned())?;
+    let cache_metadata = fs::symlink_metadata(cache).map_err(|error| error.to_string())?;
+    let repository_metadata =
+        fs::symlink_metadata(repository_root).map_err(|error| error.to_string())?;
+    if cache_metadata.file_type().is_symlink()
+        || repository_metadata.file_type().is_symlink()
+        || !cache_metadata.is_dir()
+        || !repository_metadata.is_dir()
+    {
+        return Err("cache path is not a real owned directory".into());
+    }
+    let canonical_repository =
+        fs::canonicalize(repository_root).map_err(|error| error.to_string())?;
+    let canonical_cache = fs::canonicalize(cache).map_err(|error| error.to_string())?;
+    if canonical_repository.parent() != Some(root.as_path())
+        || canonical_cache.parent() != Some(canonical_repository.as_path())
+        || cache.file_name() != Some(OsStr::new("source.git"))
+    {
+        return Err("cache path is outside its daemon-owned namespace".into());
+    }
+    Ok(())
+}
+
+fn write_workspace_identity(workspace: &Path, identity: &str) -> Result<(), String> {
+    let marker = workspace.join(".git").join(WORKSPACE_MARKER);
+    match fs::symlink_metadata(&marker) {
+        Ok(_) => return Err("workspace identity marker already exists".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    fs::write(marker, identity.as_bytes()).map_err(|error| error.to_string())
+}
+
+fn capture_workspace_identity(path: &Path) -> Result<WorkspaceIdentity, String> {
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "workspace has no valid identity name".to_owned())?
+        .to_owned();
+    let workspace_metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if workspace_metadata.file_type().is_symlink() || !workspace_metadata.is_dir() {
+        return Err("workspace is not an owned directory".into());
+    }
+    let git_directory = path.join(".git");
+    let git_metadata = fs::symlink_metadata(&git_directory).map_err(|error| error.to_string())?;
+    if git_metadata.file_type().is_symlink() || !git_metadata.is_dir() {
+        return Err("checkout Git directory is not an owned directory".into());
+    }
+    let marker = git_directory.join(WORKSPACE_MARKER);
+    let marker_metadata = fs::symlink_metadata(&marker).map_err(|error| error.to_string())?;
+    if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+        return Err("workspace identity marker is not an owned file".into());
+    }
+    let value = fs::read(&marker).map_err(|error| error.to_string())?;
+    if value != name.as_bytes() {
+        return Err("workspace identity marker has unexpected value".into());
+    }
+    Ok(WorkspaceIdentity {
+        name,
+        workspace: metadata_identity(&workspace_metadata),
+        git_directory: metadata_identity(&git_metadata),
+        marker: metadata_identity(&marker_metadata),
+    })
+}
+
+fn validate_workspace_identity(workspace: &PreparedWorkspace) -> Result<(), String> {
+    validate_workspace_identity_at(&workspace.path, &workspace.workspace_identity)
+}
+
+fn validate_workspace_identity_at(path: &Path, identity: &WorkspaceIdentity) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "workspace has no valid identity name".to_owned())?;
+    if name != identity.name {
+        return Err("workspace identity name changed".into());
+    }
+    let workspace_metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if workspace_metadata.file_type().is_symlink() || !workspace_metadata.is_dir() {
+        return Err("workspace is not an owned directory".into());
+    }
+    if metadata_identity(&workspace_metadata) != identity.workspace {
+        return Err("workspace filesystem identity changed".into());
+    }
+    let git_directory = path.join(".git");
+    let git_metadata = fs::symlink_metadata(&git_directory).map_err(|error| error.to_string())?;
+    if git_metadata.file_type().is_symlink() || !git_metadata.is_dir() {
+        return Err("checkout Git directory is not an owned directory".into());
+    }
+    if metadata_identity(&git_metadata) != identity.git_directory {
+        return Err("checkout Git directory identity changed".into());
+    }
+    let marker = git_directory.join(WORKSPACE_MARKER);
+    let marker_metadata = fs::symlink_metadata(&marker).map_err(|error| error.to_string())?;
+    if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+        return Err("workspace identity marker is not an owned file".into());
+    }
+    if metadata_identity(&marker_metadata) != identity.marker {
+        return Err("workspace identity marker identity changed".into());
+    }
+    let value = fs::read(marker).map_err(|error| error.to_string())?;
+    if value != identity.name.as_bytes() {
+        return Err("workspace identity marker changed".into());
+    }
+    Ok(())
+}
+
+fn read_git_config(workspace: &Path) -> Result<Vec<u8>, String> {
+    let git_directory = workspace.join(".git");
+    let git_metadata = fs::symlink_metadata(&git_directory).map_err(|error| error.to_string())?;
+    if git_metadata.file_type().is_symlink() || !git_metadata.is_dir() {
+        return Err("checkout Git directory is not an owned directory".into());
+    }
+    let config = git_directory.join("config");
+    let metadata = fs::symlink_metadata(&config).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("checkout Git config is not an owned file".into());
+    }
+    fs::read(config).map_err(|error| error.to_string())
+}
+
+fn validate_git_config(workspace: &PreparedWorkspace) -> Result<(), String> {
+    validate_workspace_identity(workspace)?;
+    let current = read_git_config(&workspace.path)?;
+    if current != workspace.git_config {
+        return Err("checkout Git config changed after preparation".into());
+    }
+    Ok(())
+}
+
+fn dirty_details_for_workspace(workspace: &PreparedWorkspace) -> Result<Option<String>, String> {
+    validate_workspace_path(
+        &workspace.workspace_root,
+        workspace.workspace_root_identity,
+        &workspace.path,
+    )?;
+    validate_git_config(workspace)?;
+    dirty_details(
+        &workspace.path,
+        &workspace.workspace_root,
+        workspace.workspace_root_identity,
+        &workspace.workspace_identity,
+    )
+}
+
+fn create_checkout(
+    context: CheckoutContext<'_>,
+    workspace_identity: &mut Option<WorkspaceIdentity>,
+) -> Result<(), InspectionError> {
+    let CheckoutContext {
+        cache_root,
+        cache_root_identity,
+        cache,
+        workspace_root,
+        workspace_root_identity,
+        workspace,
+        commit_sha,
+    } = context;
+    validate_cache_path(cache_root, cache_root_identity, cache)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+    validate_workspace_destination(workspace_root, workspace_root_identity, workspace)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    let command_directory = cache.parent().unwrap_or_else(|| Path::new("."));
+    git_output(
+        command_directory,
+        cache_root,
+        cache_root_identity,
+        None,
+        Some((workspace_root, workspace_root_identity)),
+        vec![
+            "clone".to_owned(),
+            "--no-local".to_owned(),
+            "--no-checkout".to_owned(),
+            "--".to_owned(),
+            cache.to_string_lossy().into_owned(),
+            workspace.to_string_lossy().into_owned(),
+        ],
+    )
+    .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    validate_workspace_path(workspace_root, workspace_root_identity, workspace)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    restrict_root_permissions(workspace)
+        .map_err(|error| InspectionError::new(InspectionPhase::Workspace, error.to_string()))?;
+    sanitize_local_git_config(workspace, workspace_root, workspace_root_identity, None)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    validate_workspace_path(workspace_root, workspace_root_identity, workspace)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    write_workspace_identity(
+        workspace,
+        workspace
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or(WORKSPACE_PREFIX),
+    )
+    .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    let identity = capture_workspace_identity(workspace)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    *workspace_identity = Some(identity);
+    validate_workspace_path(workspace_root, workspace_root_identity, workspace)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    git_output(
+        workspace,
+        workspace_root,
+        workspace_root_identity,
+        workspace_identity.as_ref(),
+        None,
+        vec![
+            "checkout".to_owned(),
+            "--detach".to_owned(),
+            "--force".to_owned(),
+            commit_sha.to_owned(),
+        ],
+    )
+    .map_err(|reason| InspectionError::new(InspectionPhase::Revision, reason))?;
+    validate_workspace_path(workspace_root, workspace_root_identity, workspace)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    let actual = resolve_commit(
+        workspace,
+        workspace_root,
+        workspace_root_identity,
+        workspace_identity.as_ref(),
+    )?;
+    if actual != commit_sha {
+        return Err(InspectionError::new(
+            InspectionPhase::Revision,
+            format!("detached checkout resolved to {actual:?}, expected {commit_sha:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn dirty_details(
+    workspace: &Path,
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    identity: &WorkspaceIdentity,
+) -> Result<Option<String>, String> {
+    let output = git_output(
+        workspace,
+        root,
+        expected_root_identity,
+        Some(identity),
+        None,
+        [
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+        ],
+    )?;
+    let output = output.trim();
+    Ok((!output.is_empty()).then(|| output.to_owned()))
+}
+
+fn sanitize_git_path_environment(command: &mut Command) {
+    command
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        // SSH agent/command and host proxy are operator-owned Git access.
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .env_remove("GIT_DIFF_OPTS");
+}
+
+fn remove_git_config_environment(command: &mut Command) {
+    command
+        .env_remove("GIT_CONFIG")
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .env_remove("GIT_CONFIG_SYSTEM")
+        .env_remove("GIT_CONFIG_NOSYSTEM")
+        .env_remove("GIT_CONFIG_WORKTREE")
+        .env_remove("GIT_CONFIG_COUNT")
+        .env_remove("GIT_CONFIG_PARAMETERS");
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_CONFIG_KEY_")
+            || key.to_string_lossy().starts_with("GIT_CONFIG_VALUE_")
+        {
+            command.env_remove(key);
+        }
+    }
+}
+
+fn sanitize_git_environment(command: &mut Command) {
+    sanitize_git_path_environment(command);
+    remove_git_config_environment(command);
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", empty_git_config());
+}
+
+fn git_host_config_overrides() -> Vec<(String, String)> {
+    let mut overrides = Vec::new();
+    for scope in ["--global", "--system"] {
+        let mut command = Command::new("git");
+        sanitize_git_path_environment(&mut command);
+        remove_git_config_environment(&mut command);
+        let output = command
+            .args([
+                "config",
+                scope,
+                "--get-regexp",
+                r"^(credential\..*|core\.sshcommand|ssh\.variant)$",
+            ])
+            .output();
+        let Ok(output) = output else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        for (key, value) in String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_once(char::is_whitespace))
+            .filter(|(key, _)| {
+                *key == "core.sshcommand"
+                    || *key == "ssh.variant"
+                    || *key == "credential.helper"
+                    || *key == "credential.usehttppath"
+                    || key.ends_with(".helper")
+            })
+        {
+            overrides.push((key.to_owned(), value.to_owned()));
+        }
+    }
+    overrides
+}
+
+fn apply_git_config_overrides(command: &mut Command, overrides: &[(String, String)]) {
+    command.env("GIT_CONFIG_COUNT", overrides.len().to_string());
+    for (index, (key, value)) in overrides.iter().enumerate() {
+        command.env(format!("GIT_CONFIG_KEY_{index}"), key);
+        command.env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+}
+
+fn empty_git_config() -> &'static OsStr {
+    #[cfg(windows)]
+    {
+        OsStr::new("NUL")
+    }
+    #[cfg(not(windows))]
+    {
+        OsStr::new("/dev/null")
+    }
+}
+
+const LOCAL_GIT_CONFIG_BLOCKLIST: &[&str] = &[
+    r"^url\..*\.insteadof$",
+    r"^url\..*\.pushinsteadof$",
+    r"^protocol\.allow$",
+    r"^protocol\..*\.allow$",
+    r"^protocol\..*\.version$",
+    r"^include.*\.path$",
+    r"^credential\..*$",
+    r"^remote\..*\.uploadpack$",
+    r"^remote\..*\.receivepack$",
+    r"^remote\..*\.vcs$",
+    r"^remote\..*\.proxy$",
+    r"^http\.proxy$",
+    r"^http\..*\.proxy$",
+    r"^https\.proxy$",
+    r"^https\..*\.proxy$",
+    r"^core\.gitdir$",
+    r"^core\.worktree$",
+    r"^core\.sshcommand$",
+    r"^ssh\.variant$",
+    r"^core\.gitproxy$",
+    r"^core\.hookspath$",
+    r"^core\.fsmonitor$",
+    r"^core\.fsmonitorhookpath$",
+    r"^filter\..*\.process$",
+    r"^filter\..*\.clean$",
+    r"^filter\..*\.smudge$",
+    r"^diff\..*\.external$",
+];
+
+fn validate_git_spawn_scope(
+    current_dir: &Path,
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    workspace_identity: Option<&WorkspaceIdentity>,
+) -> Result<(), String> {
+    validate_root_identity(root, expected_root_identity)?;
+    let canonical_root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let canonical_current = fs::canonicalize(current_dir).map_err(|error| error.to_string())?;
+    if canonical_current.strip_prefix(&canonical_root).is_err() {
+        return Err("Git current directory resolves outside daemon-owned root".into());
+    }
+    if let Some(identity) = workspace_identity {
+        validate_workspace_identity_at(current_dir, identity)?;
+    }
+    Ok(())
+}
+
+fn sanitize_local_git_config(
+    repository: &Path,
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    workspace_identity: Option<&WorkspaceIdentity>,
+) -> Result<(), String> {
+    for pattern in LOCAL_GIT_CONFIG_BLOCKLIST {
+        let mut query = Command::new("git");
+        sanitize_git_path_environment(&mut query);
+        remove_git_config_environment(&mut query);
+        validate_git_spawn_scope(repository, root, expected_root_identity, workspace_identity)?;
+        let output = query
+            .current_dir(repository)
+            .args([
+                "config",
+                "--local",
+                "--no-includes",
+                "--get-regexp",
+                pattern,
+            ])
+            .output()
+            .map_err(|error| format!("inspect local Git config: {error}"))?;
+        if !output.status.success() {
+            if matches!(output.status.code(), Some(1 | 5)) {
+                continue;
+            }
+            return Err(format!(
+                "inspect local Git config failed with {}",
+                output.status
+            ));
+        }
+        let keys = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_once(char::is_whitespace))
+            .map(|(key, _)| key.to_owned())
+            .collect::<HashSet<_>>();
+        for key in keys {
+            let mut unset = Command::new("git");
+            sanitize_git_path_environment(&mut unset);
+            remove_git_config_environment(&mut unset);
+            validate_git_spawn_scope(repository, root, expected_root_identity, workspace_identity)?;
+            let output = unset
+                .current_dir(repository)
+                .args(["config", "--local", "--no-includes", "--unset-all", &key])
+                .output()
+                .map_err(|error| format!("remove local Git config {key}: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "remove local Git config {key} failed with {}",
+                    output.status
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn git_output<I, S>(
+    current_dir: &Path,
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    workspace_identity: Option<&WorkspaceIdentity>,
+    additional_root: Option<(&Path, FsIdentity)>,
+    args: I,
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|argument| argument.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let mut command = Command::new("git");
+    validate_git_spawn_scope(
+        current_dir,
+        root,
+        expected_root_identity,
+        workspace_identity,
+    )?;
+    if let Some((additional_root, identity)) = additional_root {
+        validate_root_identity(additional_root, identity)?;
+    }
+    // Keep host SSH agents, SSH commands, and helpers. Isolate global/system
+    // Git config so URL rewrites cannot redirect a source, then restore only
+    // authentication settings through environment variables.
+    let host_config_overrides = git_host_config_overrides();
+    sanitize_git_environment(&mut command);
+    apply_git_config_overrides(&mut command, &host_config_overrides);
+    command.current_dir(current_dir).args(&args);
+    validate_git_spawn_scope(
+        current_dir,
+        root,
+        expected_root_identity,
+        workspace_identity,
+    )?;
+    if let Some((additional_root, identity)) = additional_root {
+        validate_root_identity(additional_root, identity)?;
+    }
+    let operation = args.first().map(String::as_str).unwrap_or("command");
+    let output = command
+        .output()
+        .map_err(|error| format!("run git {operation}: {error}"))?;
+    if !output.status.success() {
+        let detail = format!("git {operation} failed with {}", output.status);
+        return Err(detail);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn cleanup_stale_workspaces(root: &Path, expected_root_identity: FsIdentity) -> CleanupReport {
+    let mut report = CleanupReport::default();
+    if let Err(reason) = validate_root_identity(root, expected_root_identity) {
+        report.failures.push(CleanupFailure {
+            path: root.to_owned(),
+            reason,
+        });
+        return report;
+    }
+    visit_workspace_root(root, expected_root_identity, root, &mut report);
+    report
+}
+
+fn visit_workspace_root(
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    directory: &Path,
+    report: &mut CleanupReport,
+) {
+    if let Err(reason) = validate_root_identity(root, expected_root_identity) {
+        report.failures.push(CleanupFailure {
+            path: root.to_owned(),
+            reason,
+        });
+        return;
+    }
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.failures.push(CleanupFailure {
+                path: directory.to_owned(),
+                reason: error.to_string(),
+            });
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                report.failures.push(CleanupFailure {
+                    path: directory.to_owned(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                report.failures.push(CleanupFailure {
+                    path,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with(WORKSPACE_PREFIX))
+        {
+            let canonical = match fs::canonicalize(&path) {
+                Ok(canonical) => canonical,
+                Err(error) => {
+                    report.failures.push(CleanupFailure {
+                        path,
+                        reason: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            if canonical.parent() != Some(directory) {
+                report.failures.push(CleanupFailure {
+                    path,
+                    reason: "workspace resolves outside dedicated root".into(),
+                });
+                continue;
+            }
+            let identity = match capture_workspace_identity(&path) {
+                Ok(identity) => identity,
+                Err(reason) => {
+                    report.failures.push(CleanupFailure { path, reason });
+                    continue;
+                }
+            };
+            match remove_owned_workspace_path(root, &path, expected_root_identity, &identity) {
+                Ok(()) => report.removed.push(path),
+                Err(error) => report.failures.push(CleanupFailure {
+                    path,
+                    reason: error,
+                }),
+            }
+        }
+    }
+}
+
+fn validate_workspace_destination(
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    path: &Path,
+) -> Result<(), String> {
+    validate_root_identity(root, expected_root_identity)?;
+    if path.parent() != Some(root)
+        || !path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with(WORKSPACE_PREFIX))
+    {
+        return Err("workspace destination is outside the dedicated root".into());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err("workspace destination already exists".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn validate_workspace_path(
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    path: &Path,
+) -> Result<(), String> {
+    validate_root_identity(root, expected_root_identity)?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("workspace path is not an owned directory".into());
+    }
+    if path.parent() != Some(root) {
+        return Err("workspace path is not a direct child of the dedicated root".into());
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| error.to_string())?;
+    if canonical.parent() != Some(root)
+        || !canonical
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with(WORKSPACE_PREFIX))
+    {
+        return Err("workspace path resolves outside the dedicated root".into());
+    }
+    Ok(())
+}
+
+fn remove_owned_workspace_path(
+    root: &Path,
+    path: &Path,
+    expected_root_identity: FsIdentity,
+    expected_identity: &WorkspaceIdentity,
+) -> Result<(), String> {
+    validate_root_identity(root, expected_root_identity)?;
+    validate_workspace_path(root, expected_root_identity, path)?;
+    validate_workspace_identity_at(path, expected_identity)?;
+    remove_owned_child_path(root, path, WORKSPACE_PREFIX)
+}
+
+fn remove_owned_cache_path(root: &Path, path: &Path) -> Result<(), String> {
+    remove_owned_child_path(root, path, ".source-")
+}
+
+fn remove_owned_child_path(root: &Path, path: &Path, prefix: &str) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if path.parent() != Some(root)
+        || !path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with(prefix))
+    {
+        return Err("refusing cleanup outside daemon-owned direct child".into());
+    }
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return fs::remove_file(path).map_err(|error| error.to_string());
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let canonical = fs::canonicalize(path).map_err(|error| error.to_string())?;
+    if canonical.parent() != Some(canonical_root.as_path()) {
+        return Err("refusing cleanup outside daemon-owned root".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mode = fs::metadata(root)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode();
+        if mode & 0o200 == 0 {
+            return Err("daemon-owned root is not writable for cleanup".into());
+        }
+    }
+    fs::remove_dir_all(path).map_err(|error| error.to_string())
+}
+
+/// Direct child creation is bounded to canonical daemon-owned roots; this is
+/// process-level path hygiene, not a kernel sandbox.
+fn reject_symlink_root(path: &Path, phase: InspectionPhase) -> Result<(), InspectionError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(InspectionError::new(
+            phase,
+            format!("refusing symlinked configured root {}", path.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(InspectionError::new(
+            phase,
+            format!("inspect configured root {}: {error}", path.display()),
+        )),
+    }
+}
+
+/// Direct child creation is bounded to canonical daemon-owned roots; this is
+/// process-level path hygiene, not a kernel sandbox.
+fn create_owned_child(
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    component: String,
+    phase: InspectionPhase,
+) -> Result<PathBuf, InspectionError> {
+    validate_root_identity(root, expected_root_identity)
+        .map_err(|reason| InspectionError::new(phase, reason))?;
+    let path = root.join(component);
+    loop {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(InspectionError::new(
+                    phase,
+                    format!("refusing symlinked directory component {}", path.display()),
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(InspectionError::new(
+                    phase,
+                    format!("directory component {} is not a directory", path.display()),
+                ));
+            }
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match fs::create_dir(&path) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => {
+                        return Err(InspectionError::new(
+                            phase,
+                            format!("create directory {}: {error}", path.display()),
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(InspectionError::new(
+                    phase,
+                    format!("inspect directory {}: {error}", path.display()),
+                ));
+            }
+        }
+    }
+    validate_root_identity(root, expected_root_identity)
+        .map_err(|reason| InspectionError::new(phase, reason))?;
+    let canonical = fs::canonicalize(&path).map_err(|error| {
+        InspectionError::new(
+            phase,
+            format!("resolve directory {}: {error}", path.display()),
+        )
+    })?;
+    if canonical.parent() != Some(root) {
+        return Err(InspectionError::new(
+            phase,
+            format!(
+                "directory {} resolves outside configured root",
+                path.display()
+            ),
+        ));
+    }
+    restrict_root_permissions(&path).map_err(|error| {
+        InspectionError::new(
+            phase,
+            format!("restrict directory {}: {error}", path.display()),
+        )
+    })?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+fn restrict_root_permissions(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn restrict_root_permissions(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn roots_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.strip_prefix(right).is_ok() || right.strip_prefix(left).is_ok()
+}
+
+fn path_component(value: &str) -> String {
+    // Hex-encode every value so encoded and already-safe identities cannot
+    // collide, and no component can introduce a path separator.
+    let mut encoded = String::from("id-");
+    for byte in value.as_bytes() {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn next_workspace_sequence() -> u64 {
+    WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn non_empty_reason(reason: String, fallback: &str) -> String {
+    if reason.trim().is_empty() {
+        fallback.to_owned()
+    } else {
+        reason
+    }
+}
+
+/// Public helper for callers that receive a server-assembled context.
+pub fn source_from_context(
+    context: &RepositoryContext,
+) -> Result<RepositorySource, InspectionError> {
+    RepositorySource::from_context(context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsafe_identity_components_cannot_escape_root() {
+        assert_ne!(path_component("repo-1"), "repo-1");
+        assert_ne!(path_component("../cache"), path_component("id-2e2e"));
+        assert_ne!(path_component("."), path_component(".."));
+    }
+
+    #[test]
+    fn read_git_allowlist_rejects_mutation_and_output_flags() {
+        assert!(read_git_allowed(&["status".into(), "--porcelain".into()]));
+        assert!(read_git_allowed(&["rev-parse".into(), "HEAD".into()]));
+        assert!(!read_git_allowed(&["push".into()]));
+        assert!(!read_git_allowed(&[
+            "diff".into(),
+            "--output=secret".into()
+        ]));
+        assert!(!read_git_allowed(&[
+            "status".into(),
+            "--git-dir=../cache".into()
+        ]));
+        assert!(!read_git_allowed(&[
+            "status".into(),
+            "--work-tree=../cache".into()
+        ]));
+        assert!(!read_git_allowed(&[
+            "status".into(),
+            "-C".into(),
+            "../cache".into()
+        ]));
+        assert!(!read_git_allowed(&[
+            "status".into(),
+            "--super-prefix=../cache".into()
+        ]));
+        assert!(!read_git_allowed(&[
+            "diff".into(),
+            "-o".into(),
+            "../cache".into()
+        ]));
+        assert!(!read_git_allowed(&["status".into(), "-cfoo=bar".into()]));
+        assert!(!read_git_allowed(&[
+            "status".into(),
+            "--config-env=foo=BAR".into()
+        ]));
+    }
+
+    #[test]
+    fn protocol_context_has_no_credential_or_workspace_fields() {
+        let context = RepositoryContext {
+            repository_id: "repo".into(),
+            name: "Repository".into(),
+            url: "https://example.test/repo.git".into(),
+            description: "Read-only source".into(),
+        };
+        let json = match serde_json::to_string(&context) {
+            Ok(json) => json,
+            Err(error) => panic!("encode repository context: {error}"),
+        };
+        for field in [
+            "credential",
+            "password",
+            "token",
+            "checkout_path",
+            "cache_path",
+        ] {
+            assert!(!json.contains(field), "wire context contains {field}");
+        }
+        assert!(
+            source_from_context(&context).is_ok(),
+            "credential-free context"
+        );
+        let local = RepositoryContext {
+            url: "file:///tmp/repo.git".into(),
+            ..context
+        };
+        assert!(source_from_context(&local).is_err());
+    }
+
+    #[test]
+    fn repository_selection_rejects_unknown_identity() {
+        let request = InspectionRequest::new(
+            "session-1",
+            "task-1",
+            RepositorySource::new("unknown", "https://example.test/repo.git"),
+        );
+        let authorization = match RunAuthorization::new(
+            "session-1",
+            vec![RepositorySource::new(
+                "known",
+                "https://example.test/repo.git",
+            )],
+        ) {
+            Ok(authorization) => authorization,
+            Err(error) => panic!("authorization: {error}"),
+        };
+        let error = match validate_repository_selection(&request, &authorization) {
+            Ok(()) => panic!("unknown repository must not be authorized"),
+            Err(error) => error,
+        };
+        assert_eq!(error.phase, InspectionPhase::Authorization);
+    }
+
+    #[test]
+    fn authorization_binds_session_and_source_url() {
+        let request = InspectionRequest::new(
+            "session-1",
+            "task-1",
+            RepositorySource::new("repo", "https://example.test/one.git"),
+        );
+        let different_url = match RunAuthorization::new(
+            "session-1",
+            vec![RepositorySource::new(
+                "repo",
+                "https://example.test/two.git",
+            )],
+        ) {
+            Ok(authorization) => authorization,
+            Err(error) => panic!("authorization: {error}"),
+        };
+        let url_error = match validate_repository_selection(&request, &different_url) {
+            Ok(()) => panic!("source URL mismatch"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            url_error,
+            InspectionError {
+                phase: InspectionPhase::Authorization,
+                reason: "repository URL does not match run authorization".into(),
+                contamination: None,
+                cleanup_failure: None,
+            }
+        );
+        let different_session = match RunAuthorization::new(
+            "session-2",
+            vec![RepositorySource::new(
+                "repo",
+                "https://example.test/one.git",
+            )],
+        ) {
+            Ok(authorization) => authorization,
+            Err(error) => panic!("authorization: {error}"),
+        };
+        let session_error = match validate_repository_selection(&request, &different_session) {
+            Ok(()) => panic!("session mismatch"),
+            Err(error) => error,
+        };
+        assert_eq!(session_error.phase, InspectionPhase::Authorization);
+    }
+
+    #[test]
+    fn credential_bearing_locations_are_rejected() {
+        for url in [
+            "https://token@example.test/repo.git",
+            "ssh://git:password@example.test/repo.git",
+            "deploy@example.test:org/repo.git",
+            "https://example.test/repo.git?token=secret",
+        ] {
+            let source = RepositorySource::new("repo", url);
+            assert!(source.validate().is_err(), "{url} must be rejected");
+        }
+    }
+}

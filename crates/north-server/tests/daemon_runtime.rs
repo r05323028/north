@@ -10,8 +10,9 @@ use north_persistence::{
 };
 use north_protocol::{
     encode_daemon_frame, Command, CommandAck, DaemonFrame, Event, EventAckStatus, EventEnvelope,
-    Heartbeat, MessageSend, ProtocolErrorFrame, ReadinessVerdictWire, RequirementAssessed,
-    RequirementContext, ReviewedRepositoryWire, ServerFrame, SessionStart, SCHEMA_VERSION,
+    Heartbeat, MessageSend, ProtocolErrorFrame, ReadinessVerdictWire, RepositoryContext,
+    RequirementAssessed, RequirementContext, ReviewedRepositoryWire, ServerFrame, SessionStart,
+    SCHEMA_VERSION,
 };
 use north_server::{
     auth_router, build_app, AuthState, CommandRequest, DaemonResponse, LogCodeDelivery,
@@ -587,7 +588,12 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
                 open_questions: assessment_requirement.open_questions.clone(),
             },
             conversation: north_protocol::ConversationContext { excerpt: vec![] },
-            repositories: vec![],
+            repositories: vec![RepositoryContext {
+                repository_id: "00000000-0000-4000-8000-000000000001".into(),
+                name: "requested metadata is replaced".into(),
+                url: "https://example.test/north.git".into(),
+                description: "requested metadata is replaced".into(),
+            }],
         }),
     };
     runtime
@@ -597,10 +603,18 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         )
         .await
         .expect("bind assessment session");
-    assert!(matches!(
-        next_server_frame(&mut socket).await,
-        ServerFrame::Command(_)
-    ));
+    let ServerFrame::Command(envelope) = next_server_frame(&mut socket).await else {
+        panic!("expected assembled session start");
+    };
+    let Command::SessionStart(start) = envelope.command else {
+        panic!("expected session start command");
+    };
+    assert_eq!(start.repositories.len(), 1);
+    assert_eq!(
+        start.repositories[0].repository_id,
+        "00000000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(start.repositories[0].url, "https://example.test/north.git");
     assert_eq!(
         store
             .session_requirement(&assessment_session_id)
@@ -608,6 +622,10 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             .expect("assessment session binding"),
         Some(assessment_requirement_id.clone())
     );
+    store
+        .disable_repository("00000000-0000-4000-8000-000000000001")
+        .await
+        .expect("disable in-flight repository");
 
     let assessment_event_id = format!("assessment-event-{}", claimed.daemon_id);
     let assessment_event = DaemonFrame::Event(EventEnvelope {
@@ -624,7 +642,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             assumptions: vec!["Daemon owns session".into()],
             repositories_reviewed: vec![ReviewedRepositoryWire {
                 repository_id: "00000000-0000-4000-8000-000000000001".into(),
-                commit_sha: "abc123".into(),
+                commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
             }],
         }),
     });

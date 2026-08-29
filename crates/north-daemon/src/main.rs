@@ -1,6 +1,7 @@
 use north_daemon::{
     coordination::DaemonCoordinator,
     journal::{DispatchOutcome, Journal, RecoveryOutcome, RuntimeExecutor},
+    repository_inspection::RepositoryInspector,
     transport::{ConnectionConfig, ConnectionControl, ConnectionEvent, ConnectionSupervisor},
 };
 use north_protocol::{DaemonFrame, Heartbeat, Hello};
@@ -77,7 +78,9 @@ struct LocalState {
 /// Placeholder until `introduce-agent-requirement-clarification` supplies
 /// North's production agent runtime adapter. Durable coordination is real, but
 /// executable commands currently produce a not-configured/unknown fact.
-struct LocalRuntime;
+struct LocalRuntime {
+    _repository_inspector: RepositoryInspector,
+}
 
 impl RuntimeExecutor for LocalRuntime {
     fn dispatch(
@@ -245,9 +248,29 @@ async fn start(args: &[String]) -> Result<(), CliError> {
     let journal_path = option(args, "--journal-file")
         .map(PathBuf::from)
         .unwrap_or_else(|| state_path.with_extension("journal.json"));
+    let cache_root = option(args, "--repository-cache-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_daemon_directory(&state_path, "repository-cache"));
+    let workspace_root = option(args, "--repository-workspace-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_daemon_directory(&state_path, "disposable-workspaces"));
+    let repository_inspector = RepositoryInspector::new(cache_root, workspace_root)
+        .map_err(|error| CliError(format!("initialize repository inspection: {error}")))?;
+    for failure in repository_inspector.startup_cleanup().failures {
+        eprintln!(
+            "north-daemon: startup cleanup failed for {}: {}",
+            failure.path.display(),
+            failure.reason
+        );
+    }
     let journal = Journal::open(&journal_path, daemon_id.clone())
         .map_err(|error| CliError(format!("open {}: {error}", journal_path.display())))?;
-    let coordinator = DaemonCoordinator::new(journal, LocalRuntime);
+    let coordinator = DaemonCoordinator::new(
+        journal,
+        LocalRuntime {
+            _repository_inspector: repository_inspector,
+        },
+    );
     let recovered = coordinator
         .recover()
         .map_err(|error| CliError(format!("recover daemon journal: {error}")))?;
@@ -437,6 +460,14 @@ fn websocket_url(server_url: &str) -> Result<String, CliError> {
     ))
 }
 
+fn default_daemon_directory(state_path: &Path, name: &str) -> PathBuf {
+    state_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(name)
+}
+
 fn default_state_path() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -456,7 +487,7 @@ fn required_option(args: &[String], name: &str) -> Result<String, CliError> {
 
 fn print_usage() {
     println!("north-daemon setup --server-url HTTPS_URL [--label LABEL] [--state-file PATH]");
-    println!("north-daemon start [--state-file PATH] [--journal-file PATH]");
+    println!("north-daemon start [--state-file PATH] [--journal-file PATH] [--repository-cache-dir PATH] [--repository-workspace-dir PATH]");
 }
 
 #[cfg(test)]

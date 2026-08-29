@@ -16,7 +16,7 @@ use north_protocol::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -857,8 +857,31 @@ impl DaemonRuntime {
             .active_repositories()
             .await
             .map_err(|_| DaemonDispatchError::Internal)?;
+        let requested_ids = start
+            .repositories
+            .iter()
+            .map(|repository| repository.repository_id.as_str())
+            .collect::<Vec<_>>();
+        let mut unique_ids = HashSet::with_capacity(requested_ids.len());
+        if requested_ids
+            .iter()
+            .any(|repository_id| !unique_ids.insert(*repository_id))
+            || requested_ids.iter().any(|repository_id| {
+                !repositories
+                    .iter()
+                    .any(|repository| repository.id == *repository_id)
+            })
+        {
+            return Err(DaemonDispatchError::InvalidCommand);
+        }
         start.repositories = repositories
             .into_iter()
+            .filter(|repository| {
+                requested_ids.is_empty()
+                    || requested_ids
+                        .iter()
+                        .any(|repository_id| repository.id == *repository_id)
+            })
             .map(|repository| RepositoryContext {
                 repository_id: repository.id,
                 name: repository.name,

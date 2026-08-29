@@ -366,7 +366,7 @@ mod tests {
                 assumptions: vec!["One account".into()],
                 repositories_reviewed: vec![north_protocol::ReviewedRepositoryWire {
                     repository_id: "north".into(),
-                    commit_sha: "abc123".into(),
+                    commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
                 }],
             },
             42,
@@ -374,7 +374,10 @@ mod tests {
 
         assert_eq!(assessment.requirement_revision, 2);
         assert_eq!(assessment.verdict, Verdict::Ready);
-        assert_eq!(assessment.repositories_reviewed[0].commit_sha, "abc123");
+        assert_eq!(
+            assessment.repositories_reviewed[0].commit_sha,
+            "abcdef0123456789abcdef0123456789abcdef01"
+        );
         assert_eq!(assessment.assessed_at_ms, 42);
         Ok(())
     }

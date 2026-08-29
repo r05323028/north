@@ -173,7 +173,7 @@ mod tests {
             assumptions: vec!["single tenant".into()],
             repositories_reviewed: vec![ReviewedRepository {
                 repository_id: "billing".into(),
-                commit_sha: "a82c19f".into(),
+                commit_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
             }],
             assessed_at_ms: 42,
         };

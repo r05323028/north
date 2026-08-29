@@ -157,9 +157,9 @@ SHALL be an idempotent success that preserves the original `disabled_at` and
 #### Scenario: Referenced repository preserves evidence
 
 - **WHEN** an Admin removes repository X after evidence records X at full commit
-  SHA `abc123`
+  SHA `abcdef0123456789abcdef0123456789abcdef01`
 - **THEN** X remains readable by ID with `disabled_at`, and the evidence still
-  resolves X and `abc123`
+  resolves X and `abcdef0123456789abcdef0123456789abcdef01`
 
 #### Scenario: Repeated Remove is idempotent
 
@@ -248,7 +248,7 @@ The evidence remains interpretable without active-catalog membership.
 #### Scenario: Historical assessment remains readable after disable
 
 - **WHEN** repository X is disabled after an assessment records X and full SHA
-  `abc123...`
+  `abcdef0123456789abcdef0123456789abcdef01...`
 - **THEN** historical reads resolve retained X metadata and the exact SHA even
   though new active selection rejects X
 
@@ -262,8 +262,8 @@ it SHALL not fabricate a repository row. Readiness owns whether the citation is
 acceptable for the Requirement, while configured repositories own identity,
 existence, and lifecycle. `introduce-local-repository-inspection` owns source
 inspection and production of the exact commit SHA. `north-protocol` carries
-`repository_id` and `commit_sha` as typed facts and validates only that both are
-structurally non-empty; it SHALL not access repository persistence.
+`repository_id` and complete Git SHA-1/SHA-256 `commit_sha` as typed facts; it
+SHALL not access repository persistence.
 
 New inspection work SHALL require the repository to be enabled at selection and
 start. Evidence from an already-running/in-flight inspection SHALL remain

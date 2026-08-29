@@ -8,7 +8,9 @@ export default function DaemonStatusPage() {
       <div>
         <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
         <p className="text-muted-foreground">Daemon status</p>
-        <Link className="text-sm underline" href="/settings/repositories">Repository settings</Link>
+        <Link className="text-sm underline" href="/settings/repositories">
+          Repository settings
+        </Link>
       </div>
       <DaemonStatus />
     </main>

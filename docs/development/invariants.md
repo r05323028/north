@@ -61,12 +61,12 @@ Specified with the owning change named. Documentation alone is not enforcement.
 
 | Invariant | Status | Enforcement |
 | --- | --- | --- |
-| Clarification never intentionally persists mutations to source repos | Specified | hardening + local-inspection contract; disposable-workspace integration test pending; process-level, NOT sandbox-enforced |
-| Concurrent sessions never share a mutable inspection checkout | Specified | hardening/local-inspection tasks; concurrent workspace test pending |
-| Git credentials never centralized in the server | Specified | repository schema task must omit credential fields; architecture schema check when schema exists |
+| Clarification never intentionally persists mutations to source repos | Partially Enforced | daemon uses disposable clone, read-only Git allowlist, post-task dirty check, and cleanup integration tests; process-level detection/response, NOT sandbox-enforced |
+| Concurrent sessions never share a mutable inspection checkout | Enforced | unique session/task/repository workspace allocation, per-repository cache lock, and concurrent host-Git integration test |
+| Git credentials never centralized in the server | Enforced | repository/protocol DTOs contain metadata only; host-Git environment is inherited by daemon and credential-bearing locations are rejected |
 | Configured repositories are soft-disabled, not normally hard-deleted | Enforced | migration 0013, Admin/Owner lifecycle routes, idempotent timestamps, and retained identity |
-| Disabled repositories are excluded from new inspections | Partially Enforced | enabled-only `AuthStore::active_repositories` catalog is enforced; downstream inspection selection remains owned by local-repository-inspection |
-| Inspections cite exact commit SHAs | Specified | pending introduce-local-repository-inspection |
+| Disabled repositories are excluded from new inspections | Enforced | enabled-only active catalog plus mandatory immutable run repository authorization; retained in-flight IDs remain valid after disable |
+| Inspections cite exact commit SHAs | Enforced | detached checkout verifies Git-resolved SHA; readiness accepts only complete SHA-1/SHA-256 widths; moving-ref integration test |
 
 ## Persistence & retention
 

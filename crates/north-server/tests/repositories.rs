@@ -287,6 +287,29 @@ async fn repository_citations_require_identity_but_survive_disable() {
         .execute(&pool)
         .await
         .expect("bind unknown citation session");
+    let malformed = process_requirement_assessed(
+        &store,
+        &unique("malformed-citation-event"),
+        &unknown_session,
+        1,
+        &RequirementAssessed {
+            requirement_id: requirement.id.clone(),
+            requirement_revision: requirement.revision,
+            verdict: ReadinessVerdictWire::Ready,
+            blockers: Vec::new(),
+            assumptions: vec!["Incomplete citation is rejected".into()],
+            repositories_reviewed: vec![ReviewedRepositoryWire {
+                repository_id: "missing-repository".into(),
+                commit_sha: "abc123".into(),
+            }],
+        },
+    )
+    .await;
+    assert!(matches!(
+        malformed,
+        Err(north_server::assessment::AssessmentError::InvalidPayload(_))
+    ));
+
     let unknown = process_requirement_assessed(
         &store,
         &unique("unknown-citation-event"),
@@ -300,7 +323,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
             assumptions: vec!["Unknown citation is rejected".into()],
             repositories_reviewed: vec![ReviewedRepositoryWire {
                 repository_id: "missing-repository".into(),
-                commit_sha: "abc123".into(),
+                commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
             }],
         },
     )
@@ -329,7 +352,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
             assumptions: vec!["Context membership is required".into()],
             repositories_reviewed: vec![ReviewedRepositoryWire {
                 repository_id: repository.id.clone(),
-                commit_sha: "abc123".into(),
+                commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
             }],
         },
     )
@@ -349,6 +372,16 @@ async fn repository_citations_require_identity_but_survive_disable() {
     .execute(&pool)
     .await
     .expect("bind valid citation session");
+    store
+        .disable_repository(&repository.id)
+        .await
+        .expect("disable while citation is in flight");
+    let retained = store
+        .repository_by_id(&repository.id)
+        .await
+        .expect("read retained repository")
+        .expect("retained repository");
+    assert!(!retained.enabled());
     let valid = process_requirement_assessed(
         &store,
         &unique("valid-citation-event"),
@@ -362,23 +395,13 @@ async fn repository_citations_require_identity_but_survive_disable() {
             assumptions: vec!["Retained citation".into()],
             repositories_reviewed: vec![ReviewedRepositoryWire {
                 repository_id: repository.id.clone(),
-                commit_sha: "abcdef0123456789".into(),
+                commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
             }],
         },
     )
     .await
-    .expect("valid citation");
+    .expect("valid citation after disable");
     assert_eq!(valid.status, north_protocol::EventAckStatus::Accepted);
-    store
-        .disable_repository(&repository.id)
-        .await
-        .expect("disable after evidence");
-    let retained = store
-        .repository_by_id(&repository.id)
-        .await
-        .expect("read retained repository")
-        .expect("retained repository");
-    assert!(!retained.enabled());
     let historical: (String, String) = sqlx::query_as(
         "SELECT repositories_reviewed->0->>\'repository_id\', repositories_reviewed->0->>\'commit_sha\'\n         FROM readiness_assessments WHERE session_id = $1",
     )
@@ -387,7 +410,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
     .await
     .expect("read historical citation");
     assert_eq!(historical.0, repository.id);
-    assert_eq!(historical.1, "abcdef0123456789");
+    assert_eq!(historical.1, "abcdef0123456789abcdef0123456789abcdef01");
 }
 
 fn created_id_version(id: &str) -> Option<u8> {

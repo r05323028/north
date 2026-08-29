@@ -55,9 +55,9 @@ ref after inspection begins.
 
 A remote branch may move after preparation starts; the run still observes the
 captured object. The inspection result carries the same durable repository ID
-and full SHA. `north-protocol` continues to validate only structurally
-non-empty fields; the daemon produces the stronger full-SHA fact and server
-readiness validates identity/run binding.
+and full SHA. `north-protocol` validates complete Git SHA-1/SHA-256 fields; the daemon
+produces the canonical full-SHA fact and server readiness validates identity/run
+binding.
 
 ## Workspace protection and lifecycle
 

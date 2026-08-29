@@ -44,6 +44,13 @@ impl From<serde_json::Error> for FrameError {
     }
 }
 
+const GIT_OBJECT_ID_HEX_WIDTHS: &[usize] = &[20 * 2, 32 * 2];
+
+fn complete_commit_sha(value: &str) -> bool {
+    GIT_OBJECT_ID_HEX_WIDTHS.contains(&value.len())
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn non_empty(field: &str, value: &str) -> Result<(), FrameError> {
     if value.trim().is_empty() {
         return Err(FrameError::Validation(format!("{field} must not be empty")));
@@ -346,7 +353,12 @@ pub struct ReviewedRepositoryWire {
 impl ReviewedRepositoryWire {
     fn validate(&self) -> Result<(), FrameError> {
         non_empty("repositories_reviewed.repository_id", &self.repository_id)?;
-        non_empty("repositories_reviewed.commit_sha", &self.commit_sha)
+        if !complete_commit_sha(&self.commit_sha) {
+            return Err(FrameError::Validation(
+                "repositories_reviewed.commit_sha must be a complete Git object ID".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -739,10 +751,24 @@ mod tests {
                 assumptions: vec!["One repository".into()],
                 repositories_reviewed: vec![ReviewedRepositoryWire {
                     repository_id: "north".into(),
-                    commit_sha: "abc123".into(),
+                    commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
                 }],
             }),
         }
+    }
+
+    #[test]
+    fn abbreviated_repository_sha_is_rejected_at_wire_boundary() {
+        let mut event = assessment_event();
+        let EventEnvelope {
+            event: Event::RequirementAssessed(payload),
+            ..
+        } = &mut event
+        else {
+            panic!("assessment fixture");
+        };
+        payload.repositories_reviewed[0].commit_sha = "abc123".into();
+        assert!(DaemonFrame::Event(event).to_json().is_err());
     }
 
     #[test]

@@ -44,8 +44,8 @@ credentials remain in the daemon host's Git environment.
 
 #### Scenario: Remove preserves assessment history
 
-- **WHEN** an Admin removes repository X after an assessment recorded X at commit `abc123`
-- **THEN** X is disabled rather than deleted, the old assessment still resolves to X and `abc123`, and new inspections cannot select X
+- **WHEN** an Admin removes repository X after an assessment recorded X at commit `abcdef0123456789abcdef0123456789abcdef01`
+- **THEN** X is disabled rather than deleted, the old assessment still resolves to X and `abcdef0123456789abcdef0123456789abcdef01`, and new inspections cannot select X
 
 #### Scenario: Repository credentials stay local
 
@@ -76,5 +76,5 @@ readiness acceptance subject to durable row existence and session/run provenance
 
 #### Scenario: Assessment cites reproducible source
 
-- **WHEN** a clarification session reads repository X at commit `abc123`
-- **THEN** its assessment evidence includes X and the exact full SHA `abc123`
+- **WHEN** a clarification session reads repository X at commit `abcdef0123456789abcdef0123456789abcdef01`
+- **THEN** its assessment evidence includes X and the exact full SHA `abcdef0123456789abcdef0123456789abcdef01`
