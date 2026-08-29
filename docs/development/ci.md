@@ -29,11 +29,12 @@ GitHub branch protection / ruleset for `main`:
 - (Recommended) Allow squash merge only, so PR titles stay the canonical history.
 
 Coverage jobs use `fail_ci_if_error: true`, so `gate` fails when coverage is not
-generated or uploaded. Codecov separately evaluates patch coverage; workflow code
-does not parse percentages. After Codecov reports status successfully at least
-once, add `codecov/patch` to the default-branch ruleset required status checks.
-Do not require global/project Codecov status yet. Initial policy: patch `>= 80%`,
-project target `auto`, allowed project regression `1%`.
+generated or uploaded. Codecov separately evaluates project and flag statuses;
+workflow code does not parse percentages. Patch status is temporarily disabled
+while baseline coverage is established. When re-enabled, restore patch `>= 80%`
+and add `codecov/patch` to the default-branch ruleset required status checks
+after it reports successfully. Do not require global/project Codecov status yet;
+project target remains `auto`, with allowed project regression `1%`.
 
 These settings cannot be changed from inside the repository by agents; until
 they exist, treat a red `gate` as an absolute merge blocker regardless.

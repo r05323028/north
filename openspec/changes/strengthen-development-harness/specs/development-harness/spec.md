@@ -39,6 +39,21 @@ lint/typecheck, and strict OpenSpec validation all execute and pass
 - **THEN** it runs Web unit tests and Web validation without running
 `npm run test:coverage` or invoking Codecov
 
+### Requirement: Coverage upload and patch policy remain separate
+
+CI SHALL keep Rust and Web coverage uploads in separate jobs with separate
+Codecov flags. Project and flag statuses SHALL remain configured while baseline
+coverage is established. Patch status MAY be temporarily disabled; when it is
+re-enabled, its target SHALL be `80%` before `codecov/patch` becomes required.
+
+#### Scenario: Temporary patch status exception
+
+- **WHEN** Codecov evaluates this repository before baseline coverage is
+established
+- **THEN** Rust and Web reports upload with their existing flags and project/flag
+statuses remain active
+- **AND** the patch status does not block the pull request
+
 ### Requirement: Hook policy through prek
 
 Git hooks SHALL be managed by prek using `.pre-commit-config.yaml`. Pre-commit

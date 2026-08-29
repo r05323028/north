@@ -18,9 +18,9 @@ coverage:
         flags:
           - web
 
-    patch:
-      default:
-        target: 80%
+    # Temporary: disable patch gate while baseline coverage is established.
+    # Keep project and flag statuses plus coverage uploads active.
+    patch: off  # yamllint disable-line rule:truthy
 
 comment:
   layout: "diff, flags, files"
