@@ -65,6 +65,7 @@ member so `cargo test --workspace` executes it.
 | Layer | Status |
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
+| Unit (Web) | Implemented — Vitest via `npm test` in `apps/web` |
 | Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, and durable coordination coverage; execute with `NORTH_TEST_DATABASE_URL` |
 | E2E | Not implemented — browser approval UI is covered at HTTP integration; Playwright workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
@@ -96,8 +97,8 @@ runnable test exists and passes.
 ./scripts/validate.sh rust        # full Rust merge-gate validation
 ./scripts/validate.sh web         # web lint, typecheck, and production build
 ./scripts/validate.sh specs       # strict OpenSpec validation
-./scripts/validate.sh unit        # unit + architecture
-./scripts/validate.sh ci          # full workspace + PostgreSQL integration + web build; requires NORTH_TEST_DATABASE_URL
+./scripts/validate.sh unit        # Rust + Web unit tests + architecture
+./scripts/validate.sh ci          # complete local merge-gate mirror; requires NORTH_TEST_DATABASE_URL
 ./scripts/validate.sh integration # PostgreSQL-backed suites; requires NORTH_TEST_DATABASE_URL
 ./scripts/validate.sh e2e | smoke # explicit 'not yet' until real
 ```
@@ -105,7 +106,9 @@ runnable test exists and passes.
 ## Web (apps/web)
 
 Components come from shadcn/ui (`npx shadcn@latest add <component>`); do not
-fork them casually. Frontend unit tests arrive with the board change.
+fork them casually. Frontend unit tests use Vitest (`npm test`) and run through
+`./scripts/validate.sh unit` and `ci`. Coverage generation/upload remains
+CI-specific (`npm run test:coverage`).
 
 ## Specs
 

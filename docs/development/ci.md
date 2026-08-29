@@ -14,7 +14,7 @@ checks, never replacements.
 | `web` | lint · typecheck · production build (`apps/web`) |
 | `web-coverage` | Frontend Vitest LCOV coverage upload |
 | `openspec` | `openspec validate --all --strict` |
-| `gate` | succeeds only when all required jobs succeed |
+| `gate` | succeeds only when all required jobs, including coverage jobs, succeed |
 
 Branch protection should require exactly one check: **`gate`** — internal job
 structure may evolve without touching rulesets.
@@ -27,6 +27,13 @@ GitHub branch protection / ruleset for `main`:
 - Require status check: **`gate`**.
 - Require branches up to date before merging.
 - (Recommended) Allow squash merge only, so PR titles stay the canonical history.
+
+Coverage jobs use `fail_ci_if_error: true`, so `gate` fails when coverage is not
+generated or uploaded. Codecov separately evaluates patch coverage; workflow code
+does not parse percentages. After Codecov reports status successfully at least
+once, add `codecov/patch` to the default-branch ruleset required status checks.
+Do not require global/project Codecov status yet. Initial policy: patch `>= 80%`,
+project target `auto`, allowed project regression `1%`.
 
 These settings cannot be changed from inside the repository by agents; until
 they exist, treat a red `gate` as an absolute merge blocker regardless.

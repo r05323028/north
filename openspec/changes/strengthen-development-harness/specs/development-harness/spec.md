@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD041 -->
 ## Purpose
 
 Defines North's durable engineering harness: how validation is invoked, which
@@ -25,6 +26,18 @@ rather than maintaining independent command lists.
 - **WHEN** `./scripts/validate.sh fast` runs on a clean tree
 - **THEN** rustfmt check, clippy -D warnings, unit+architecture tests, web
 lint/typecheck, and strict OpenSpec validation all execute and pass
+
+#### Scenario: Unit profile covers Rust and Web units
+
+- **WHEN** `./scripts/validate.sh unit` runs
+- **THEN** it runs Rust library tests, architecture tests, and `npm test` in
+`apps/web`
+
+#### Scenario: CI profile validates Web behavior without coverage upload
+
+- **WHEN** `./scripts/validate.sh ci` runs with `NORTH_TEST_DATABASE_URL`
+- **THEN** it runs Web unit tests and Web validation without running
+`npm run test:coverage` or invoking Codecov
 
 ### Requirement: Hook policy through prek
 

@@ -25,6 +25,10 @@ web_lint_tc() {
   (cd apps/web && npm run lint && npm run typecheck && npm run check:repository-settings)
 }
 
+web_unit() {
+  (cd apps/web && npm test)
+}
+
 web_full() {
   (cd apps/web && npm run lint && npm run typecheck && npm run check:repository-settings && npm run build)
 }
@@ -69,11 +73,10 @@ specs)
   openspec validate --all --strict
   ;;
 unit)
-  # Unit layer: small units, minimal externals. Frontend unit tests do not
-  # exist yet; they arrive with introduce-requirement-board.
+  # Unit layer: small units, minimal externals.
   cargo test --workspace --lib
   cargo test -p north-architecture-tests
-  printf '(frontend unit layer: not yet implemented — see testing.md)\n'
+  web_unit
   ;;
 integration)
   database_integration
@@ -90,6 +93,7 @@ ci)
   # Complete merge gate mirror: full workspace and database tests plus build.
   rust_full
   database_integration skip-persistence
+  web_unit
   web_full
   openspec validate --all --strict
   ;;

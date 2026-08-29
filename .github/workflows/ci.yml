@@ -58,8 +58,9 @@ jobs:
           tool: cargo-llvm-cov
       - name: Generate Rust coverage (lcov)
         run: cargo llvm-cov --workspace --lcov --output-path rust-lcov.info
+      # Codecov Action v7.0.0
       - name: Upload Rust coverage
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: rust-lcov.info
@@ -85,8 +86,9 @@ jobs:
       - name: Generate frontend coverage
         working-directory: apps/web
         run: npm run test:coverage
+      # Codecov Action v7.0.0
       - name: Upload frontend coverage
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: apps/web/coverage/lcov.info
@@ -154,8 +156,8 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
-      # zizmor: ignore[adhoc-packages]
       # OpenSpec CLI is intentionally bootstrapped for this validation job.
+      # zizmor: ignore[adhoc-packages]
       - run: npm install -g @fission-ai/openspec@1.9.0
       - run: ./scripts/validate.sh specs
 
