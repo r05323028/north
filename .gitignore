@@ -13,3 +13,9 @@ graphify-out
 
 # Local pi agent state (never publish)
 .pi/
+
+# coverage
+coverage/
+apps/web/coverage/
+rust-lcov.info
+lcov.info

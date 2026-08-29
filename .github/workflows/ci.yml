@@ -41,6 +41,60 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: ./scripts/validate.sh rust
 
+  rust-coverage:
+    name: Rust coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate Rust coverage (lcov)
+        run: cargo llvm-cov --workspace --lcov --output-path rust-lcov.info
+      - name: Upload Rust coverage
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: rust-lcov.info
+          flags: rust
+          name: rust
+          disable_search: true
+          fail_ci_if_error: true
+
+  web-coverage:
+    name: Web coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+        working-directory: apps/web
+      - name: Generate frontend coverage
+        working-directory: apps/web
+        run: npm run test:coverage
+      - name: Upload frontend coverage
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: apps/web/coverage/lcov.info
+          flags: web
+          name: web
+          disable_search: true
+          fail_ci_if_error: true
+
   daemon-integration:
     name: Daemon runtime integration
     runs-on: ubuntu-latest
@@ -107,7 +161,14 @@ jobs:
 
   gate:
     name: merge gate
-    needs: [pr-title, rust, web, openspec, daemon-integration]
+    needs:
+      - pr-title
+      - rust
+      - rust-coverage
+      - web
+      - web-coverage
+      - openspec
+      - daemon-integration
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
@@ -121,12 +182,20 @@ jobs:
             echo "pr-title gate result: ${{ needs.pr-title.result }}"
             exit 1
           fi
-          for job in rust web openspec daemon-integration; do
+          for job in \
+            rust web openspec daemon-integration \
+            rust-coverage web-coverage; do
             result="${{ needs.rust.result }}"
             [ "$job" = web ] && result="${{ needs.web.result }}"
             [ "$job" = openspec ] && result="${{ needs.openspec.result }}"
             if [ "$job" = daemon-integration ]; then
               result="${{ needs.daemon-integration.result }}"
+            fi
+            if [ "$job" = rust-coverage ]; then
+              result="${{ needs.rust-coverage.result }}"
+            fi
+            if [ "$job" = web-coverage ]; then
+              result="${{ needs.web-coverage.result }}"
             fi
             echo "$job: $result"
             [ "$result" = success ] || exit 1
