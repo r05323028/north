@@ -1,59 +1,134 @@
 ## Purpose
 
-Lets the daemon read enabled configured repositories with the host's existing Git setup, while concurrent clarification tasks use isolated disposable checkouts and cite exact commits.
+Lets the daemon inspect enabled configured repositories through host Git while
+keeping every mutable checkout isolated and every readiness citation tied to an
+exact source revision.
 
 ## ADDED Requirements
 
-### Requirement: Host-environment Git access
+### Requirement: Host-environment Git is the credential boundary
 
-Repository access SHALL use the host's normal `git` binary and environment (SSH
-config/agent, credential helpers). If cloning the URL works from the host shell,
-inspection SHALL succeed without extra North credentials; otherwise it SHALL
-fail with the underlying Git error surfaced.
+Inspection SHALL invoke the host's normal `git` binary and environment,
+including configured SSH, agent, credential helpers, authenticated host tools,
+and file permissions. North SHALL not accept, serialize, or persist repository
+credentials. A host-Git failure SHALL remain an inspection failure with its
+operational error handled by the daemon boundary.
 
 #### Scenario: Shell-equivalent access
 
-- **WHEN** `git clone <url>` succeeds in the daemon host shell
-- **THEN** the daemon prepares readable cache/checkouts for that URL with no additional credentials provided by North
+- **WHEN** the daemon host can clone or fetch the configured URL with its normal Git environment
+- **THEN** inspection uses that access without any North-managed credential field
 
-### Requirement: Every clarification gets an isolated disposable checkout
+### Requirement: New selection is enabled-only, but authorized runs survive disable
 
-A reusable repository cache SHALL never be the runtime working tree. Each
-clarification execution SHALL receive a unique checkout scoped to session/task
-and repository id. Concurrent sessions inspecting one repository SHALL use
-different mutable directories. Runtime changes MUST remain inside that
-checkout; a contaminated checkout SHALL be discarded and reported. North
-0.1.0 SHALL describe this as process-level protection, not kernel/sandbox
-isolation, and SHALL not require Git worktrees.
+A new session context or new inspection selection SHALL accept only an enabled
+retained repository ID. The server SHALL exclude disabled rows while assembling
+new `session.start` context and SHALL reject unknown IDs. If repository R was
+included while enabled in a persisted session/run context and inspection began,
+then disabling R SHALL NOT cancel that run or invalidate its later citation
+solely because `disabled_at` is now set. Historical acceptance still requires
+the retained row, session/run binding, exact SHA, and normal readiness gates.
 
-#### Scenario: Concurrent inspections do not share files
+#### Scenario: Disabled repository is excluded from new selection
 
-- **WHEN** sessions A and B inspect repository X concurrently
-- **THEN** each runtime sees its own disposable checkout and a mutation in A cannot appear in B or the reusable cache
+- **WHEN** a new session is assembled after repository R is disabled
+- **THEN** R is not selected and no new checkout or inspection starts for R
 
-#### Scenario: Dirty tree is a violation
+#### Scenario: In-flight citation survives disable
 
-- **WHEN** the daemon detects an unexpected working-tree change after a clarification task
-- **THEN** it reports the violation and discards that checkout before reuse
+- **WHEN** enabled R is included in `session.start`, inspection begins, an Admin disables R, and the same run later reports R with its exact full SHA
+- **THEN** the run may complete and readiness may accept the citation; disable affects future selection only
 
-### Requirement: Disabled repositories cannot start inspection
+#### Scenario: Unknown identity never starts work
 
-The server SHALL reject an inspection for an unknown or disabled repository
-before dispatching work. New session catalogs SHALL include enabled metadata
-only; repository credentials SHALL remain on the daemon host.
+- **WHEN** a requested repository ID is absent from the retained catalog or from the session-bound repository set
+- **THEN** selection/inspection fails before cache access, workspace creation, or evidence publication
 
-#### Scenario: Disabled selection fails
+### Requirement: Cache mutation is synchronized per repository
 
-- **WHEN** a session requests inspection of a repository with `disabled_at` set
-- **THEN** no checkout or runtime task starts and the server returns an unavailable-repository error
+A reusable cache SHALL have per-repository synchronization covering clone,
+fetch, update, exact revision resolution, and creation/verification of a
+workspace source snapshot. Concurrent sessions MAY inspect the same repository,
+but SHALL NOT race cache mutation or share a mutable checkout. Synchronization
+for repository R SHALL NOT unnecessarily serialize unrelated repository IDs.
 
-### Requirement: Inspections cite exact commits
+#### Scenario: Same repository waits at cache boundary
 
-Every successful inspection SHALL resolve and report the configured repository
-identity and full commit SHA from its disposable checkout, making assessments
-reproducible against exact source states.
+- **WHEN** sessions A and B prepare repository R concurrently
+- **THEN** one cache operation runs at a time for R, while each session receives a distinct independent workspace after preparation
 
-#### Scenario: Assessment can name its basis
+#### Scenario: Different repositories remain independent
 
-- **WHEN** the agent inspects repository X during clarification
-- **THEN** the resulting event carries X and the full SHA returned by `git rev-parse HEAD`
+- **WHEN** sessions prepare repositories R and S concurrently
+- **THEN** work for S is not blocked by a lock held only for R
+
+### Requirement: Runtime is confined to an isolated disposable workspace
+
+The reusable cache SHALL be source material only. Each inspection SHALL run in a
+unique disposable checkout scoped to session/task/repository identity. The
+runtime SHALL never receive or operate directly inside the cache. A checkout
+contaminated by an unexpected mutation SHALL be reported and discarded. North
+0.1 SHALL use plain clone/copy isolation and SHALL not require Git worktrees or
+claim OS/kernel sandboxing.
+
+#### Scenario: Concurrent workspaces cannot contaminate one another
+
+- **WHEN** sessions A and B inspect the same repository concurrently
+- **THEN** their mutable directories differ, a mutation in A is not visible to B, and neither runtime can mutate the reusable cache
+
+#### Scenario: Runtime receives checkout, not cache
+
+- **WHEN** the daemon invokes the runtime
+- **THEN** the runtime input contains only the session/task disposable workspace path and never the reusable cache path
+
+### Requirement: Inspection pins one exact full commit SHA
+
+Before runtime inspection begins, or during construction of its disposable
+checkout, the daemon SHALL resolve one exact full commit SHA from Git, check out
+that object in detached mode, and verify the workspace's `git rev-parse HEAD`
+equals the captured value. The runtime SHALL not follow a branch after pinning.
+The inspection result SHALL carry the configured `repository_id` and that same
+full SHA. Full means Git's complete object ID, not an abbreviated ref; the
+contract SHALL not assume one fixed hash width.
+
+#### Scenario: Moving remote branch cannot change one run
+
+- **WHEN** remote branch R changes after a run resolves commit C
+- **THEN** that run's workspace remains at C and its readiness evidence cites C
+
+#### Scenario: Evidence names exact source
+
+- **WHEN** inspection of repository R succeeds at commit C
+- **THEN** the typed result contains `repository_id = R` and the complete SHA C
+
+### Requirement: Workspace cleanup covers every terminal path
+
+Normal workspaces SHALL be disposed after successful, failed, cancelled, and
+runtime-failure inspections. Cancellation SHALL await/stop the task before
+cleanup where possible. A cleanup failure SHALL make the directory unavailable
+for reuse and SHALL remain eligible for stale cleanup. Daemon startup MAY remove
+stale disposable workspaces, but SHALL scan only the dedicated disposable root
+and SHALL never delete reusable caches.
+
+#### Scenario: Restart removes stale disposable directories only
+
+- **WHEN** daemon startup finds an orphan under the known disposable-workspace root
+- **THEN** it may remove that orphan best-effort while leaving every reusable repository cache untouched
+
+#### Scenario: Cleanup failure is non-reuse
+
+- **WHEN** workspace removal fails after inspection
+- **THEN** the daemon reports the cleanup failure and never assigns that directory to another run
+
+### Requirement: Dirty-tree guard remains process-level
+
+The daemon SHALL retain read-class Git operations and the existing post-task
+dirty-tree check. Any unexpected working-tree change SHALL be treated as an
+inspection invariant violation, reported, and followed by workspace disposal.
+This guard SHALL be documented as process-level detection/response, not an
+OS/kernel sandbox or a guarantee that mutation was impossible.
+
+#### Scenario: Dirty checkout is discarded
+
+- **WHEN** a runtime leaves an unexpected change in its disposable checkout
+- **THEN** the daemon reports the violation, emits no successful inspection result or readiness citation from that checkout, and discards it rather than reusing it

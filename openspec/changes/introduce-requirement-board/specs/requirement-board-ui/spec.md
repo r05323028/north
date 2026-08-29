@@ -1,68 +1,116 @@
+# requirement-board-ui Specification
+
 ## Purpose
 
-Gives requesters fast orientation: a board for shape, a list for precision,
-and a two-field creation flow — all reflecting server truth live.
+Gives requesters fast orientation through a lifecycle board and precise lookup
+through a server-backed list, without making browser notifications a source of
+Requirement truth.
 
 ## ADDED Requirements
 
+### Requirement: Board and list use the existing collection API at 0.1 scale
+
+The board and list SHALL consume the current authenticated
+`GET /requirements` collection and SHALL use its existing `search`, `status`,
+`created_by`, and `sort` query parameters. North 0.1.0 defines no cursor,
+`limit`, `offset`, total-count, page-size, or virtualization contract for this
+surface. Cursor pagination and virtualization SHALL remain out of scope unless
+a separate change first defines them.
+
+#### Scenario: Query controls stay server-backed
+
+- **WHEN** a requester enters search text or selects status, creator, or updated sort
+- **THEN** the UI sends the corresponding supported query parameters and renders the returned collection without a client-side full-collection filter pass
+
+#### Scenario: No page-size promise is implied
+
+- **WHEN** the current collection grows within the single-instance 0.1 product scope
+- **THEN** the UI consumes the array returned by the existing endpoint and makes no claim that behavior is invariant under an undefined page size
+
 ### Requirement: Board groups by lifecycle state
 
-The board SHALL render one column per lifecycle state populated from server
-data, compact cards showing title/status/requester/updated, a create action,
-and card navigation to the detail view.
+The board SHALL render one fixed column for each Requirement lifecycle state:
+Draft, Discussing, Ready, Accepted, and Rejected. Cards SHALL be placed using
+the server-reported status and SHALL show at least title, status, requester,
+and updated time. A create action and navigation to the Requirement detail
+route SHALL be available.
 
 #### Scenario: Column placement matches server state
 
-- **WHEN** requirements hold mixed statuses
-- **THEN** each card appears under exactly its server-reported status column
+- **WHEN** the collection contains Requirements with mixed lifecycle statuses
+- **THEN** every returned Requirement appears in exactly the column matching its server status
 
-### Requirement: List supports search, filter, sort
+### Requirement: List supports server search, filters, and sorting
 
-The list SHALL provide text search, status and creator filters, sorting
-(updated default), and the same navigation — served by server-side query
-parameters rather than full client scans.
+The list SHALL expose text search, status and creator filters, and updated-time
+sorting with the existing server query contract. It SHALL render status and
+requester/ownership columns and navigate to the same detail route.
 
-#### Scenario: Filter narrows deterministically
+#### Scenario: Status filter narrows returned data
 
-- **WHEN** a user filters by status Ready
-- **THEN** only Ready requirements render regardless of page size or order of
-operations
+- **WHEN** a requester selects Ready
+- **THEN** the UI requests `status=ready` and renders only rows returned by the server for that query
 
-### Requirement: Creation is minimal
+### Requirement: Creation is minimal and canonical
 
-Creating a requirement SHALL require only title and description; the created
-Draft appears immediately without extra wizard steps.
+The creation flow SHALL require only title and description, submit through the
+existing create endpoint, and use the returned Requirement as canonical data.
+It SHALL navigate to the created Requirement without extra wizard steps or
+client-predicted lifecycle/version values.
 
-#### Scenario: Two fields to first Draft
+#### Scenario: Two fields reach a Draft
 
-- **WHEN** a requester submits title+description
-- **THEN** a Draft exists and the UI navigates to it
+- **WHEN** a requester submits valid title and description
+- **THEN** the server-created Draft is rendered/navigated to using its returned ID, status, revision, and state_version
 
-### Requirement: Browser transport stays HTTP/SSE
+### Requirement: Browser transport is HTTP plus notification-only SSE
 
-Board and list SHALL use HTTP requests plus SSE subscriptions for live
-updates. No WebSocket usage SHALL appear in frontend code (structural test
-enforced).
+Board and list SHALL use HTTP for canonical reads/mutations and the shared
+authenticated SSE endpoint for lightweight invalidation hints. The server-side
+SSE producer SHALL be the single producer owned by
+`introduce-agent-requirement-clarification`; this change SHALL not add another
+producer. The frontend SHALL never open a WebSocket.
 
-#### Scenario: Live status flip
+The invalidation path SHALL be:
 
-- **WHEN** another user's action changes a visible requirement's status
-- **THEN** open board views reflect the change via their SSE subscription
-without reload
+```text
+canonical north-server commit
+  -> SSE notification (requirement identity/category only)
+  -> GET /requirements refetch
+  -> render canonical response
+```
 
-### Requirement: SSE reconnect refetches canonical state
+#### Scenario: Canonical status change refreshes a board
 
-Board and list SSE payloads SHALL be lightweight notifications, not a durable
-state log. After disconnect, reload, or reconnect the UI SHALL refetch the
-canonical server API state. Missed or duplicate notifications SHALL be harmless;
-frontend code SHALL never open a WebSocket.
+- **WHEN** a server-side action changes a visible Requirement's status and emits a `requirement.changed` hint
+- **THEN** an open board/list refetches canonical HTTP data and reflects the returned status without applying the hint as a state patch
+
+### Requirement: Missed and duplicate hints are harmless
+
+SSE SHALL not be a durable browser event log, a Requirement state store, a
+WebSocket transport, or a required replay mechanism. After initial load,
+refocus, disconnect, or EventSource reconnect, board/list SHALL refetch
+`GET /requirements`. Missed, duplicated, delayed, or out-of-order hints SHALL
+never duplicate a Requirement row or lifecycle transition.
 
 #### Scenario: Missed update is repaired
 
-- **WHEN** the browser misses an SSE status hint while offline
-- **THEN** reconnect/refetch returns the current server state without replaying the entire stream
+- **WHEN** the browser misses a notification while offline
+- **THEN** reconnect/refocus HTTP refetch returns the current server collection without replaying stream history
 
 #### Scenario: Duplicate hint does not duplicate state
 
-- **WHEN** the same SSE hint arrives twice
-- **THEN** the UI performs at most a harmless refetch and never duplicates a Requirement transition or message
+- **WHEN** the same notification arrives twice
+- **THEN** the UI may coalesce or perform harmless repeated refetches, but it never duplicates a row or derives a second transition
+
+### Requirement: Board scope excludes unrelated product features
+
+The board/list change SHALL include only lifecycle board, list search/filter/sort,
+minimal creation, detail navigation, live notification refetch, and frontend
+test foundation. It SHALL not add labels, attachments, advanced prioritization,
+drag-and-drop lifecycle mutation, or unrelated administration.
+
+#### Scenario: Card actions do not mutate lifecycle by drag
+
+- **WHEN** a requester reorders or drags a card in the board
+- **THEN** no unrequested lifecycle mutation API is invoked; lifecycle changes remain server/domain operations outside this surface
