@@ -13,10 +13,15 @@ The server stores metadata only:
   bytes;
 - `created_at`, `updated_at`, and nullable `disabled_at` server timestamps.
 
-Normal Remove always means soft-disable. It sets `disabled_at` even when no
-readiness evidence references the row; repeating Remove is idempotent and does
-not delete the row. Admin/Owner can re-enable the same identity, which clears
-`disabled_at`. North 0.1.0 has no normal hard-delete repository operation.
+Normal Remove always means soft-disable. It sets `disabled_at` to the server's
+current UTC time and advances `updated_at` only when an enabled row changes.
+Repeating Remove on an already disabled row is a true idempotent no-op: both
+`disabled_at` and `updated_at` remain unchanged. Re-enable clears `disabled_at`
+on the same identity and advances `updated_at`; re-enable of an already-enabled
+row is a true no-op with `updated_at` unchanged. Create sets `created_at` and
+`updated_at` to now with `disabled_at = null`; metadata changes advance
+`updated_at`; `created_at` never changes. North 0.1.0 has no normal hard-delete
+repository operation.
 
 Repository names are unique after trimming and non-locale Unicode lowercase.
 Create conflicts with both enabled and disabled names; a disabled-name conflict
@@ -32,9 +37,14 @@ catalog metadata.
 
 Management list includes enabled and disabled rows, status, and current metadata
 for Settings lifecycle controls. Active runtime catalog contains only rows with
-`disabled_at IS NULL`; it supplies enabled metadata for new session context and
-inspection candidates. Disabled rows remain visible to authorized management
-and historical reads even though active selection excludes them.
+`disabled_at IS NULL`; it is an internal server/persistence read used for
+server-assembled `session.start` context and downstream inspection candidates.
+The daemon receives relevant enabled metadata through `session.start` and does
+not independently fetch a repository catalog. North 0.1.0 creates no public
+browser catalog-management or standalone daemon-catalog endpoint merely because
+this internal read is called a catalog. Disabled rows remain visible to
+authorized management and historical reads even though active selection
+excludes them.
 
 ## URL validation and credentials
 
@@ -48,11 +58,16 @@ git@<host>:<non-empty path>
 ```
 
 HTTPS userinfo, every URL password, and SSH/SCP users other than literal `git`
-are rejected. These examples are invalid:
+are rejected. North 0.1 deliberately supports only the standard literal `git`
+SSH/SCP transport username, even if a host could clone a URL using another
+username; this is an explicit 0.1 product URL policy, not a claim that every
+host-Git-valid username is a secret. These examples are invalid:
 
 ```text
 https://user:password@example.com/repo.git
 https://token@example.com/org/repo.git
+deploy@git.internal:repo.git
+ssh://source@git.internal/repo.git
 ```
 
 Normal SSH identity syntax remains valid:
@@ -71,11 +86,34 @@ URL shape validation does not test access; inspection owns host-Git errors.
 ## Historical identity
 
 Readiness evidence retains `repository_id` and the full resolved commit SHA.
-Disabling retains the row and current name/description/URL, so historical joins
-remain human-readable without active-catalog membership. Name or description
-changes affect current display only; they never change repository ID, immutable
-URL, or recorded SHA. Replacing a source means disable the old row and create a
-new identity.
+The cited identity MUST resolve to a retained durable configured-repository row;
+unknown IDs are rejected before accepted evidence. Disabling retains the row and
+current name/description/URL, so historical joins remain human-readable without
+active-catalog membership. URL is immutable in 0.1 and keeps source identity
+stable. Name or description changes affect current display only; they do not
+create historical metadata snapshots and never change repository ID, immutable
+URL, or recorded SHA. Disabling does not alter evidence; re-enable returns the
+same identity. An in-flight citation may remain valid after disable when it was
+included in the session context or explicitly inspected under that authorized
+run; new inspection selection still requires enabled state.
+
+## Readiness citations and disable races
+
+`introduce-configured-repositories` owns durable repository identity, row
+existence, and lifecycle. Readiness owns whether evidence is acceptable for a
+Requirement. `introduce-local-repository-inspection` owns source inspection and
+exact commit-SHA production. `north-protocol` carries `repository_id` and
+`commit_sha` as typed facts and validates only structurally non-empty values; it
+never accesses repository persistence.
+
+A new inspection may select only an enabled row. If `session.start` supplied R
+while enabled, inspection began, and an Admin then disabled R, a later
+assessment remains eligible to cite R and its exact SHA: the retained row must
+exist and the citation must be valid for that session/run. Disable prevents
+future selection; it does not invalidate legitimate in-flight historical
+evidence solely because lifecycle state changed.
+No new provenance subsystem is introduced; existing session context and
+inspection-result contracts provide the run binding.
 
 ## Workspace boundary
 

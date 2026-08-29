@@ -9,7 +9,7 @@ checks, never replacements.
 | --- | --- |
 | `pr-title` | PR title must be a Conventional Commit (squash-merge makes it the canonical subject on `main`) |
 | `rust` | fmt --check · clippy `-D warnings` · unit tests + architecture checks |
-| `daemon-integration` | PostgreSQL-backed requirements, conversations, readiness, and daemon lifecycle integration tests |
+| `daemon-integration` | PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository, and durable protocol integration tests |
 | `web` | lint · typecheck · production build (`apps/web`) |
 | `openspec` | `openspec validate --all --strict` |
 | `gate` | succeeds only when all required jobs succeed |

@@ -10,6 +10,7 @@
 //! - role and permission rules ([`role`]).
 
 pub mod readiness;
+pub mod repository;
 pub mod requirement;
 pub mod role;
 pub mod status;

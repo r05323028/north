@@ -14,18 +14,20 @@ server at startup.
 Migrations 0003–0005 implement requirements and transition audit,
 one-to-one conversations/messages, and immutable revision-bound readiness
 evidence. Migration 0010 adds positive `requirements.state_version` with a
-backfill of 1 for existing rows. Migration 0011 records the accepted assessment Ready-generation identity,
-marks unverifiable legacy generations as unknown, and replaces the evidence
-foreign-key cascade with restrictive deletion. `accepted_state_version` equals
-`requirements.state_version` only while that Requirement remains Ready and
-reviewable; later review transitions advance the Requirement without mutating
-historical evidence. Migrations 0007–0009 implement the daemon
-registration/setup-request, verification-attempt, execution-session/outbox
-records, and requirement binding used to authorize assessment events. Readiness evidence
-rows are append-only; a database trigger rejects direct updates/deletes, and
-migration 0011 makes Requirement deletion restrictive so evidence never changes
-via an `ON DELETE SET NULL` cascade. Requirements with readiness evidence must
-be retained (or receive a future tombstone design).
+backfill of 1 for existing rows. Migration 0011 records the accepted assessment
+Ready-generation identity, marks unverifiable legacy generations as unknown, and
+replaces the evidence foreign-key cascade with restrictive deletion.
+`accepted_state_version` equals `requirements.state_version` only while that
+Requirement remains Ready and reviewable; later review transitions advance the
+Requirement without mutating historical evidence. Migrations 0007–0009
+implement daemon registration/setup-request, execution-session/outbox records,
+and requirement binding used to authorize assessment events. Migration 0013
+adds immutable outbox payload fingerprints, command/event contiguous
+watermarks, and durable server event identity/outcome records. Readiness
+evidence rows are append-only; database triggers reject direct mutation of
+evidence, repository source identity, and command outbox payloads. Requirement
+delete is restrictive so evidence never changes via a cascade. Requirements
+with readiness evidence must be retained (or receive a future tombstone design).
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.
 The server updates liveness only for the authenticated connection identity;
@@ -40,8 +42,11 @@ bounded batches using an expiry index when setup requests are created or polled.
 
 The daemon also keeps a local transport journal for command inbox and event
 replay. That journal is not server business state, not `north-persistence`, and
-not a second database authority. Its processed-command high-water tombstone is
-retained for the durable session and is not expired by time alone in 0.1.0.
+not a second database authority. Its command `terminal` state records the local
+processing/dispatch outcome of one command, not execution-session completion;
+`session.completed`/`session.failed` events report session outcome separately.
+Its processed-command high-water tombstone is retained for the durable session
+and is not expired by time alone in 0.1.0.
 
 Invariants:
 
@@ -49,20 +54,27 @@ Invariants:
   execution policy state.
 - TTL/GC deletes only ephemeral records; retention window is configuration.
 - Server command outbox rows are inserted before dispatch and remain eligible
-  for resend until `command_ack` is durably recorded. The current foundation
-  serializes the complete command envelope once and dispatches that persisted
-  representation; durable resend and ACK processing remain future work.
+  for resend until `command_ack` is durably recorded. The immutable complete
+  envelope, payload digest, ACK processor, contiguous watermark, and ascending
+  reconnect resend are server-owned persistence behavior. The daemon's local
+  Journal retains command/event identity and replay state outside this database.
 - `revision` identifies canonical structured content; `state_version` identifies
   mutable Requirement state. Existing-row mutations atomically compare
   `expected_state_version`; real mutations increment state_version once, while
   content edits increment revision too. Stale callers receive a conflict with
   no side effects.
-- `requirement.assessed` continues matching `requirement_revision`, while
-  dedupe, domain gates, immutable evidence, successful state-version lifecycle
-  transition, and resulting row update share one transaction. Event identity or
-  sequence conflicts are protocol errors without an ACK; well-formed
-  invalid/stale facts commit a durable rejection record before
-  `event_ack(status=rejected)`.
+- `requirement.assessed` validates event identity, session binding, directional
+  sequence identity, and `requirement_revision` against the current Requirement
+  revision before running readiness gates. Accepted evidence creates/binds
+  `assessment_id` and records the resulting Ready-generation
+  `accepted_state_version`; neither is an inbound assessment concurrency token.
+  Dedupe, repository citation existence/provenance, domain gates, immutable
+  evidence, successful state-version lifecycle transition, and resulting row
+  update share one transaction. Event identity or sequence conflicts are
+  protocol errors without an ACK; well-formed invalid/stale facts commit a
+  durable rejection record before `event_ack(status=rejected)`. Review actions
+  use `assessment_id`, `expected_state_version`, and the exact current Ready
+  generation.
 
 ## First-owner bootstrap
 
@@ -88,17 +100,34 @@ editable `name`, persistence-only normalized name key, immutable-after-create
 URL, editable `description`, timestamps, and nullable `disabled_at`. The
 normalized name is unique across enabled and disabled rows. Server validation
 bounds/trims metadata and rejects HTTPS userinfo, URL passwords, and SSH/SCP
-users other than literal `git`; daemon-host Git configuration remains the
+users other than literal `git`; North 0.1 intentionally chooses this standard
+literal-`git` username policy. Daemon-host Git configuration remains the
 credential boundary.
 
-Normal Remove always sets `disabled_at`, including for an unreferenced row, and
-never hard-deletes it. Re-enable clears `disabled_at` on the same identity.
-Management reads include enabled and disabled rows for Admin/Owner; new
-inspection/session catalogs include only `disabled_at IS NULL`, with
-`name_normalized ASC, id ASC` ordering. Readiness evidence retains repository
-ID and exact full commit SHA, so historical metadata remains human-readable
-without active-catalog membership. URL replacement requires disable-old/create-
-new to keep repository identity stable.
+Create sets `created_at = now`, `updated_at = now`, and `disabled_at = null`.
+Metadata changes advance `updated_at`; `created_at` never changes. Disabling an
+enabled row sets `disabled_at = now` and advances `updated_at`. Disabling an
+already-disabled row is an idempotent no-op that leaves both timestamps
+unchanged. Re-enable clears `disabled_at` on the same identity and advances
+`updated_at`; re-enable of an already-enabled row is an idempotent no-op with
+`updated_at` unchanged.
+
+Normal Remove always soft-disables, including an unreferenced row, and never
+hard-deletes it. Management reads include enabled and disabled rows for
+Admin/Owner. The active catalog is an internal server/persistence read for
+server-assembled session context and downstream inspection, includes only
+`disabled_at IS NULL`, and is not an independent daemon catalog endpoint.
+Both reads use `name_normalized ASC, id ASC` ordering.
+
+Readiness evidence retains `repository_id` and exact full commit SHA, and every
+cited ID must resolve to an existing durable row before accepted evidence or
+promotion. Unknown IDs are durably rejected without fabricating a repository.
+A citation from an in-flight run remains eligible after disable when the row is
+retained and the ID/SHA was valid for the existing session context or authorized
+inspection result; only new inspection selection requires enabled state. URL
+replacement requires disable-old/create-new to keep repository identity stable.
+Historical UI uses retained current metadata; name/description snapshots are not
+claimed, and disabling/re-enabling does not alter prior evidence.
 
 ## Ownership mapping
 

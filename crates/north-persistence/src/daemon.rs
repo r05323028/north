@@ -58,6 +58,7 @@ pub struct DaemonSessionState {
     pub session_id: String,
     pub command_ack_through_seq: u64,
     pub event_ack_through_seq: u64,
+    pub event_ack_sparse: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,9 @@ pub struct PinnedCommand {
     pub daemon_id: String,
     pub server_command_seq: u64,
     pub payload: String,
+    pub payload_digest: String,
+    pub command_identity_digest: String,
+    pub compacted: bool,
 }
 
 impl AuthStore {
@@ -437,16 +441,11 @@ impl AuthStore {
     ) -> Result<Vec<DaemonSessionState>, PersistenceError> {
         let rows = sqlx::query_as::<_, SessionReconcileRow>(
             "SELECT execution_sessions.id AS session_id,
-                    COALESCE(
-                        MAX(server_command_outbox.server_command_seq)
-                            FILTER (WHERE server_command_outbox.acknowledged_at IS NOT NULL),
-                        0
-                    ) AS command_ack_through_seq
+                    execution_sessions.command_ack_through_seq,
+                    execution_sessions.event_ack_through_seq,
+                    execution_sessions.event_ack_sparse
              FROM execution_sessions
-             LEFT JOIN server_command_outbox
-               ON server_command_outbox.session_id = execution_sessions.id
              WHERE execution_sessions.daemon_id = $1
-             GROUP BY execution_sessions.id
              ORDER BY execution_sessions.id ASC",
         )
         .bind(daemon_id)
@@ -454,14 +453,74 @@ impl AuthStore {
         .await?;
         rows.into_iter()
             .map(|row| {
+                let event_ack_sparse = row
+                    .event_ack_sparse
+                    .into_iter()
+                    .map(|sequence| {
+                        u64::try_from(sequence).map_err(|_| PersistenceError::InvalidSessionState)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(DaemonSessionState {
                     session_id: row.session_id,
                     command_ack_through_seq: u64::try_from(row.command_ack_through_seq)
                         .map_err(|_| PersistenceError::InvalidSessionState)?,
-                    event_ack_through_seq: 0,
+                    event_ack_through_seq: u64::try_from(row.event_ack_through_seq)
+                        .map_err(|_| PersistenceError::InvalidSessionState)?,
+                    event_ack_sparse,
                 })
             })
             .collect()
+    }
+
+    pub async fn command_by_id(
+        &self,
+        command_id: &str,
+    ) -> Result<Option<PinnedCommand>, PersistenceError> {
+        let outbox = sqlx::query_as::<_, ExistingCommandRow>(
+            "SELECT command_id, session_id, daemon_id, server_command_seq, payload,
+                    payload_digest, command_identity_digest, FALSE AS compacted
+             FROM server_command_outbox
+             WHERE command_id = $1",
+        )
+        .bind(command_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(command) = outbox {
+            return command.into_pinned_command().map(Some);
+        }
+        sqlx::query_as::<_, ExistingCommandRow>(
+            "SELECT command_id, session_id, daemon_id, server_command_seq,
+                    payload, payload_digest, command_identity_digest,
+                    TRUE AS compacted
+             FROM server_command_tombstones
+             WHERE command_id = $1",
+        )
+        .bind(command_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(ExistingCommandRow::into_pinned_command)
+        .transpose()
+    }
+
+    pub async fn message_command_matches(
+        &self,
+        session_id: &str,
+        command_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<bool, PersistenceError> {
+        let mapping: Option<(String, String)> = sqlx::query_as(
+            "SELECT command_id, content_digest
+             FROM server_message_command_map
+             WHERE session_id = $1 AND message_id = $2",
+        )
+        .bind(session_id)
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(mapping.is_some_and(|(mapped_command, digest)| {
+            mapped_command == command_id && digest == crate::payload_digest(content)
+        }))
     }
 
     pub async fn session_owner(
@@ -469,7 +528,9 @@ impl AuthStore {
         session_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
         let row = sqlx::query_as::<_, SessionOwnerRow>(
-            "SELECT daemon_id, requirement_id FROM execution_sessions WHERE id = $1",
+            "SELECT daemon_id, requirement_id, repository_ids,
+                    repository_context_initialized
+             FROM execution_sessions WHERE id = $1",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)
@@ -500,10 +561,11 @@ impl AuthStore {
     where
         F: FnOnce(&str, u64) -> Result<String, PersistenceError> + Send,
     {
-        self.start_session_with_command_for_requirement(
+        self.start_session_with_command_for_requirement_and_repositories(
             session_id,
             command_id,
             required_capabilities,
+            None,
             None,
             build_payload,
         )
@@ -521,9 +583,94 @@ impl AuthStore {
     where
         F: FnOnce(&str, u64) -> Result<String, PersistenceError> + Send,
     {
+        self.start_session_with_command_for_requirement_and_repositories(
+            session_id,
+            command_id,
+            required_capabilities,
+            requirement_id,
+            None,
+            build_payload,
+        )
+        .await
+    }
+
+    pub async fn start_session_with_command_for_requirement_and_repositories<F>(
+        &self,
+        session_id: &str,
+        command_id: &str,
+        required_capabilities: &[String],
+        requirement_id: Option<&str>,
+        repository_ids: Option<&[String]>,
+        build_payload: F,
+    ) -> Result<PinnedCommand, PersistenceError>
+    where
+        F: FnOnce(&str, u64) -> Result<String, PersistenceError> + Send,
+    {
+        let repository_context_initialized = repository_ids.is_some();
+        let repository_ids = repository_ids.unwrap_or(&[]);
         let mut transaction = self.pool.begin().await?;
+        let mut build_payload = Some(build_payload);
+        let existing_command = if let Some(row) = sqlx::query_as::<_, ExistingCommandRow>(
+            "SELECT command_id, session_id, daemon_id, server_command_seq, payload, payload_digest,
+                    command_identity_digest, FALSE AS compacted
+             FROM server_command_outbox
+             WHERE command_id = $1
+             FOR UPDATE",
+        )
+        .bind(command_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            Some(row)
+        } else {
+            sqlx::query_as::<_, ExistingCommandRow>(
+                "SELECT command_id, session_id, daemon_id, server_command_seq,
+                        payload, payload_digest, command_identity_digest,
+                        TRUE AS compacted
+                 FROM server_command_tombstones
+                 WHERE command_id = $1
+                 FOR UPDATE",
+            )
+            .bind(command_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+        };
+        if let Some(existing_command) = existing_command {
+            if existing_command.session_id != session_id {
+                return Err(PersistenceError::ProtocolIntegrity(
+                    "command ID is already bound to another session".into(),
+                ));
+            }
+            let builder = build_payload
+                .take()
+                .ok_or(PersistenceError::InvalidCommandPayload)?;
+            let candidate = builder(
+                &existing_command.daemon_id,
+                u64::try_from(existing_command.server_command_seq)
+                    .map_err(|_| PersistenceError::InvalidSessionState)?,
+            )?;
+            let identity_matches = match existing_command.payload.as_deref() {
+                Some(existing_payload) => crate::command_identity_matches(
+                    existing_payload,
+                    &candidate,
+                    &existing_command.command_identity_digest,
+                ),
+                None => {
+                    crate::command_identity_digest(&candidate)
+                        == existing_command.command_identity_digest
+                }
+            };
+            if !identity_matches {
+                return Err(PersistenceError::ProtocolIntegrity(
+                    "command ID is already bound to a different payload".into(),
+                ));
+            }
+            transaction.commit().await?;
+            return existing_command.into_pinned_command();
+        }
         let existing = sqlx::query_as::<_, SessionOwnerRow>(
-            "SELECT daemon_id, requirement_id
+            "SELECT daemon_id, requirement_id, repository_ids,
+                    repository_context_initialized
              FROM execution_sessions
              WHERE id = $1
              FOR UPDATE",
@@ -540,6 +687,25 @@ impl AuthStore {
                 .is_some_and(|(bound, requested)| bound != requested)
             {
                 return Err(PersistenceError::SessionRequirementMismatch);
+            }
+            if repository_context_initialized && !existing.repository_context_initialized {
+                validate_active_repository_ids(&mut transaction, repository_ids).await?;
+                sqlx::query(
+                    "UPDATE execution_sessions
+                     SET repository_ids = $2, repository_context_initialized = TRUE
+                     WHERE id = $1",
+                )
+                .bind(session_id)
+                .bind(repository_ids)
+                .execute(&mut *transaction)
+                .await?;
+            } else if repository_context_initialized
+                && existing.repository_context_initialized
+                && existing.repository_ids != repository_ids
+            {
+                return Err(PersistenceError::ProtocolIntegrity(
+                    "session repository context cannot be retargeted".into(),
+                ));
             }
             if let Some(requirement_id) =
                 requirement_id.filter(|_| existing.requirement_id.is_none())
@@ -567,40 +733,88 @@ impl AuthStore {
                 daemon_id
             }
         } else {
+            validate_active_repository_ids(&mut transaction, repository_ids).await?;
             let daemon_id = choose_eligible_daemon(&mut transaction, required_capabilities).await?;
             sqlx::query(
-                "INSERT INTO execution_sessions (id, daemon_id, requirement_id)
-                 VALUES ($1, $2, $3)",
+                "INSERT INTO execution_sessions
+                    (id, daemon_id, requirement_id, repository_ids,
+                     repository_context_initialized)
+                 VALUES ($1, $2, $3, $4, $5)",
             )
             .bind(session_id)
             .bind(&daemon_id)
             .bind(requirement_id)
+            .bind(repository_ids)
+            .bind(repository_context_initialized)
             .execute(&mut *transaction)
             .await?;
             daemon_id
         };
 
         let next_sequence: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(server_command_seq), 0) + 1
-             FROM server_command_outbox
-             WHERE session_id = $1",
+            "SELECT GREATEST(
+                    COALESCE((SELECT MAX(server_command_seq)
+                             FROM server_command_outbox WHERE session_id = $1), 0),
+                    COALESCE((SELECT MAX(server_command_seq)
+                             FROM server_command_tombstones WHERE session_id = $1), 0),
+                    (SELECT command_ack_through_seq FROM execution_sessions WHERE id = $1)
+                 ) + 1",
         )
         .bind(session_id)
         .fetch_one(&mut *transaction)
         .await?;
         let server_command_seq =
             u64::try_from(next_sequence).map_err(|_| PersistenceError::InvalidSessionState)?;
-        let payload = build_payload(&daemon_id, server_command_seq)?;
+        let builder = build_payload
+            .take()
+            .ok_or(PersistenceError::InvalidCommandPayload)?;
+        let payload = builder(&daemon_id, server_command_seq)?;
+        let payload_digest = crate::payload_digest(&payload);
+        let command_identity_digest = crate::command_identity_digest(&payload);
+        if let Some((message_id, content_digest)) = message_identity(&payload) {
+            let inserted = sqlx::query(
+                "INSERT INTO server_message_command_map
+                    (session_id, message_id, command_id, content_digest)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(session_id)
+            .bind(&message_id)
+            .bind(command_id)
+            .bind(&content_digest)
+            .execute(&mut *transaction)
+            .await?;
+            if inserted.rows_affected() == 0 {
+                let existing: (String, String) = sqlx::query_as(
+                    "SELECT command_id, content_digest
+                     FROM server_message_command_map
+                     WHERE session_id = $1 AND message_id = $2
+                     FOR UPDATE",
+                )
+                .bind(session_id)
+                .bind(&message_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+                if existing.0 != command_id || existing.1 != content_digest {
+                    return Err(PersistenceError::ProtocolIntegrity(
+                        "message ID is already bound to another command".into(),
+                    ));
+                }
+            }
+        }
         sqlx::query(
             "INSERT INTO server_command_outbox
-                (command_id, session_id, daemon_id, server_command_seq, payload)
-             VALUES ($1, $2, $3, $4, $5)",
+                (command_id, session_id, daemon_id, server_command_seq, payload,
+                 payload_digest, command_identity_digest)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(command_id)
         .bind(session_id)
         .bind(&daemon_id)
         .bind(next_sequence)
         .bind(&payload)
+        .bind(&payload_digest)
+        .bind(&command_identity_digest)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -610,8 +824,45 @@ impl AuthStore {
             daemon_id,
             server_command_seq,
             payload,
+            payload_digest,
+            command_identity_digest,
+            compacted: false,
         })
     }
+}
+
+fn message_identity(payload: &str) -> Option<(String, String)> {
+    let value = serde_json::from_str::<serde_json::Value>(payload).ok()?;
+    let command = value.get("payload")?.get("command")?;
+    if command.get("type")?.as_str()? != "message.send" {
+        return None;
+    }
+    let command_payload = command.get("payload")?;
+    let message_id = command_payload.get("message_id")?.as_str()?.to_owned();
+    let content = command_payload.get("content")?.as_str()?;
+    (!message_id.trim().is_empty() && !content.trim().is_empty())
+        .then(|| (message_id, crate::payload_digest(content)))
+}
+
+async fn validate_active_repository_ids(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    repository_ids: &[String],
+) -> Result<(), PersistenceError> {
+    for repository_id in repository_ids {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM repositories
+                 WHERE id = $1 AND disabled_at IS NULL
+             )",
+        )
+        .bind(repository_id)
+        .fetch_one(&mut **transaction)
+        .await?;
+        if !exists {
+            return Err(PersistenceError::RepositoryNotFound);
+        }
+    }
+    Ok(())
 }
 
 async fn choose_eligible_daemon(
@@ -718,12 +969,53 @@ struct ConnectionIdRow {
 struct SessionReconcileRow {
     session_id: String,
     command_ack_through_seq: i64,
+    event_ack_through_seq: i64,
+    event_ack_sparse: Vec<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct ExistingCommandRow {
+    command_id: String,
+    session_id: String,
+    daemon_id: String,
+    server_command_seq: i64,
+    payload: Option<String>,
+    payload_digest: String,
+    command_identity_digest: String,
+    compacted: bool,
+}
+
+impl ExistingCommandRow {
+    fn into_pinned_command(self) -> Result<PinnedCommand, PersistenceError> {
+        let payload = self.payload.unwrap_or_default();
+        if !self.compacted
+            && (crate::payload_digest(&payload) != self.payload_digest
+                || !crate::command_identity_digest_valid(&payload, &self.command_identity_digest))
+        {
+            return Err(PersistenceError::ProtocolIntegrity(
+                "command outbox payload digest mismatch".into(),
+            ));
+        }
+        Ok(PinnedCommand {
+            command_id: self.command_id,
+            session_id: self.session_id,
+            daemon_id: self.daemon_id,
+            server_command_seq: u64::try_from(self.server_command_seq)
+                .map_err(|_| PersistenceError::InvalidSessionState)?,
+            payload,
+            payload_digest: self.payload_digest,
+            command_identity_digest: self.command_identity_digest,
+            compacted: self.compacted,
+        })
+    }
 }
 
 #[derive(Debug, FromRow)]
 struct SessionOwnerRow {
     daemon_id: Option<String>,
     requirement_id: Option<String>,
+    repository_ids: Vec<String>,
+    repository_context_initialized: bool,
 }
 
 #[derive(Debug, FromRow)]

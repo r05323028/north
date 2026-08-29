@@ -141,7 +141,7 @@ async fn legacy_readiness_upgrade_backfills_generations_conservatively() {
         .expect("set isolated migration search path");
 
     // Test-only helper: execute the same migration SQL used by the production
-    // sqlx migrator. Legacy readiness fixtures are inserted after 0005, before
+    // sqlx migrator. Legacy readiness fixtures are inserted after 0006, before
     // runtime and state/readiness upgrade migrations run.
     for (name, sql) in [
         (
@@ -177,6 +177,13 @@ async fn legacy_readiness_upgrade_backfills_generations_conservatively() {
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../migrations/0005_readiness_assessments.sql"
+            )),
+        ),
+        (
+            "0006_repositories",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../migrations/0006_repositories.sql"
             )),
         ),
     ] {
@@ -291,6 +298,45 @@ async fn legacy_readiness_upgrade_backfills_generations_conservatively() {
     )
     .await;
 
+    let legacy_gap_requirement = unique("legacy-gap-requirement");
+    let legacy_gap_first = unique("legacy-gap-first");
+    let legacy_gap_third = unique("legacy-gap-third");
+    insert_requirement(
+        &mut connection,
+        &legacy_gap_requirement,
+        &user_id,
+        "Discussing",
+        1,
+    )
+    .await;
+    insert_assessment(
+        &mut connection,
+        &legacy_gap_first,
+        &legacy_gap_requirement,
+        1,
+        1,
+        "needs_clarification",
+        "rejected",
+        Some("first legacy gap fixture"),
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO readiness_assessments (
+             id, event_id, session_id, daemon_event_seq, event_requirement_id,
+             requirement_id, requirement_revision, verdict, blockers, assumptions,
+             repositories_reviewed, outcome, rejection_reason, assessed_at_ms
+         ) VALUES ($1, $2, $3, 3, $4, $4, 1, 'needs_clarification',
+                   ARRAY[]::TEXT[], ARRAY[]::TEXT[], '[]'::jsonb,
+                   'rejected', 'third legacy gap fixture', 0)",
+    )
+    .bind(&legacy_gap_third)
+    .bind(format!("event-{legacy_gap_third}"))
+    .bind(format!("session-{legacy_gap_first}"))
+    .bind(&legacy_gap_requirement)
+    .execute(&mut connection)
+    .await
+    .expect("insert sparse legacy assessment");
+
     for (name, sql) in [
         (
             "0007_daemon_runtime",
@@ -317,6 +363,22 @@ async fn legacy_readiness_upgrade_backfills_generations_conservatively() {
         apply_migration(&mut connection, name, sql).await;
     }
 
+    let legacy_gap_session = format!("session-{legacy_gap_first}");
+    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+        .bind(&legacy_gap_session)
+        .bind(&legacy_gap_requirement)
+        .execute(&mut connection)
+        .await
+        .expect("insert sparse legacy session");
+
+    let legacy_assessment_session = format!("session-{assessment_a}");
+    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+        .bind(&legacy_assessment_session)
+        .bind(&requirement_a)
+        .execute(&mut connection)
+        .await
+        .expect("insert legacy assessment session");
+
     apply_migration(
         &mut connection,
         "0010_requirement_state_version",
@@ -335,6 +397,103 @@ async fn legacy_readiness_upgrade_backfills_generations_conservatively() {
         )),
     )
     .await;
+    apply_migration(
+        &mut connection,
+        "0012_transition_audit_provenance",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/0012_transition_audit_provenance.sql"
+        )),
+    )
+    .await;
+
+    let legacy_daemon = unique("legacy-delivery-daemon");
+    let legacy_session = unique("legacy-delivery-session");
+    let legacy_command = unique("legacy-delivery-command");
+    let legacy_payload = r#"{"frame":"command","payload":{"command_id":"legacy-command","session_id":"legacy-session","server_command_seq":1,"sent_at":"2026-01-01T00:00:00Z","schema_version":1,"command":{"type":"session.resume","payload":{}}}}"#;
+    sqlx::query(
+        "INSERT INTO daemon_registrations
+            (daemon_id, credential_hash, label, created_by, protocol_version, capabilities)
+         VALUES ($1, $2, $3, $4, '0.1', '[]')",
+    )
+    .bind(&legacy_daemon)
+    .bind(legacy_daemon.as_bytes())
+    .bind(&legacy_daemon)
+    .bind(&user_id)
+    .execute(&mut connection)
+    .await
+    .expect("insert legacy daemon");
+    sqlx::query("INSERT INTO execution_sessions (id, daemon_id) VALUES ($1, $2)")
+        .bind(&legacy_session)
+        .bind(&legacy_daemon)
+        .execute(&mut connection)
+        .await
+        .expect("insert legacy session");
+    sqlx::query(
+        "INSERT INTO server_command_outbox
+            (command_id, session_id, daemon_id, server_command_seq, payload, acknowledged_at)
+         VALUES ($1, $2, $3, 1, $4, CURRENT_TIMESTAMP)",
+    )
+    .bind(&legacy_command)
+    .bind(&legacy_session)
+    .bind(&legacy_daemon)
+    .bind(legacy_payload)
+    .execute(&mut connection)
+    .await
+    .expect("insert legacy outbox");
+
+    apply_migration(
+        &mut connection,
+        "0013_protocol_delivery",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/0013_protocol_delivery.sql"
+        )),
+    )
+    .await;
+
+    let legacy_watermark: i64 =
+        sqlx::query_scalar("SELECT command_ack_through_seq FROM execution_sessions WHERE id = $1")
+            .bind(&legacy_session)
+            .fetch_one(&mut connection)
+            .await
+            .expect("read legacy command watermark");
+    assert_eq!(legacy_watermark, 1);
+    let (payload_digest, identity_digest): (String, String) = sqlx::query_as(
+        "SELECT payload_digest, command_identity_digest
+         FROM server_command_outbox WHERE command_id = $1",
+    )
+    .bind(&legacy_command)
+    .fetch_one(&mut connection)
+    .await
+    .expect("read legacy command digests");
+    let expected_digest: String =
+        sqlx::query_scalar("SELECT MD5(payload) FROM server_command_outbox WHERE command_id = $1")
+            .bind(&legacy_command)
+            .fetch_one(&mut connection)
+            .await
+            .expect("compute legacy payload digest");
+    assert_eq!(payload_digest, expected_digest);
+    assert_eq!(identity_digest, expected_digest);
+    let legacy_event_watermark: i64 = sqlx::query_scalar(
+        "SELECT event_ack_through_seq
+         FROM execution_sessions WHERE id = $1",
+    )
+    .bind(&legacy_assessment_session)
+    .fetch_one(&mut connection)
+    .await
+    .expect("read legacy event watermark");
+    assert_eq!(legacy_event_watermark, 1);
+    let (legacy_gap_watermark, legacy_gap_sparse): (i64, Vec<i64>) = sqlx::query_as(
+        "SELECT event_ack_through_seq, event_ack_sparse
+         FROM execution_sessions WHERE id = $1",
+    )
+    .bind(&legacy_gap_session)
+    .fetch_one(&mut connection)
+    .await
+    .expect("read sparse legacy watermark");
+    assert_eq!(legacy_gap_watermark, 1);
+    assert_eq!(legacy_gap_sparse, vec![3]);
 
     // 0011's controlled backfill chooses only unambiguous current Ready evidence.
     assert_eq!(

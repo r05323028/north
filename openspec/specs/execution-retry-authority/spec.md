@@ -30,15 +30,30 @@ frame replay, heartbeat, or local runtime transport recovery.
 
 The daemon MAY reconnect its WebSocket with backoff, replay buffered events,
 reattach a local runtime transport when instructed, and report recoverability or
-failure facts. It MUST NOT own a separate business retry budget, decide
-permanent execution failure, or mutate Requirement lifecycle state. A daemon
-`session.failed` frame is a fact report, not an authoritative server state
-transition.
+failure facts. `session.failed.recoverable` means only whether the existing
+runtime operation can be safely resumed or reattached by daemon-local mechanics:
+`true` means local recovery is believed possible; `false` means it is not. It
+does not mean the server is forbidden from issuing a future explicit attempt and
+does not authorize the daemon to decide authoritative execution failure. The
+daemon MUST NOT own a separate business retry budget, decide permanent execution
+failure, or mutate Requirement lifecycle state. A daemon `session.failed` frame
+is a fact report, not an authoritative server state transition. For
+`execution_outcome_unknown`, automatic daemon resubmission is forbidden; any
+later attempt is explicitly server-directed, uses a new command identity, and
+follows server retry policy.
 
 #### Scenario: Socket backoff is not a business attempt
 
 - **WHEN** the daemon performs five WebSocket reconnects before one successful resume
 - **THEN** the server attempt count increases only for the server-directed resume attempt
+
+#### Scenario: Recoverability does not decide retry
+
+- **WHEN** the daemon reports `session.failed` with either
+  `recoverable: true` or `recoverable: false`
+- **THEN** the server treats that value as a local recovery fact and alone
+  decides whether to issue a new `session.resume`/`session.start` command or
+  mark execution Failed; an unknown outcome is never automatically resubmitted
 
 #### Scenario: Failure fact leaves business state alone
 

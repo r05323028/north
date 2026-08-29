@@ -22,11 +22,11 @@ rust_fast() {
 }
 
 web_lint_tc() {
-  (cd apps/web && npm run lint && npm run typecheck)
+  (cd apps/web && npm run lint && npm run typecheck && npm run check:repository-settings)
 }
 
 web_full() {
-  (cd apps/web && npm run lint && npm run typecheck && npm run build)
+  (cd apps/web && npm run lint && npm run typecheck && npm run check:repository-settings && npm run build)
 }
 
 rust_full() {
@@ -48,6 +48,8 @@ database_integration() {
   cargo test -p north-server --test conversations_readiness -- --ignored
   cargo test -p north-server --test daemon_runtime -- --ignored
   cargo test -p north-server --test migration_upgrade -- --ignored
+  cargo test -p north-server --test repositories -- --ignored
+  cargo test -p north-server --test protocol_delivery -- --ignored
   cargo test -p north-transport-integration --test websocket
 }
 

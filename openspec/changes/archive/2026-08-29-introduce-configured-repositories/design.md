@@ -33,6 +33,19 @@ migration has no credential, token, password, secret, SSH-key, or
 credential-helper column. Row deletion is not part of the normal 0.1.0
 management API; the retained row is the historical identity.
 
+Lifecycle timestamp semantics are explicit:
+
+- create sets `created_at = now`, `updated_at = now`, and `disabled_at = null`;
+- a successful name/description metadata change advances `updated_at`;
+- disabling an enabled row sets `disabled_at = now` and advances `updated_at`;
+- disabling an already-disabled row is a true idempotent no-op, preserving both
+  `disabled_at` and `updated_at`;
+- re-enabling a disabled row clears `disabled_at` and advances `updated_at`;
+- re-enabling an already-enabled row is a true idempotent no-op, preserving
+  `updated_at`.
+
+`created_at` never changes. All timestamps are server-generated UTC values.
+
 ### Normalization and validation
 
 Validation happens at the server boundary before persistence and is repeated by
@@ -58,10 +71,12 @@ git@<host>:<non-empty path>
 ```
 
 HTTPS URLs must not contain any userinfo. SSH URLs may omit userinfo or use
-`git@`; an SSH password is never accepted and an SSH user other than `git` is
-not a configured-repository credential boundary in 0.1. SCP-style URLs must
-use the normal `git@host:path` identity. Host and path must be non-empty. Other
-schemes and malformed locations are rejected. This validation is metadata
+`git@`; an SSH password is never accepted. North 0.1 deliberately supports
+only the literal `git` SSH/SCP transport username, so an SSH user other than
+`git` is rejected even if a host could clone it. This is a product URL policy,
+not a claim that every host-Git-valid URL is secret-bearing. SCP-style URLs
+must use the normal `git@host:path` identity. Host and path must be non-empty.
+Other schemes and malformed locations are rejected. This validation is metadata
 validation only; the inspection change later determines whether host Git can
 access the location.
 
@@ -99,14 +114,17 @@ name because uniqueness includes disabled rows.
 
 `id` is immutable. `name` and `description` may change on enabled or disabled
 rows, subject to validation and normalized-name uniqueness. `created_at` never
-changes. `updated_at` changes on a successful metadata or lifecycle change.
+changes. Successful metadata changes advance `updated_at`; lifecycle timestamp
+transitions and true idempotent no-ops follow the explicit rules above.
 `disabled_at` is set by disable and cleared by re-enable.
 
 Historical evidence stores `repository_id` and exact full `commit_sha`. The
 retained row's current name, description, and immutable URL remain available
 for historical joins. Historical UI in 0.1 displays retained current metadata;
-the repository ID and commit SHA remain the authoritative evidence identity.
-No active-catalog status is required to interpret old evidence.
+name and description are not snapshots. The repository ID, immutable URL, and
+commit SHA remain the authoritative source identity/evidence; disabling does not
+alter prior evidence, and re-enable returns the same identity. No active-catalog
+status is required to interpret old evidence.
 
 ### Authorization and lifecycle
 
@@ -133,15 +151,18 @@ These are distinct reads with distinct authorization and purpose:
 - **Management list:** an Admin/Owner Settings read containing every enabled
   and disabled row, with `disabled_at` and current metadata so status and
   re-enable are possible.
-- **Active catalog:** an enabled-only server read for new session context and
-  downstream inspection candidates, filtered by `disabled_at IS NULL`. A
-  disabled row is never selected for a new inspection.
+- **Active catalog:** an enabled-only internal server/persistence read for
+  server-assembled `session.start` context and downstream inspection
+  candidates, filtered by `disabled_at IS NULL`. The daemon receives relevant
+  enabled metadata through `session.start`; it does not independently fetch a
+  repository catalog.
 
-Both lists sort by `name_normalized ASC, id ASC` for deterministic API, UI, and
-test behavior. The active catalog is not a substitute for the management list.
-If a non-admin surface needs repository metadata indirectly, that surface keeps
-its existing authorization and defines its own read contract; it does not gain
-repository-management access through this change.
+The active catalog is not a public browser repository-management endpoint, and
+North 0.1 does not create an HTTP catalog surface merely because this internal
+read is called a catalog. The management list remains the explicit
+Settings-facing API. Both lists sort by `name_normalized ASC, id ASC` for
+deterministic API, UI, and test behavior. If a future public active-catalog
+read is needed, its authorization belongs in a separate contract.
 
 ### Create conflicts and concurrency
 
@@ -164,6 +185,28 @@ status, offers create and metadata edit, uses disable for Remove, and offers
 re-enable for disabled rows. It has no hard-delete affordance. Frontend checks
 are usability only; the server validation and authorization rules remain
 canonical. UI behavior does not add Git access or credentials.
+
+### Readiness citation boundary
+
+Configured repositories own durable repository identity, row existence, and
+lifecycle. Readiness owns whether repository evidence is acceptable for a
+Requirement and whether a valid assessment may promote it. Therefore every
+`repositories_reviewed.repository_id` cited by readiness evidence MUST resolve
+to an existing durable configured-repository row. An unknown ID is a durable
+readiness rejection: no evidence is accepted, no Requirement promotion occurs,
+and no fabricated repository row is inserted.
+
+The `north-protocol` wire schema performs only structural validation that
+`repository_id` and `commit_sha` are non-empty; it never accesses the repository
+database. Server readiness persistence performs durable identity and provenance
+validation. A citation from an already-running inspection SHALL remain eligible for
+readiness acceptance when its row is disabled after work began, provided the
+durable row still exists and the citation belongs to the repositories supplied
+in that session's server-assembled context or to an inspection explicitly
+authorized under that run. Disable alone SHALL NOT invalidate the citation; new
+inspection selection still requires `disabled_at IS NULL`, and other readiness
+gates still apply. This uses existing session context/inspection-result data and
+adds no new provenance subsystem.
 
 ### Downstream boundary
 

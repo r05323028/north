@@ -101,6 +101,11 @@ pub enum ConnectionEvent {
     Frame(ServerFrame),
 }
 
+#[derive(Debug)]
+pub enum ConnectionControl {
+    CloseRetryable,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct HandshakeTimeouts {
     /// Time allowed to write hello after the socket connects.
@@ -252,6 +257,13 @@ impl ConnectionSupervisor {
         mpsc::channel(OUTBOUND_QUEUE_CAPACITY)
     }
 
+    pub fn control_channel() -> (
+        mpsc::Sender<ConnectionControl>,
+        mpsc::Receiver<ConnectionControl>,
+    ) {
+        mpsc::channel(1)
+    }
+
     /// Runs one connection lifecycle. Only retryable transport failures enter
     /// local backoff. Protocol/auth/reconciliation failures surface to the host
     /// and stop automatic reconnect; a closed application channel is shutdown.
@@ -262,11 +274,27 @@ impl ConnectionSupervisor {
         outbound: mpsc::Receiver<DaemonFrame>,
         inbound: mpsc::Sender<ConnectionEvent>,
     ) -> Result<(), ConnectionError> {
+        let (_control_sender, control_receiver) = Self::control_channel();
+        self.run_with_control(outbound, inbound, control_receiver)
+            .await
+    }
+
+    pub async fn run_with_control(
+        &self,
+        outbound: mpsc::Receiver<DaemonFrame>,
+        inbound: mpsc::Sender<ConnectionEvent>,
+        mut control: mpsc::Receiver<ConnectionControl>,
+    ) -> Result<(), ConnectionError> {
         let outbound = Arc::new(Mutex::new(outbound));
         let mut attempt = 0;
         loop {
             match self
-                .connect_once(Arc::clone(&outbound), inbound.clone(), &mut attempt)
+                .connect_once(
+                    Arc::clone(&outbound),
+                    inbound.clone(),
+                    &mut attempt,
+                    &mut control,
+                )
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -286,6 +314,7 @@ impl ConnectionSupervisor {
         outbound: Arc<Mutex<mpsc::Receiver<DaemonFrame>>>,
         inbound: mpsc::Sender<ConnectionEvent>,
         attempt: &mut u32,
+        control: &mut mpsc::Receiver<ConnectionControl>,
     ) -> Result<(), ConnectionError> {
         let config = WebSocketConfig::default()
             .max_message_size(Some(self.config.max_message_size))
@@ -313,7 +342,12 @@ impl ConnectionSupervisor {
         let (writer_sender, writer_receiver) = mpsc::channel(OUTBOUND_QUEUE_CAPACITY);
 
         let mut writer_task = tokio::spawn(write_loop(writer, writer_receiver, control_receiver));
-        let mut reader_task = tokio::spawn(read_loop(reader, incoming_sender, control_sender));
+        let mut reader_task = tokio::spawn(read_loop(
+            reader,
+            incoming_sender,
+            control_sender,
+            Some(writer_sender.clone()),
+        ));
 
         let result = async {
             let welcome = receive_frame(
@@ -369,6 +403,12 @@ impl ConnectionSupervisor {
 
             loop {
                 tokio::select! {
+                    control_message = control.recv() => match control_message {
+                        Some(ConnectionControl::CloseRetryable) => {
+                            return Err(ConnectionError::PeerClosed);
+                        }
+                        None => return Err(ConnectionError::ChannelClosed("control")),
+                    },
                     incoming = incoming_receiver.recv() => match incoming {
                         Some(ServerFrame::ProtocolError(error)) => {
                             return Err(protocol_failure(ServerFrame::ProtocolError(error)));
@@ -389,9 +429,16 @@ impl ConnectionSupervisor {
                                 .await
                                 .map_err(|_| ConnectionError::ChannelClosed("inbound"))?;
                         }
-                        None => return Err(ConnectionError::PeerClosed),
+                        None => {
+                            writer_task.abort();
+                            let result = (&mut reader_task).await;
+                            return result.map_err(|error| ConnectionError::Task(error.to_string()))?;
+                        }
                     },
                     frame = next_outbound(&outbound), if phase.allows_application_traffic() => match frame {
+                        Some(DaemonFrame::ProtocolError(error)) => {
+                            return send_terminal_protocol_error(&writer_sender, error).await;
+                        }
                         Some(frame) => writer_sender.send(WriterCommand::Frame(frame)).await.map_err(|_| ConnectionError::PeerClosed)?,
                         None => return Err(ConnectionError::ChannelClosed("outbound")),
                     },
@@ -400,7 +447,14 @@ impl ConnectionSupervisor {
                         return result.map_err(|error| ConnectionError::Task(error.to_string()))?;
                     }
                     result = &mut writer_task => {
-                        reader_task.abort();
+                        let reader_result = tokio::time::timeout(
+                            Duration::from_millis(100),
+                            &mut reader_task,
+                        )
+                        .await;
+                        if let Ok(reader_result) = reader_result {
+                            return reader_result.map_err(|error| ConnectionError::Task(error.to_string()))?;
+                        }
                         return result.map_err(|error| ConnectionError::Task(error.to_string()))?;
                     }
                 }
@@ -418,6 +472,10 @@ type SharedOutbound = Arc<Mutex<mpsc::Receiver<DaemonFrame>>>;
 
 enum WriterCommand {
     Frame(DaemonFrame),
+    FrameAndWait {
+        frame: DaemonFrame,
+        completed: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 async fn next_outbound(outbound: &SharedOutbound) -> Option<DaemonFrame> {
@@ -483,9 +541,43 @@ where
             },
             command = commands.recv() => match command {
                 Some(WriterCommand::Frame(frame)) => send_frame(&mut writer, frame).await?,
+                Some(WriterCommand::FrameAndWait { frame, completed }) => {
+                    match send_frame(&mut writer, frame).await {
+                        Ok(()) => {
+                            let _ = completed.send(Ok(()));
+                        }
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let _ = completed.send(Err(reason));
+                            return Err(error);
+                        }
+                    }
+                }
                 None => return Err(ConnectionError::ChannelClosed("writer")),
             },
         }
+    }
+}
+
+async fn send_terminal_protocol_error(
+    writer_sender: &mpsc::Sender<WriterCommand>,
+    error: ProtocolErrorFrame,
+) -> Result<(), ConnectionError> {
+    let code = error.code.clone();
+    let message = error.message.clone();
+    let (completed, receipt) = oneshot::channel();
+    writer_sender
+        .send(WriterCommand::FrameAndWait {
+            frame: DaemonFrame::ProtocolError(error),
+            completed,
+        })
+        .await
+        .map_err(|_| ConnectionError::PeerClosed)?;
+    match tokio::time::timeout(Duration::from_secs(1), receipt).await {
+        Ok(Ok(Ok(()))) => Err(ConnectionError::TerminalProtocol { code, message }),
+        Ok(Ok(Err(reason))) => Err(ConnectionError::Socket(reason)),
+        Ok(Err(_)) => Err(ConnectionError::PeerClosed),
+        Err(_) => Err(ConnectionError::HandshakeTimeout("protocol_error")),
     }
 }
 
@@ -505,6 +597,7 @@ async fn read_loop<R, E>(
     mut reader: R,
     incoming: mpsc::Sender<ServerFrame>,
     controls: mpsc::Sender<Message>,
+    protocol_writer: Option<mpsc::Sender<WriterCommand>>,
 ) -> Result<(), ConnectionError>
 where
     R: Stream<Item = Result<Message, E>> + Unpin,
@@ -514,14 +607,46 @@ where
         let message = message.map_err(|error| ConnectionError::Socket(error.to_string()))?;
         match message {
             Message::Text(text) => {
-                let frame =
-                    decode_server_frame(text.as_ref()).map_err(ConnectionError::Protocol)?;
+                let frame = match decode_server_frame(text.as_ref()) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        let protocol_error = ProtocolErrorFrame {
+                            schema_version: north_protocol::SCHEMA_VERSION,
+                            code: "invalid_frame".into(),
+                            message: error.to_string(),
+                        };
+                        let terminal = if let Some(writer) = protocol_writer.as_ref() {
+                            send_terminal_protocol_error(writer, protocol_error.clone()).await
+                        } else {
+                            Err(ConnectionError::Protocol(error))
+                        };
+                        let _ = incoming
+                            .send(ServerFrame::ProtocolError(protocol_error))
+                            .await;
+                        return terminal;
+                    }
+                };
                 incoming
                     .send(frame)
                     .await
                     .map_err(|_| ConnectionError::ChannelClosed("incoming"))?;
             }
-            Message::Binary(_) => return Err(ConnectionError::BinaryFrame),
+            Message::Binary(_) => {
+                let protocol_error = ProtocolErrorFrame {
+                    schema_version: north_protocol::SCHEMA_VERSION,
+                    code: "binary_frame".into(),
+                    message: "North 0.1 accepts JSON text frames only".into(),
+                };
+                let terminal = if let Some(writer) = protocol_writer.as_ref() {
+                    send_terminal_protocol_error(writer, protocol_error.clone()).await
+                } else {
+                    Err(ConnectionError::BinaryFrame)
+                };
+                let _ = incoming
+                    .send(ServerFrame::ProtocolError(protocol_error))
+                    .await;
+                return terminal;
+            }
             Message::Ping(payload) => {
                 if controls.send(Message::Pong(payload)).await.is_err() {
                     return Err(ConnectionError::PeerClosed);
@@ -530,9 +655,21 @@ where
             Message::Pong(_) => {}
             Message::Close(_) => return Err(ConnectionError::PeerClosed),
             Message::Frame(_) => {
-                return Err(ConnectionError::Socket(
-                    "unexpected raw WebSocket frame".into(),
-                ));
+                let error = FrameError::Validation("unexpected raw WebSocket frame".into());
+                let protocol_error = ProtocolErrorFrame {
+                    schema_version: north_protocol::SCHEMA_VERSION,
+                    code: "invalid_frame".into(),
+                    message: error.to_string(),
+                };
+                let terminal = if let Some(writer) = protocol_writer.as_ref() {
+                    send_terminal_protocol_error(writer, protocol_error.clone()).await
+                } else {
+                    Err(ConnectionError::Protocol(error))
+                };
+                let _ = incoming
+                    .send(ServerFrame::ProtocolError(protocol_error))
+                    .await;
+                return terminal;
             }
         }
     }
@@ -564,6 +701,7 @@ pub fn decode_server_message(message: Message) -> Result<Option<ServerFrame>, Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::stream;
     use north_protocol::{ProtocolErrorFrame, PROTOCOL_VERSION, SCHEMA_VERSION};
 
     #[test]
@@ -742,6 +880,20 @@ mod tests {
             ReconnectBackoff::default().delay(attempt),
             Duration::from_secs(1)
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_server_text_emits_daemon_protocol_error() {
+        let (incoming, _incoming_receiver) = mpsc::channel(1);
+        let (controls, _control_receiver) = mpsc::channel(1);
+        let reader = stream::iter(vec![Ok::<Message, std::convert::Infallible>(
+            Message::Text(r#"{"frame":"command","payload":{"schema_version":99}}"#.into()),
+        )]);
+        let error = read_loop(reader, incoming, controls, None)
+            .await
+            .expect_err("invalid server frame must terminate transport");
+        assert!(matches!(error, ConnectionError::Protocol(_)));
+        assert!(matches!(error, ConnectionError::Protocol(_)));
     }
 
     #[test]

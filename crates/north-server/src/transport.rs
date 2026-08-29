@@ -225,8 +225,10 @@ where
 
     if !matches!(hello, DaemonFrame::Hello(_)) {
         let error = TransportError::ExpectedHello;
-        if let Some(frame) = protocol_error_frame(&error) {
-            let _ = writer.send(encode_server_message(&frame)?).await;
+        if !matches!(hello, DaemonFrame::ProtocolError(_)) {
+            if let Some(frame) = protocol_error_frame(&error) {
+                let _ = writer.send(encode_server_message(&frame)?).await;
+            }
         }
         return Err(error);
     }

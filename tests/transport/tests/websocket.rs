@@ -1,3 +1,12 @@
+use axum::{
+    extract::{
+        ws::{Message as AxumMessage, WebSocketUpgrade},
+        State,
+    },
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
+};
 use futures_util::{SinkExt, StreamExt};
 use north_daemon::transport::{
     ConnectionConfig, ConnectionError, ConnectionEvent, ConnectionSupervisor,
@@ -20,6 +29,58 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+async fn spawn_invalid_server() -> (SocketAddr, mpsc::Receiver<DaemonFrame>, JoinHandle<()>) {
+    let (reported_sender, reported_receiver) = mpsc::channel(1);
+    let app = Router::new()
+        .route("/daemon/ws", get(invalid_server))
+        .with_state(reported_sender);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind invalid-frame server");
+    let address = listener.local_addr().expect("invalid-frame server address");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve invalid-frame endpoint");
+    });
+    (address, reported_receiver, task)
+}
+
+async fn invalid_server(
+    State(reported_sender): State<mpsc::Sender<DaemonFrame>>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |mut socket| async move {
+        let Some(Ok(AxumMessage::Text(_))) = socket.next().await else {
+            return;
+        };
+        let _ = socket
+            .send(AxumMessage::Text(
+                welcome().to_json().expect("welcome JSON").into(),
+            ))
+            .await;
+        let _ = socket
+            .send(AxumMessage::Text(
+                reconciliation(Vec::new())
+                    .to_json()
+                    .expect("reconciliation JSON")
+                    .into(),
+            ))
+            .await;
+        let _ = socket
+            .send(AxumMessage::Text(
+                r#"{"frame":"command","payload":{"schema_version":99}}"#.into(),
+            ))
+            .await;
+        if let Some(Ok(AxumMessage::Text(text))) = socket.next().await {
+            if let Ok(frame) = DaemonFrame::from_json(text.as_ref()) {
+                let _ = reported_sender.send(frame).await;
+            }
+        }
+    })
+    .into_response()
+}
 
 async fn spawn_server(
     handshake_timeouts: ServerHandshakeTimeouts,
@@ -96,6 +157,44 @@ async fn receive_hello(inbound: &mut mpsc::Receiver<DaemonFrame>) {
             .expect("hello frame"),
         DaemonFrame::Hello(_)
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_reports_invalid_server_frame_on_current_connection() {
+    let (address, mut reported, server) = spawn_invalid_server().await;
+    let (_outbound_sender, outbound_receiver) = ConnectionSupervisor::outbound_channel();
+    let (events_sender, mut events_receiver) = mpsc::channel(8);
+    let supervisor = ConnectionSupervisor::new(daemon_config(address));
+    let daemon =
+        tokio::spawn(async move { supervisor.run(outbound_receiver, events_sender).await });
+
+    let handshake = timeout(Duration::from_secs(1), events_receiver.recv())
+        .await
+        .expect("handshake deadline")
+        .expect("handshake event");
+    let ConnectionEvent::HandshakeComplete { ready, .. } = handshake else {
+        panic!("expected handshake event");
+    };
+    ready.send(()).expect("activate connection");
+
+    let reported_frame = timeout(Duration::from_secs(1), reported.recv())
+        .await
+        .expect("daemon protocol-error deadline")
+        .expect("daemon protocol-error frame");
+    let DaemonFrame::ProtocolError(error) = reported_frame else {
+        panic!("expected daemon protocol error");
+    };
+    assert_eq!(error.code, "invalid_frame");
+
+    let result = timeout(Duration::from_secs(1), daemon)
+        .await
+        .expect("terminal protocol deadline")
+        .expect("supervisor task");
+    assert!(matches!(
+        result,
+        Err(ConnectionError::TerminalProtocol { code, .. }) if code == "invalid_frame"
+    ));
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

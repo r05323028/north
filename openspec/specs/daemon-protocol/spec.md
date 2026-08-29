@@ -6,7 +6,7 @@ Defines the single wire contract between server and daemon: explicit typed
 messages, durable bidirectional delivery, directional ordering, compatibility,
 and reconnect/resume without duplicate effects.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Envelopes and connection frames have explicit fields
 
@@ -102,11 +102,13 @@ Every command SHALL have durable state with these meanings: `received` means
 the complete command and payload digest are committed and a `command_ack` MAY
 be sent; `dispatch_started` means that state was committed before invoking a
 runtime operation whose duplicate could matter; `terminal` means no further
-automatic invocation is allowed and durable outcome metadata is present.
-Terminal outcome metadata SHALL identify `completed`, `failed`, or `unknown`,
-with reason, timestamp, and stable runtime operation identity. A duplicate in
-any state SHALL return its known ACK where appropriate and SHALL NOT invoke the
-runtime twice.
+automatic invocation is allowed and the local outcome of processing or
+dispatching that specific command is durable. Terminal outcome metadata SHALL
+identify `dispatch_succeeded`, `dispatch_failed`, or `unknown`, with reason,
+timestamp, and stable runtime operation identity. An implementation MAY store
+the first two as `completed`/`failed`; those labels describe command dispatch
+outcome, not execution-session completion. A duplicate in any state SHALL
+return its known ACK where appropriate and SHALL NOT invoke the runtime twice.
 
 #### Scenario: Received command survives daemon crash
 
@@ -126,18 +128,49 @@ runtime twice.
 - **THEN** the daemon returns the known durable receipt/outcome information as
   applicable and never invokes the runtime again
 
+### Requirement: Durable command processing crosses a narrow runtime seam
+
+The durable command coordinator SHALL decide journal state and idempotency
+before crossing a narrow internal dispatch/execution seam. The seam SHALL
+accept stable command/runtime operation identity, with
+`runtime_operation_id = command_id` in 0.1.0. Its exact Rust type/name is not
+part of the wire contract. Durable-delivery tests MAY use a deterministic
+fake/test executor. Duplicate or replayed commands SHALL cross the seam only
+when permitted by the command-journal state machine; terminal or
+duplicate-safe records SHALL NOT cross it again.
+
+The later `introduce-agent-requirement-clarification` change SHALL provide the
+real agent-runtime adapter behind this seam. This protocol change SHALL NOT
+introduce agent prompting, SDK behavior, tool choice, repository inspection, or
+readiness judgment.
+
+#### Scenario: Durable tests use a fake executor
+
+- **WHEN** durable-delivery tests process a command without a real agent runtime
+- **THEN** a deterministic fake crosses the seam with the stable operation
+  identity and the journal assertions remain valid
+
+#### Scenario: Duplicate-safe command does not cross seam twice
+
+- **WHEN** a replayed command is already terminal or otherwise duplicate-safe
+- **THEN** the coordinator returns its known result without another seam call
+
 ### Requirement: Unknown dispatch outcome is explicit and non-duplicating
 
 If the daemon crashes after durable `dispatch_started` and before terminal
 outcome commit, restart SHALL first attempt runtime reattachment/status
-recovery using the stable operation identity. It MUST NOT automatically
-resubmit a side-effecting operation solely because outcome is unknown. If the
-runtime result cannot be safely determined, the daemon SHALL persist terminal
-`unknown` and emit a journaled `session.failed` event with `recoverable: false`
-and a reason containing `execution_outcome_unknown`, `command_id`,
-`runtime_operation_id`, and `automatic_resubmit=false`. This is an execution
-fact, not a protocol error. Server-owned retry/failure policy decides what
-happens next.
+recovery using the stable operation identity. `session.failed.recoverable` is a
+daemon fact about the existing runtime operation: `true` means the daemon
+believes it can safely resume or reattach that operation locally; `false` means
+local mechanics cannot safely recover it. Neither value forbids a future
+server-directed attempt or authorizes the daemon to decide execution failure.
+If the runtime result cannot be safely determined, the daemon SHALL persist
+terminal `unknown` and emit a journaled `session.failed` event with
+`recoverable: false` and a reason containing `execution_outcome_unknown`,
+`command_id`, `runtime_operation_id`, and `automatic_resubmit=false`. Automatic
+daemon resubmission remains forbidden; any later `session.resume`/`session.start`
+attempt is explicitly server-directed and uses a new command identity under
+server retry policy. This is an execution fact, not a protocol error.
 
 #### Scenario: Crash after dispatch does not double-submit
 
@@ -372,15 +405,26 @@ liveness SHALL NOT imply durable delivery or business completion.
 `session.start` SHALL contain complete server-assembled Requirement context,
 bounded relevant conversation, and enabled repository metadata without
 credentials, checkout paths, persistence handles, or domain types.
-`requirement.assessed` SHALL carry typed evidence; the server SHALL continue to
-apply revision-bound evidence, `state_version` concurrency, assessment identity,
-and accepted-generation rules in its own transaction. The daemon reports facts
-and never directly mutates Requirement state. `session.resume` SHALL contain
-execution recovery only and no transport event cursor.
+`requirement.assessed` SHALL carry typed evidence. For a uniquely identified,
+session-bound, sequence-valid event, the server SHALL validate event identity,
+`daemon_event_seq`/sequence identity, and `requirement_revision` against the
+current Requirement revision, run server/domain readiness gates, atomically
+record immutable evidence, optionally promote `Discussing` to `Ready`, and
+record the resulting Ready-generation `state_version` as
+`accepted_state_version`. Accepted readiness evidence creates/binds
+`assessment_id` and `accepted_state_version`; they are not inbound assessment
+concurrency tokens. Later human Accept, Reject, or Request Changes SHALL use
+`assessment_id`, `expected_state_version`, and the exact current Ready
+generation. The daemon reports facts and never directly mutates Requirement
+state. `session.resume` SHALL contain execution recovery only and no transport
+event cursor. The `north-protocol` wire layer SHALL validate only structurally
+non-empty `repository_id` and `commit_sha`; it SHALL not access repository
+persistence.
 
 #### Scenario: Delivered assessment cannot bypass server gates
 
-- **WHEN** a durable assessment event targets a stale revision or state version
+- **WHEN** a durable assessment event targets a stale revision or fails a
+  server readiness gate
 - **THEN** server coordination rejects or handles it using existing domain and
   transaction rules, regardless of successful transport delivery
 

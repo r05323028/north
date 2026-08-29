@@ -9,6 +9,7 @@ use north_domain::{
     requirement::MarkReadyError,
     status::RequirementStatus,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{FromRow, Postgres, Transaction};
 use std::{error::Error, fmt};
 
@@ -74,6 +75,10 @@ pub enum ReadinessError {
     SequenceConflict,
     EventIdentityConflict,
     SessionRequirementMismatch,
+    SequenceGap {
+        expected: u64,
+        received: u64,
+    },
     StaleAssessment {
         assessment_revision: u64,
         current_revision: u64,
@@ -100,6 +105,9 @@ impl fmt::Display for ReadinessError {
             }
             Self::SessionRequirementMismatch => {
                 f.write_str("assessment session is not bound to its requirement")
+            }
+            Self::SequenceGap { expected, received } => {
+                write!(f, "assessment event sequence gap: expected {expected}, received {received}")
             }
             Self::StaleAssessment {
                 assessment_revision,
@@ -161,7 +169,38 @@ impl AuthStore {
         requirement_id: &str,
         assessment: &ReadinessAssessment,
     ) -> Result<ReadinessAssessmentResult, ReadinessError> {
-        if event_id.trim().is_empty() || session_id.trim().is_empty() || daemon_event_seq == 0 {
+        let event_digest = readiness_event_digest(
+            event_id,
+            session_id,
+            daemon_event_seq,
+            requirement_id,
+            assessment,
+        )?;
+        self.record_readiness_assessment_with_event_digest(
+            event_id,
+            session_id,
+            daemon_event_seq,
+            requirement_id,
+            assessment,
+            &event_digest,
+        )
+        .await
+    }
+
+    pub async fn record_readiness_assessment_with_event_digest(
+        &self,
+        event_id: &str,
+        session_id: &str,
+        daemon_event_seq: u64,
+        requirement_id: &str,
+        assessment: &ReadinessAssessment,
+        event_digest: &str,
+    ) -> Result<ReadinessAssessmentResult, ReadinessError> {
+        if event_id.trim().is_empty()
+            || session_id.trim().is_empty()
+            || event_digest.trim().is_empty()
+            || daemon_event_seq == 0
+        {
             return Err(ReadinessError::InvalidEvidence);
         }
         if assessment.requirement_revision == 0
@@ -199,10 +238,21 @@ impl AuthStore {
             .bind(sequence_lock_key)
             .execute(&mut *transaction)
             .await?;
-        let bound_requirement_id =
-            session_requirement_row(&mut transaction, event.session_id).await?;
-        if bound_requirement_id.as_deref() != Some(requirement_id) {
+        let session_state = session_delivery_row(&mut transaction, event.session_id).await?;
+        if session_state
+            .as_ref()
+            .and_then(|state| state.requirement_id.as_deref())
+            != Some(requirement_id)
+        {
             return Err(ReadinessError::SessionRequirementMismatch);
+        }
+        if let Some(row) = readiness_event_by_id(&mut transaction, event.event_id).await? {
+            if row.session_id != event.session_id
+                || row.daemon_event_seq != sequence
+                || (!row.legacy_identity && row.payload_digest != event_digest)
+            {
+                return Err(ReadinessError::EventIdentityConflict);
+            }
         }
         if let Some(row) = assessment_by_event(&mut transaction, event.event_id).await? {
             let record = row.into_record()?;
@@ -219,12 +269,43 @@ impl AuthStore {
                 duplicate: true,
             });
         }
+        let session_state = session_state.ok_or(ReadinessError::SessionRequirementMismatch)?;
+        let mut expected_sequence = session_state
+            .event_ack_through_seq
+            .checked_add(1)
+            .ok_or(ReadinessError::InvalidEvidence)?;
+        while session_state.event_ack_sparse.contains(&expected_sequence) {
+            expected_sequence = expected_sequence
+                .checked_add(1)
+                .ok_or(ReadinessError::InvalidEvidence)?;
+        }
+        if sequence > expected_sequence {
+            return Err(ReadinessError::SequenceGap {
+                expected: u64::try_from(expected_sequence)
+                    .map_err(|_| ReadinessError::InvalidEvidence)?,
+                received: event.daemon_event_seq,
+            });
+        }
+        if sequence <= session_state.event_ack_through_seq {
+            return Err(ReadinessError::SequenceConflict);
+        }
         if let Some(row) =
             assessment_by_sequence(&mut transaction, event.session_id, sequence).await?
         {
             if row.event_id != event.event_id {
                 return Err(ReadinessError::SequenceConflict);
             }
+        }
+        let generic_event: Option<String> = sqlx::query_scalar(
+            "SELECT event_id FROM server_event_dedupe
+             WHERE session_id = $1 AND daemon_event_seq = $2",
+        )
+        .bind(event.session_id)
+        .bind(sequence)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if generic_event.is_some() {
+            return Err(ReadinessError::SequenceConflict);
         }
 
         let row = match lock_requirement(&mut transaction, requirement_id).await {
@@ -243,6 +324,16 @@ impl AuthStore {
                     },
                 )
                 .await?;
+                insert_event_dedupe(
+                    &mut transaction,
+                    &event,
+                    sequence,
+                    event_digest,
+                    AssessmentOutcome::Rejected,
+                    Some("requirement_not_found"),
+                )
+                .await?;
+                advance_event_watermark(&mut transaction, event.session_id, sequence).await?;
                 transaction.commit().await?;
                 return Ok(ReadinessAssessmentResult {
                     record: record_row.into_record()?,
@@ -253,9 +344,22 @@ impl AuthStore {
         };
         let mut requirement = row.to_domain().map_err(ReadinessError::from)?;
         let expected_state_version = requirement.state_version();
-        let (outcome, rejection_reason) = match requirement.mark_ready(assessment) {
-            Ok(()) => (AssessmentOutcome::Accepted, None),
-            Err(error) => (AssessmentOutcome::Rejected, Some(mark_ready_reason(&error))),
+        let citations_valid = repository_citations_exist(
+            &mut transaction,
+            &session_state.repository_ids,
+            &assessment.repositories_reviewed,
+        )
+        .await?;
+        let (outcome, rejection_reason) = if !citations_valid {
+            (
+                AssessmentOutcome::Rejected,
+                Some("unknown_repository".to_owned()),
+            )
+        } else {
+            match requirement.mark_ready(assessment) {
+                Ok(()) => (AssessmentOutcome::Accepted, None),
+                Err(error) => (AssessmentOutcome::Rejected, Some(mark_ready_reason(&error))),
+            }
         };
         let accepted_state_version =
             (outcome == AssessmentOutcome::Accepted).then_some(requirement.state_version());
@@ -296,6 +400,16 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await?;
         }
+        insert_event_dedupe(
+            &mut transaction,
+            &event,
+            sequence,
+            event_digest,
+            outcome,
+            rejection_reason.as_deref(),
+        )
+        .await?;
+        advance_event_watermark(&mut transaction, event.session_id, sequence).await?;
         transaction.commit().await?;
         Ok(ReadinessAssessmentResult {
             record: record_row.into_record()?,
@@ -378,6 +492,55 @@ impl AuthStore {
     }
 }
 
+#[derive(Debug, FromRow)]
+struct ReadinessEventDedupeRow {
+    session_id: String,
+    daemon_event_seq: i64,
+    payload_digest: String,
+    legacy_identity: bool,
+}
+
+async fn readiness_event_by_id(
+    transaction: &mut Transaction<'_, Postgres>,
+    event_id: &str,
+) -> Result<Option<ReadinessEventDedupeRow>, ReadinessError> {
+    Ok(sqlx::query_as::<_, ReadinessEventDedupeRow>(
+        "SELECT session_id, daemon_event_seq, payload_digest, legacy_identity
+         FROM server_event_dedupe
+         WHERE event_id = $1
+         FOR UPDATE",
+    )
+    .bind(event_id)
+    .fetch_optional(&mut **transaction)
+    .await?)
+}
+
+async fn insert_event_dedupe(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &AssessmentEvent<'_>,
+    sequence: i64,
+    payload_digest: &str,
+    outcome: AssessmentOutcome,
+    rejection_reason: Option<&str>,
+) -> Result<(), ReadinessError> {
+    sqlx::query(
+        "INSERT INTO server_event_dedupe
+            (event_id, session_id, daemon_event_seq, payload_digest, payload,
+             outcome, rejection_reason)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+    )
+    .bind(event.event_id)
+    .bind(event.session_id)
+    .bind(sequence)
+    .bind(payload_digest)
+    .bind(payload_digest)
+    .bind(outcome.as_str())
+    .bind(rejection_reason)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 async fn assessment_by_event(
     transaction: &mut Transaction<'_, Postgres>,
     event_id: &str,
@@ -397,25 +560,100 @@ async fn assessment_by_event(
     .await?)
 }
 
-async fn session_requirement_row(
+async fn session_delivery_row(
     transaction: &mut Transaction<'_, Postgres>,
     session_id: &str,
-) -> Result<Option<String>, ReadinessError> {
-    let row = sqlx::query_as::<_, SessionRequirementRow>(
-        "SELECT requirement_id
+) -> Result<Option<SessionDeliveryRow>, ReadinessError> {
+    Ok(sqlx::query_as::<_, SessionDeliveryRow>(
+        "SELECT requirement_id, event_ack_through_seq, event_ack_sparse, repository_ids
          FROM execution_sessions
          WHERE id = $1
          FOR UPDATE",
     )
     .bind(session_id)
     .fetch_optional(&mut **transaction)
-    .await?;
-    Ok(row.and_then(|row| row.requirement_id))
+    .await?)
 }
 
 #[derive(Debug, FromRow)]
-struct SessionRequirementRow {
+struct SessionDeliveryRow {
     requirement_id: Option<String>,
+    event_ack_through_seq: i64,
+    event_ack_sparse: Vec<i64>,
+    repository_ids: Vec<String>,
+}
+
+async fn advance_event_watermark(
+    transaction: &mut Transaction<'_, Postgres>,
+    session_id: &str,
+    sequence: i64,
+) -> Result<(), ReadinessError> {
+    let mut cursor = sqlx::query_as::<_, EventCursorRow>(
+        "SELECT event_ack_through_seq, event_ack_sparse
+         FROM execution_sessions
+         WHERE id = $1
+         FOR UPDATE",
+    )
+    .bind(session_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    cursor.event_ack_through_seq = cursor.event_ack_through_seq.max(sequence);
+    loop {
+        let next = cursor.event_ack_through_seq.saturating_add(1);
+        let Some(position) = cursor
+            .event_ack_sparse
+            .iter()
+            .position(|value| *value == next)
+        else {
+            break;
+        };
+        cursor.event_ack_sparse.remove(position);
+        cursor.event_ack_through_seq = next;
+    }
+    cursor
+        .event_ack_sparse
+        .retain(|value| *value > cursor.event_ack_through_seq);
+    sqlx::query(
+        "UPDATE execution_sessions
+         SET event_ack_through_seq = $2, event_ack_sparse = $3
+         WHERE id = $1",
+    )
+    .bind(session_id)
+    .bind(cursor.event_ack_through_seq)
+    .bind(cursor.event_ack_sparse)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, FromRow)]
+struct EventCursorRow {
+    event_ack_through_seq: i64,
+    event_ack_sparse: Vec<i64>,
+}
+
+async fn repository_citations_exist(
+    transaction: &mut Transaction<'_, Postgres>,
+    session_repository_ids: &[String],
+    repositories: &[ReviewedRepository],
+) -> Result<bool, ReadinessError> {
+    for repository in repositories {
+        if !session_repository_ids
+            .iter()
+            .any(|repository_id| repository_id == &repository.repository_id)
+        {
+            return Ok(false);
+        }
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM repositories WHERE id = $1)")
+                .bind(&repository.repository_id)
+                .fetch_one(&mut **transaction)
+                .await?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 async fn assessment_by_sequence(
@@ -593,6 +831,41 @@ impl AssessmentRow {
             created_at: self.created_at,
         })
     }
+}
+
+fn readiness_event_digest(
+    event_id: &str,
+    session_id: &str,
+    daemon_event_seq: u64,
+    requirement_id: &str,
+    assessment: &ReadinessAssessment,
+) -> Result<String, ReadinessError> {
+    let repositories_reviewed = assessment
+        .repositories_reviewed
+        .iter()
+        .map(|repository| {
+            serde_json::json!({
+                "repository_id": repository.repository_id,
+                "commit_sha": repository.commit_sha,
+            })
+        })
+        .collect::<Vec<_>>();
+    let value = serde_json::json!({
+        "event_id": event_id,
+        "session_id": session_id,
+        "daemon_event_seq": daemon_event_seq,
+        "requirement_id": requirement_id,
+        "assessment": {
+            "requirement_revision": assessment.requirement_revision,
+            "verdict": persisted_verdict(assessment.verdict),
+            "blockers": assessment.blockers,
+            "assumptions": assessment.assumptions,
+            "repositories_reviewed": repositories_reviewed,
+        },
+    });
+    let bytes = serde_json::to_vec(&value).map_err(|_| ReadinessError::InvalidEvidence)?;
+    let digest = Sha256::digest(bytes);
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn same_assessment_content(existing: &ReadinessAssessment, incoming: &ReadinessAssessment) -> bool {

@@ -1,7 +1,9 @@
-use north_daemon::transport::{ConnectionConfig, ConnectionEvent, ConnectionSupervisor};
-use north_protocol::{
-    DaemonFrame, Heartbeat, Hello, ReconcileSnapshot, ServerFrame, SessionReconcileState,
+use north_daemon::{
+    coordination::DaemonCoordinator,
+    journal::{DispatchOutcome, Journal, RecoveryOutcome, RuntimeExecutor},
+    transport::{ConnectionConfig, ConnectionControl, ConnectionEvent, ConnectionSupervisor},
 };
+use north_protocol::{DaemonFrame, Heartbeat, Hello};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     env,
@@ -72,27 +74,27 @@ struct LocalState {
     capabilities: Vec<String>,
 }
 
-#[derive(Default)]
-struct DaemonCoordination {
-    sessions: Vec<SessionReconcileState>,
-}
+struct LocalRuntime;
 
-impl DaemonCoordination {
-    fn apply_reconciliation(&mut self, snapshot: ReconcileSnapshot) {
-        self.sessions = snapshot.sessions;
+impl RuntimeExecutor for LocalRuntime {
+    fn dispatch(
+        &self,
+        _runtime_operation_id: &str,
+        _command_id: &str,
+        _command: &north_protocol::Command,
+    ) -> DispatchOutcome {
+        // Agent prompting/SDK execution belongs to the downstream runtime
+        // change. Keep this binary honest rather than claiming completion.
+        DispatchOutcome::Unknown("runtime_adapter_not_configured".into())
     }
 
-    fn apply_server_frame(&mut self, frame: ServerFrame) -> Result<(), CliError> {
-        match frame {
-            ServerFrame::Command(_) | ServerFrame::EventAck(_) => Ok(()),
-            ServerFrame::Reconcile(_) => Err(CliError(
-                "duplicate reconciliation reached active coordination".into(),
-            )),
-            ServerFrame::Welcome(_) => Err(CliError(
-                "welcome reached active coordination unexpectedly".into(),
-            )),
-            ServerFrame::ProtocolError(error) => Err(CliError(error.message)),
-        }
+    fn recover(
+        &self,
+        _runtime_operation_id: &str,
+        _command_id: &str,
+        _command: &north_protocol::Command,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Unknown
     }
 }
 
@@ -125,6 +127,11 @@ async fn run(args: Vec<String>) -> Result<(), CliError> {
 
 async fn setup(args: &[String]) -> Result<(), CliError> {
     let server_url = required_option(args, "--server-url")?;
+    if !server_url.starts_with("https://") {
+        return Err(CliError(
+            "daemon setup requires an https:// server URL".into(),
+        ));
+    }
     let label = option(args, "--label").unwrap_or_else(|| "North daemon".into());
     let state_path = option(args, "--state-file")
         .map(PathBuf::from)
@@ -232,7 +239,17 @@ async fn start(args: &[String]) -> Result<(), CliError> {
         websocket_url,
         Hello::new(daemon_id.clone(), state.credential, state.capabilities),
     );
+    let journal_path = option(args, "--journal-file")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state_path.with_extension("journal.json"));
+    let journal = Journal::open(&journal_path, daemon_id.clone())
+        .map_err(|error| CliError(format!("open {}: {error}", journal_path.display())))?;
+    let coordinator = DaemonCoordinator::new(journal, LocalRuntime);
+    let recovered = coordinator
+        .recover()
+        .map_err(|error| CliError(format!("recover daemon journal: {error}")))?;
     let (outbound, outbound_receiver) = ConnectionSupervisor::outbound_channel();
+    let (close_sender, close_receiver) = ConnectionSupervisor::control_channel();
     let (events, mut events_receiver) = mpsc::channel(256);
     let heartbeat_sender = outbound.clone();
     let heartbeat_daemon_id = daemon_id;
@@ -255,9 +272,12 @@ async fn start(args: &[String]) -> Result<(), CliError> {
         }
     });
     let supervisor = ConnectionSupervisor::new(config);
-    let mut task = tokio::spawn(async move { supervisor.run(outbound_receiver, events).await });
-    let _outbound = outbound;
-    let mut coordination = DaemonCoordination::default();
+    let mut task = tokio::spawn(async move {
+        supervisor
+            .run_with_control(outbound_receiver, events, close_receiver)
+            .await
+    });
+    let mut pending_frames = recovered;
     loop {
         tokio::select! {
             result = &mut task => {
@@ -267,11 +287,39 @@ async fn start(args: &[String]) -> Result<(), CliError> {
             }
             event = events_receiver.recv() => match event {
                 Some(ConnectionEvent::HandshakeComplete { result, ready }) => {
-                    coordination.apply_reconciliation(result.reconciliation);
+                    let mut frames = coordinator
+                        .reconcile(result.reconciliation)
+                        .map_err(|error| CliError(format!("reconcile daemon journal: {error}")))?
+                        .replay;
+                    frames.append(&mut pending_frames);
                     ready.send(()).map_err(|_| CliError("supervisor stopped during handshake".into()))?;
+                    for frame in frames {
+                        outbound
+                            .send(frame)
+                            .await
+                            .map_err(|_| CliError("supervisor stopped during event replay".into()))?;
+                    }
                 }
                 Some(ConnectionEvent::Frame(frame)) => {
-                    coordination.apply_server_frame(frame)?;
+                    let responses = match coordinator.process_server_frame(frame) {
+                        Ok(responses) => responses,
+                        Err(north_daemon::coordination::CoordinationError::RetryableGap { .. }) => {
+                            close_sender
+                                .send(ConnectionControl::CloseRetryable)
+                                .await
+                                .map_err(|_| CliError("supervisor stopped at gap boundary".into()))?;
+                            Vec::new()
+                        }
+                        Err(error) => {
+                            return Err(CliError(format!("process server frame: {error}")));
+                        }
+                    };
+                    for response in responses {
+                        outbound
+                            .send(response)
+                            .await
+                            .map_err(|_| CliError("supervisor stopped while sending response".into()))?;
+                    }
                 }
                 None => return Err(CliError("supervisor event channel closed".into())),
             }
@@ -364,20 +412,21 @@ fn write_state(path: &Path, state: &LocalState) -> Result<(), CliError> {
     fs::rename(&temporary, path).map_err(|error| {
         let _ = fs::remove_file(&temporary);
         CliError(format!("install {}: {error}", path.display()))
-    })
+    })?;
+    #[cfg(unix)]
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| CliError(format!("sync {}: {error}", parent.display())))?;
+    Ok(())
 }
 
 fn websocket_url(server_url: &str) -> Result<String, CliError> {
     let (scheme, rest) = if let Some(rest) = server_url.strip_prefix("https://") {
         ("wss", rest)
-    } else if let Some(rest) = server_url.strip_prefix("http://") {
-        ("ws", rest)
     } else if let Some(rest) = server_url.strip_prefix("wss://") {
         ("wss", rest)
-    } else if let Some(rest) = server_url.strip_prefix("ws://") {
-        ("ws", rest)
     } else {
-        return Err(CliError("server URL must use http(s) or ws(s)".into()));
+        return Err(CliError("server URL must use https:// or wss://".into()));
     };
     Ok(format!(
         "{scheme}://{}/daemon/ws",
@@ -403,30 +452,13 @@ fn required_option(args: &[String], name: &str) -> Result<String, CliError> {
 }
 
 fn print_usage() {
-    println!("north-daemon setup --server-url URL [--label LABEL] [--state-file PATH]");
-    println!("north-daemon start [--state-file PATH]");
+    println!("north-daemon setup --server-url HTTPS_URL [--label LABEL] [--state-file PATH]");
+    println!("north-daemon start [--state-file PATH] [--journal-file PATH]");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn coordination_applies_reconciliation_before_readiness() {
-        let mut coordination = DaemonCoordination::default();
-        coordination.apply_reconciliation(ReconcileSnapshot {
-            schema_version: north_protocol::SCHEMA_VERSION,
-            sessions: vec![SessionReconcileState {
-                session_id: "session-1".into(),
-                command_ack_through_seq: 3,
-                event_ack_through_seq: 2,
-                event_ack_sparse: vec![4],
-            }],
-        });
-        assert_eq!(coordination.sessions.len(), 1);
-        assert_eq!(coordination.sessions[0].session_id, "session-1");
-        assert_eq!(coordination.sessions[0].command_ack_through_seq, 3);
-    }
 
     #[test]
     fn polling_failures_have_terminality() {
@@ -517,9 +549,10 @@ mod tests {
             "wss://north.example/daemon/ws"
         );
         assert_eq!(
-            websocket_url("http://127.0.0.1:8080").expect("ws URL"),
-            "ws://127.0.0.1:8080/daemon/ws"
+            websocket_url("wss://127.0.0.1:8080").expect("wss URL"),
+            "wss://127.0.0.1:8080/daemon/ws"
         );
+        assert!(websocket_url("http://127.0.0.1:8080").is_err());
         assert!(websocket_url("north.example").is_err());
     }
 

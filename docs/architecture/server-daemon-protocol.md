@@ -128,12 +128,13 @@ builds these DTOs and filters disabled repositories.
 
 ## Envelope and delivery contract
 
-The durable-delivery rules below define the North 0.1 target contract. The wire
-representation and transport boundaries exist today. General durable command/event
-journals, replay, gap reconciliation, and high-watermark compaction remain pending;
-`requirement.assessed` evidence, dedupe, revision gates, and post-commit ACKs are
-implemented by the server readiness path. Statements in this section use normative language for that target
-unless they describe current transport behavior explicitly.
+The durable-delivery rules below define the North 0.1 contract. The wire,
+transport, server outbox/event ledger, daemon local journal, replay, bounded gap
+handling, reconciliation, and identity tombstones are implemented. The daemon
+journal retains full payloads until explicit safe compaction; business execution
+retry and the real agent runtime remain downstream responsibilities.
+`requirement.assessed` evidence, repository citation gates, revision checks, and
+post-commit ACKs are implemented by the server readiness path.
 
 Only delivery envelopes carry envelope fields:
 
@@ -148,13 +149,15 @@ Only delivery envelopes carry envelope fields:
   `command_ack` and `event_ack` copy the target identity, session, and
   sequence, but are acknowledgements rather than envelopes.
 
-The current session-routing foundation persists an execution-session owner and
-server command outbox row atomically before dispatch through
-`AuthStore::start_session_with_command`. The server assigns sequence metadata,
-serializes one complete envelope, and `DaemonRuntime::persist_and_dispatch_command`
-dispatches the persisted payload; full command ACK semantics, retries, local
-command inbox/processed-ledger durability, and duplicate runtime suppression
-remain owned by the durable-delivery implementation.
+The server persists an execution-session owner and complete immutable command
+outbox row atomically before dispatch through
+`AuthStore::start_session_with_command`. The row includes the original envelope
+payload and digest. `DaemonRuntime::persist_and_dispatch_command` dispatches
+only that persisted representation; authenticated daemon `command_ack` updates
+the durable contiguous watermark, and reconnect sends unacknowledged rows in
+per-session sequence order. The daemon-side `Journal`/`DaemonCoordinator`
+implements the local command inbox, processed tombstones, event journal, replay,
+and duplicate suppression.
 
 The durable-delivery contract requires daemon events to be journaled before
 transmission. Command and event sequence allocation commits atomically with the
@@ -166,23 +169,48 @@ for replay.
 Daemon command records move monotonically through `received`,
 `dispatch_started`, and `terminal`. `received` is durable receipt and may
 produce `command_ack`; `dispatch_started` is committed before a runtime
-operation; terminal records completed, failed, or unknown outcome. A crash
-between dispatch and outcome first attempts reattachment by
-`runtime_operation_id = command_id`. If outcome remains unknowable, the
-daemon emits journaled `session.failed` with `recoverable: false`,
-`execution_outcome_unknown`, the command/runtime identity, and
-`automatic_resubmit=false`. It never blindly resubmits a side-effecting
-operation. This is an execution fact, not a protocol error; server policy owns
-the next step.
+operation; terminal records the local outcome of processing/dispatching that
+specific command (`dispatch_succeeded`, `dispatch_failed`, or `unknown`; local
+`completed`/`failed` labels are allowed). This terminal command outcome does not
+mean the execution session is terminal: `session.start` may dispatch
+successfully while the session remains `Running`, followed later by a separate
+`session.completed` or `session.failed` event.
 
-The readiness path deduplicates assessment event IDs and their per-session
-sequence inside the same transaction as validation/evidence/business state, and
-rejects event-ID or sequence identity reuse. `event_ack(status=accepted)` and
-`event_ack(status=rejected)` both mean terminal transport handling for that
-exact event. Accepted follows business commit; rejected follows a durable
-well-formed rejection such as stale revision. A rejected ACK never requests
-retry. Rollback, protocol error, or no ACK leaves the original event
-replay-eligible.
+The durable command coordinator decides journal state and idempotency before
+crossing a narrow internal dispatch/execution seam that accepts stable command
+and runtime-operation identity. Durable-delivery tests may use a deterministic
+fake executor. The future `introduce-agent-requirement-clarification` change
+provides the real runtime adapter; this protocol change does not introduce
+agent prompting, SDK behavior, tool choice, repository inspection, or readiness
+judgment.
+
+A crash between dispatch and outcome first attempts reattachment by
+`runtime_operation_id = command_id`. If outcome remains unknowable, the
+existing runtime operation cannot be safely recovered locally, so the daemon
+emits journaled `session.failed` with `recoverable: false`,
+`execution_outcome_unknown`, the command/runtime identity, and
+`automatic_resubmit=false`. `recoverable` is only the daemon's fact about local
+resume/reattach ability; either value leaves server retry/failure policy
+authoritative. The daemon never blindly resubmits a side-effecting operation;
+any later attempt is an explicit server-directed command with a new identity.
+
+The readiness path validates assessment event identity, session binding,
+and `daemon_event_seq`/sequence identity before comparing
+`requirement_revision` with the current Requirement revision. It then runs
+server/domain readiness gates, atomically records immutable evidence and any
+valid `Discussing` -> `Ready` promotion, records the resulting Ready-generation
+`state_version` as `accepted_state_version`, commits, and sends
+`event_ack(status=accepted)` (or commits a rejection and sends
+`event_ack(status=rejected)`). The current server durably rejects runtime event
+types without an owning business projection with
+`event_handler_not_implemented`; this is not reported as a false accepted effect.
+Accepted evidence creates/binds `assessment_id`
+and `accepted_state_version`; neither is an inbound assessment concurrency
+token. Later human Accept, Reject, or Request Changes uses `assessment_id`,
+`expected_state_version`, and the exact current Ready generation. The daemon
+never writes Requirement state directly. Repository citation existence and
+session/run provenance are checked by server readiness persistence; the wire
+layer only checks structurally non-empty `repository_id` and `commit_sha`.
 
 ## Sequence and reconnect rules
 
@@ -262,12 +290,12 @@ contract requires it; no decoder error mutates business state.
 
 Axum and tokio-tungstenite do not provide durable messaging. North coordination
 owns stable command/event IDs, monotonic sequences, at-least-once delivery, the
-server command outbox, daemon processed-command dedupe, daemon event buffering,
-ACK-after-commit, reconnect reconciliation, session ownership, retry policy, and
-Requirement transaction semantics. The current implementation provides the wire
-and transport boundaries, daemon registration/authentication/liveness/revocation,
-and the minimal session pinning/outbox foundation; daemon journals, full ACK/replay,
-and business execution retry remain pending.
+server command outbox, daemon processed-command dedupe, daemon event journaling,
+ACK-after-commit, bounded gap handling, reconnect reconciliation, session
+ownership, retry policy, and Requirement transaction semantics. The current
+implementation provides the wire/transport boundaries, daemon registration and
+revocation, server ACK/event ledgers, and the daemon Journal coordinator. Business
+execution retry and the real agent runtime remain downstream responsibilities.
 
 ## Session routing and state ownership
 
@@ -275,9 +303,11 @@ The current session-routing flow selects a connected eligible daemon and persist
 its identity before the first command. `DaemonRuntime::persist_and_dispatch_command`
 constructs and dispatches the persisted envelope only through that owner, while
 inbound events and ACKs from a different daemon receive a protocol error.
-Reconnect receives one reconciliation
-snapshot for the same identity; revocation leaves the session pinned. Full server
-retry/failure handling remains pending.
+Reconnect receives one reconciliation snapshot for the same identity, resends
+unacknowledged commands, and leaves the session pinned; revocation closes only
+that connection and leaves durable work eligible for a future authorized
+connection. Business retry/failure policy remains server-owned and downstream
+of this delivery layer.
 
 The implemented readiness flow is: Agent produces a readiness assessment →
 daemon emits `requirement.assessed` → server deduplicates and locks the

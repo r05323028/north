@@ -42,13 +42,13 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Server is sole owner of durable business state | Partially Enforced | dependency boundaries; server/persistence implementation and integration tests pending |
 | Setup approval state changes require authenticated same-origin POST | Enforced | read-only approval GET, Origin/Host validation, and PostgreSQL HTTP-boundary tests |
 | Public auth/setup request endpoints have resource-aware abuse limits | Specified | deferred to `harden-public-endpoint-abuse-protection`; no current limiter claimed |
-| Every server command is durable before dispatch and idempotent at daemon boundary | Partially Enforced | exact envelope persistence before `DaemonRuntime::persist_and_dispatch_command` dispatch; durable ACK/dedupe remains pending |
-| Command ACK means durable daemon acceptance, not runtime completion | Specified | harden-distributed-system-architecture; protocol integration test pending |
-| Command/event ids and independent directional sequences detect gaps and harmless duplicates | Specified | harden-distributed-system-architecture; protocol replay/gap tests pending |
-| Protocol 0.1.x rejects incompatible/unknown frames deterministically | Partially Enforced | codec validation, terminal supervisor handling, and real protocol-failure test; production coordinator error/replay handling pending |
-| Active session is durably pinned to one daemon; no automatic live migration | Partially Enforced | migrations 0007–0009, `AuthStore::start_session_with_command`, requirement-bound session context, `DaemonRuntime::persist_and_dispatch_command`, reconnect/offline/revocation integration coverage; full durable delivery pending |
+| Every server command is durable before dispatch and idempotent at daemon boundary | Enforced | immutable outbox transaction, payload digest, daemon Journal, stable command/runtime identity, and duplicate suppression |
+| Command ACK means durable daemon acceptance, not runtime completion | Enforced | daemon `received` journal commit precedes `command_ack`; runtime outcome is separate |
+| Command/event ids and independent directional sequences detect gaps and harmless duplicates | Enforced | server watermarks/event ledger plus bounded daemon Journal identity and sequence checks |
+| Protocol 0.1.x rejects incompatible/unknown frames deterministically | Enforced | codec validation, bidirectional terminal `protocol.error`, transport decode handling, and coordinator conflict handling |
+| Active session is durably pinned to one daemon; no automatic live migration | Enforced | migrations 0007–0009, `AuthStore::start_session_with_command`, requirement-bound session context, `DaemonRuntime::persist_and_dispatch_command`, and reconciliation resend |
 | Multi-server connection ownership epochs are enforced | Specified | single-server 0.1.0 only; HA ownership epochs deferred |
-| Durable command redelivery and ACK replay survive process failure | Specified | durable inbox/journal and replay deferred to protocol/runtime follow-ups |
+| Durable command redelivery and ACK replay survive process failure | Enforced | server outbox/watermarks plus daemon Journal recovery, replay, and non-expiring identity tombstones |
 | Single-server restart invalidates stale daemon connection leases | Enforced | `build_app` clears `connected_at`/`connection_id` before serving; restart/reconnect integration coverage |
 | Expired daemon setup rows have bounded retention | Partially Enforced | indexed 24-hour retention and 100-row opportunistic cleanup on setup create/poll; no scheduler in 0.1.0 |
 | Setup claim response is retry-idempotent after a lost response | Specified | accepted 0.1.0 one-shot claim trade-off; no plaintext credential recovery |
@@ -64,8 +64,8 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Clarification never intentionally persists mutations to source repos | Specified | hardening + local-inspection contract; disposable-workspace integration test pending; process-level, NOT sandbox-enforced |
 | Concurrent sessions never share a mutable inspection checkout | Specified | hardening/local-inspection tasks; concurrent workspace test pending |
 | Git credentials never centralized in the server | Specified | repository schema task must omit credential fields; architecture schema check when schema exists |
-| Configured repositories are soft-disabled, not normally hard-deleted | Specified | configured-repositories task; migration/API/history test pending |
-| Disabled repositories are excluded from new inspections | Specified | configured-repositories/local-inspection tasks; integration test pending |
+| Configured repositories are soft-disabled, not normally hard-deleted | Enforced | migration 0006, Admin/Owner lifecycle routes, idempotent timestamps, and retained identity |
+| Disabled repositories are excluded from new inspections | Partially Enforced | enabled-only `AuthStore::active_repositories` catalog is enforced; downstream inspection selection remains owned by local-repository-inspection |
 | Inspections cite exact commit SHAs | Specified | pending introduce-local-repository-inspection |
 
 ## Persistence & retention
@@ -74,7 +74,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | --- | --- | --- |
 | Ephemeral runtime data never sole source of truth; TTL GC touches ephemeral tables only | Specified | pending introduce-runtime-event-retention |
 | Durable vs ephemeral class split | Specified | docs/architecture/persistence.md; retention implementation pending |
-| Durable command/event sequence watermarks survive daemon restart and safe command compaction | Specified | hardening; daemon journal/restart integration test pending |
+| Durable command/event sequence watermarks survive daemon restart and safe command compaction | Enforced | server execution-session watermarks and daemon Journal persisted high-water/tombstone state |
 
 ## Transport and protocol
 
@@ -87,10 +87,10 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | `session.start` carries server-assembled requirement, bounded conversation, and enabled repository metadata | Partially Enforced | `north-server::assemble_session_start` + unit test; persistence/session coordinator pending |
 | `requirement.assessed` carries typed verdict/evidence, not opaque assessment text | Enforced | `north-protocol` validation/round-trip tests, explicit server/domain conversion, immutable evidence persistence, and post-commit ACK handling |
 | Daemon application traffic waits for welcome, reconciliation, and coordination readiness | Enforced | explicit supervisor phases plus real transport gating integration test |
-| Protocol/auth failures stop daemon reconnect | Partially Enforced | terminal failure classification, protocol-failure test, authenticated/revoked integration coverage; durable replay remains pending |
+| Protocol/auth failures stop daemon reconnect | Enforced | terminal failure classification, bidirectional protocol errors, authenticated/revoked handling, and durable coordinator failure boundaries |
 | `north-domain` and `north-protocol` obey positive dependency allowlists | Enforced | Cargo metadata allowlist tests |
-| Connection reconciliation is one validated snapshot delivered to coordination before Active | Partially Enforced | typed snapshot, canonical sparse ACK validation, handshake result, daemon coordination application before readiness, activation gate, and integration tests; durable journal restore pending |
-| Axum/tokio-tungstenite do not provide North reliability | Partially Enforced | transport adapters plus server registration, bounded liveness, exact envelope persistence, session pinning, coordination application, and minimal outbox foundation; daemon journal and full durable delivery pending |
+| Connection reconciliation is one validated snapshot delivered to coordination before Active | Enforced | typed snapshot, canonical sparse ACK validation, handshake result, Journal merge/replay, readiness gate, and activation integration tests |
+| Axum/tokio-tungstenite do not provide North reliability | Enforced | transport adapters plus server registration, bounded liveness, immutable outbox, Journal, ACKs, reconciliation, and bounded recovery |
 | Browser communication remains HTTP + SSE; browser opens no WebSocket | Enforced | `browser_never_opens_websockets` architecture test |
 
 ## Existing good architecture preserved

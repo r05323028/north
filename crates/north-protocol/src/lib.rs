@@ -480,6 +480,11 @@ impl EventAck {
                 "rejected event ACK must include reason".into(),
             ));
         }
+        if matches!(self.status, EventAckStatus::Accepted) && self.reason.is_some() {
+            return Err(FrameError::Validation(
+                "accepted event ACK must not include reason".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -601,6 +606,8 @@ pub enum DaemonFrame {
     Event(EventEnvelope),
     #[serde(rename = "command_ack")]
     CommandAck(CommandAck),
+    #[serde(rename = "protocol_error")]
+    ProtocolError(ProtocolErrorFrame),
 }
 
 impl DaemonFrame {
@@ -610,6 +617,7 @@ impl DaemonFrame {
             Self::Heartbeat(frame) => frame.validate(),
             Self::Event(frame) => frame.validate(),
             Self::CommandAck(frame) => frame.validate(),
+            Self::ProtocolError(frame) => frame.validate(),
         }
     }
 
@@ -805,6 +813,11 @@ mod tests {
                 session_id: "session-1".into(),
                 server_command_seq: 1,
                 schema_version: SCHEMA_VERSION,
+            }),
+            DaemonFrame::ProtocolError(ProtocolErrorFrame {
+                schema_version: SCHEMA_VERSION,
+                code: "invalid_command".into(),
+                message: "command identity conflict".into(),
             }),
         ];
         for frame in daemon_frames {

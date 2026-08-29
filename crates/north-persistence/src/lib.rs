@@ -13,8 +13,11 @@ use subtle::ConstantTimeEq;
 
 mod conversations;
 mod daemon;
+mod delivery;
 mod readiness;
+mod repositories;
 mod requirements;
+
 pub use conversations::{
     ConversationError, ConversationPage, ConversationRecord, MessageKind, MessageRecord,
 };
@@ -23,9 +26,13 @@ pub use daemon::{
     DaemonSetupPreview, DaemonSetupRequest, DaemonSetupState, PinnedCommand,
     DAEMON_SETUP_CLEANUP_BATCH_SIZE, DAEMON_SETUP_RETENTION_SECONDS, DAEMON_SETUP_TTL_SECONDS,
 };
+pub use delivery::{
+    canonical_payload_digest, EventReceipt, EventReceiptOutcome, EventReceiptRequest,
+};
 pub use readiness::{
     AssessmentOutcome, ReadinessAssessmentRecord, ReadinessAssessmentResult, ReadinessError,
 };
+pub use repositories::{repository_metadata, RepositoryRecord};
 pub use requirements::{
     RequirementError, RequirementListQuery, RequirementRecord, RequirementSort,
     RequirementTransition,
@@ -71,6 +78,12 @@ pub enum PersistenceError {
     InvalidCommandPayload,
     InvalidSessionState,
     SessionRequirementMismatch,
+    InvalidRepository(north_domain::repository::RepositoryError),
+    RepositoryNotFound,
+    RepositoryNameConflict,
+    RepositoryUrlImmutable,
+    ProtocolIntegrity(String),
+    EventSequenceGap { expected: u64, received: u64 },
 }
 
 impl fmt::Display for PersistenceError {
@@ -95,6 +108,17 @@ impl fmt::Display for PersistenceError {
             Self::SessionRequirementMismatch => {
                 f.write_str("session is bound to another requirement")
             }
+            Self::InvalidRepository(error) => write!(f, "invalid repository: {error:?}"),
+            Self::RepositoryNotFound => f.write_str("repository not found"),
+            Self::RepositoryNameConflict => f.write_str("repository name already exists"),
+            Self::RepositoryUrlImmutable => f.write_str("repository URL is immutable"),
+            Self::ProtocolIntegrity(reason) => write!(f, "protocol integrity error: {reason}"),
+            Self::EventSequenceGap { expected, received } => {
+                write!(
+                    f,
+                    "event sequence gap: expected {expected}, received {received}"
+                )
+            }
         }
     }
 }
@@ -118,7 +142,13 @@ impl Error for PersistenceError {
             | Self::InvalidCapabilities
             | Self::InvalidCommandPayload
             | Self::InvalidSessionState
-            | Self::SessionRequirementMismatch => None,
+            | Self::SessionRequirementMismatch
+            | Self::InvalidRepository(_)
+            | Self::RepositoryNotFound
+            | Self::RepositoryNameConflict
+            | Self::RepositoryUrlImmutable
+            | Self::ProtocolIntegrity(_)
+            | Self::EventSequenceGap { .. } => None,
         }
     }
 }
@@ -435,6 +465,55 @@ fn hash_secret(secret: &[u8]) -> Vec<u8> {
     Sha256::digest(secret).to_vec()
 }
 
+pub(crate) fn payload_digest(payload: &str) -> String {
+    use md5::{Digest, Md5};
+    let digest = Md5::digest(payload.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn command_identity_digest(payload: &str) -> String {
+    let mut value = serde_json::from_str::<serde_json::Value>(payload)
+        .unwrap_or_else(|_| serde_json::Value::String(payload.to_owned()));
+    if let Some(command_payload) = value
+        .get_mut("payload")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        command_payload.remove("sent_at");
+    }
+    let canonical = serde_json::to_vec(&value).unwrap_or_default();
+    use md5::{Digest, Md5};
+    let digest = Md5::digest(canonical);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub(crate) fn command_identity_digest_valid(payload: &str, stored: &str) -> bool {
+    command_identity_digest(payload) == stored || payload_digest(payload) == stored
+}
+
+pub(crate) fn command_identity_matches(existing: &str, candidate: &str, stored: &str) -> bool {
+    if command_identity_digest(candidate) == stored {
+        return true;
+    }
+    if payload_digest(existing) != stored {
+        return false;
+    }
+    let Ok(mut existing) = serde_json::from_str::<serde_json::Value>(existing) else {
+        return false;
+    };
+    let Ok(mut candidate) = serde_json::from_str::<serde_json::Value>(candidate) else {
+        return false;
+    };
+    for value in [&mut existing, &mut candidate] {
+        if let Some(command_payload) = value
+            .get_mut("payload")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            command_payload.remove("sent_at");
+        }
+    }
+    existing == candidate
+}
+
 fn random_hex(byte_count: usize) -> String {
     let mut bytes = vec![0_u8; byte_count];
     rng().fill(bytes.as_mut_slice());
@@ -506,6 +585,9 @@ mod tests {
             .await
             .expect("clear instance settings");
         for table in [
+            "server_message_command_map",
+            "server_command_tombstones",
+            "server_event_dedupe",
             "server_command_outbox",
             "execution_sessions",
             "daemon_setup_requests",

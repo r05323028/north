@@ -61,11 +61,15 @@ coordination remains responsible for it.
   with the corresponding durable record.
 - Server commands are durably outboxed before dispatch. Daemon commands move
   through durable `received`, `dispatch_started`, and `terminal` states. A
-  `command_ack` means durable receipt for processing, not runtime completion.
+  `command_ack` means durable receipt for processing, not runtime completion. A
+  command journal terminal outcome describes processing/dispatching that command,
+  not execution-session completion; `session.completed`/`session.failed` events
+  report session outcome separately.
 - Daemon events are journaled before transmission. The server commits either a
   business effect or a durable rejection before sending
   `event_ack(status=accepted)` or `event_ack(status=rejected)`; both are
   terminal transport acknowledgements for that exact event.
+- Durable command coordination decides journal state and idempotency before crossing a narrow internal dispatch/execution seam. The seam accepts stable command/runtime operation identity; durable-delivery tests may use a deterministic fake executor. The future `introduce-agent-requirement-clarification` change supplies the real agent-runtime adapter behind it.
 - Reconciliation uses one finite connection-level snapshot with one state per
   pinned session. The server resends unacknowledged commands in sequence order;
   the daemon replays unacknowledged events in sequence order after applying the
@@ -73,23 +77,30 @@ coordination remains responsible for it.
 - A crash after dispatch begins never causes blind resubmission of a
   side-effecting operation. Recovery first reattaches by stable operation
   identity; if outcome remains unknowable, the daemon records terminal unknown
-  state and emits an execution `session.failed` fact with
-  `recoverable: false`.
+  state and emits an execution `session.failed` fact. Its `recoverable` value
+  reports only whether the existing runtime operation can be locally
+  reattached/resumed; server retry and failure policy remains authoritative.
 
 Repository preparation events stay out unless a later change proves genuine
-protocol value. The protocol does not own agent prompting, clarification
-behavior, tool choice, Requirement readiness judgment, repository inspection,
-or server business retry policy.
+protocol value. The protocol does not own the agent runtime abstraction or adapter, agent
+prompting, clarification behavior, tool choice, Requirement readiness judgment,
+repository inspection, or server business retry policy.
 
 ## Context assembly and typed evidence
 
 `session.start` SHALL carry server-assembled `RequirementContext`, bounded and
 relevant `ConversationContext`, and enabled repository metadata DTOs. The wire
 boundary contains no credentials, checkout paths, persistence handles, or domain
-objects. `requirement.assessed` carries typed readiness evidence. The server
-still owns conversion and the transaction that compares `revision`,
-`state_version`, `assessment_id`, and `accepted_state_version`; the protocol
-only durably delivers the fact.
+objects. `requirement.assessed` carries typed readiness evidence. For a uniquely
+identified, session-bound, sequence-valid assessment event, the server validates
+`requirement_revision` against the current Requirement revision, runs its domain
+readiness gates, atomically records immutable assessment evidence, optionally
+promotes `Discussing` to `Ready`, and records the resulting Ready-generation
+`state_version` as `accepted_state_version`. `assessment_id` and
+`accepted_state_version` are created/bound by accepted readiness evidence; they
+are not inbound assessment concurrency tokens. Later human Accept, Reject, or
+Request Changes requires `assessment_id`, `expected_state_version`, and the
+exact current Ready generation. The protocol only durably delivers the fact.
 
 `session.resume` remains an execution-recovery command only. It does not carry a
 transport cursor; replay cursors live in reconciliation state.

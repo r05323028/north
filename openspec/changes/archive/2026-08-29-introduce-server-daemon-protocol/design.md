@@ -151,6 +151,21 @@ conflicting ACK is a protocol/integrity error. Server coordination maintains a
 contiguous `command_ack_through_seq` per session; it advances only across
 actually acknowledged commands, never across liveness or socket state.
 
+### Command dispatch/execution seam
+
+The durable command coordinator is the owner of journal state and idempotency.
+It MUST decide whether a command may cross the execution boundary before
+crossing it. The narrow internal seam accepts the stable command identity and
+stable `runtime_operation_id` (equal to `command_id` in 0.1.0), plus the
+already-validated runtime operation input. Its exact Rust type/name is not a
+wire contract. Durable-delivery tests MAY provide a deterministic fake/test
+executor. Duplicate or replayed commands cross the seam only when the command
+journal state machine permits it; terminal or otherwise duplicate-safe records
+never cross it again. The later `introduce-agent-requirement-clarification`
+change supplies the real agent-runtime adapter behind this seam. This protocol
+change adds no prompting, SDK behavior, tool choice, repository inspection, or
+readiness judgment.
+
 ### Daemon command journal state machine
 
 Each command has one monotonic local delivery state:
@@ -165,8 +180,11 @@ dispatch_started
   matter; runtime_operation_id is stable and equals command_id in 0.1.0.
 
 terminal
-  no further automatic invocation is permitted; outcome metadata is durable:
-  completed, failed, or unknown, with reason/timestamp and operation identity.
+  no further automatic invocation is permitted; the local outcome of processing
+  or dispatching this specific command is durable: dispatch_succeeded,
+  dispatch_failed, or unknown. An implementation MAY use completed/failed
+  labels for the first two local outcomes; neither means the execution session is
+  terminal.
 ```
 
 `received -> dispatch_started -> terminal` is the only normal progression.
@@ -197,14 +215,20 @@ session.failed {
 }
 ```
 
+`recoverable` is a daemon fact about the existing runtime operation: `true`
+means the daemon believes that operation can be safely resumed or reattached
+by local mechanics; `false` means it cannot safely do so. It does not mean the
+server is forbidden from issuing a future explicit attempt, and it does not
+make the daemon the authority for execution failure. In both cases the server
+chooses whether to issue a new `session.resume`/`session.start` attempt or mark
+execution `Failed`. For `execution_outcome_unknown`, the daemon MUST NOT
+resubmit automatically; any later attempt is explicitly server-directed and
+uses a new command identity under server retry policy.
+
 The reason is an execution fact and contains stable operation identity, not
-secret payload. This event is journaled and ACKed like every other event. It is
-not a `protocol.error`, does not mutate Requirement state, and does not assert
-exactly-once runtime execution. Server-owned retry/failure policy decides what
-happens next; the daemon never automatically resubmits the side-effecting
-operation merely because its outcome is unknown. Any later policy action is a
-new, explicitly identified command and must use whatever safety/idempotency the
-underlying runtime supports.
+secret payload. This event is journaled and ACKed like every other event. It
+is not a `protocol.error`, does not mutate Requirement state, and does not
+assert exactly-once runtime execution.
 
 ### `message.send` identity
 
@@ -230,9 +254,18 @@ and payload. The daemon does not allocate a new event identity for resend.
 The server handles an event in one transaction that validates its identity and
 payload digest, records event dedupe/rejection state, writes immutable evidence
 where applicable, and applies any business transition. For
-`requirement.assessed`, the transaction still checks current Requirement
-`revision`, `state_version`, `assessment_id`, and `accepted_state_version`; the
-server remains authoritative for readiness.
+`requirement.assessed`, that transaction validates event identity, session
+binding, `daemon_event_seq`/sequence identity, and `requirement_revision`
+against the current Requirement revision before running server/domain readiness
+gates. It then atomically records immutable evidence and any valid
+`Discussing` -> `Ready` promotion, recording the resulting Ready-generation
+`state_version` as `accepted_state_version`. Accepted evidence creates/binds its
+`assessment_id` and `accepted_state_version`; neither is an inbound assessment
+concurrency token. Later human review uses `assessment_id`,
+`expected_state_version`, and the exact current Ready generation. The wire
+`north-protocol` layer checks only structurally non-empty `repository_id` and
+`commit_sha`; repository existence and session/run provenance belong to server
+readiness persistence. The server remains authoritative for readiness.
 
 After commit:
 
@@ -358,7 +391,11 @@ transport-delivery state, not Requirement lifecycle state. Requirement
 `Accepted`/`Rejected` must never by itself authorize outbox/journal compaction.
 A terminal execution session can retain unacknowledged commands/events until
 its delivery watermarks and tombstones are safe. A Requirement can be Accepted
-while its execution session still has delivery work.
+while its execution session still has delivery work. A command journal reaching
+its local terminal dispatch outcome does not end the execution session: for
+example, `session.start` dispatch may succeed while the session remains
+`Running`, followed later by a separate `session.completed` or `session.failed`
+event.
 
 ### Context, ownership, and retry boundaries
 
