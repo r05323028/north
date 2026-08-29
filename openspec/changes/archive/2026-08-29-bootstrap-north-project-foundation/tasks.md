@@ -8,7 +8,7 @@
 
 - [x] 2.1 `north-architecture-tests` structural tests: forbidden dependency edges per crate manifest
 - [x] 2.2 Dumping-ground crate ban; frontend WebSocket ban (HTTP + SSE only)
-- [ ] 2.3 Verify: intentionally add `sqlx` to north-domain, confirm test failure message, revert
+- [x] 2.3 Verify: intentionally add `sqlx` to north-domain, confirm test failure message, revert
 
 ## 3. Web app
 
@@ -25,10 +25,10 @@
 ## 5. CI
 
 - [x] 5.1 GitHub Actions: rust job (fmt, clippy -D warnings, test), web job (lint, typecheck, build), openspec job (validate --all --strict)
-- [ ] 5.2 Confirm CI matches locally-passing commands exactly (no invented steps)
+- [x] 5.2 Confirm CI matches locally-passing commands exactly (no invented steps)
 
 ## 6. Final validation
 
-- [ ] 6.1 `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
-- [ ] 6.2 `(cd apps/web && npm run lint && npm run typecheck && npm run build)`
-- [ ] 6.3 `openspec validate --all --strict`
+- [x] 6.1 `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
+- [x] 6.2 `(cd apps/web && npm run lint && npm run typecheck && npm run build)`
+- [x] 6.3 `openspec validate --all --strict`

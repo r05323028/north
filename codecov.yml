@@ -1,0 +1,39 @@
+---
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+
+      rust:
+        target: auto
+        threshold: 1%
+        flags:
+          - rust
+
+      web:
+        target: auto
+        threshold: 1%
+        flags:
+          - web
+
+    # Temporary: disable patch gate while baseline coverage is established.
+    # Keep project and flag statuses plus coverage uploads active.
+    patch: off  # yamllint disable-line rule:truthy
+
+comment:
+  layout: "diff, flags, files"
+  behavior: default
+
+flags:
+  rust:
+    paths:
+      - crates/
+      - tests/
+    carryforward: true
+
+  web:
+    paths:
+      - apps/web/
+    carryforward: true

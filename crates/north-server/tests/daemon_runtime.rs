@@ -171,6 +171,14 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .await
         .expect("run migrations");
     let store = AuthStore::new(pool.clone());
+    sqlx::query(
+        "INSERT INTO repositories (id, name, name_normalized, url, description)
+         VALUES ('00000000-0000-4000-8000-000000000001', 'North', 'north', 'https://example.test/north.git', '')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed configured repository");
 
     let admin_email = unique_email("daemon-admin");
     store
@@ -615,7 +623,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             blockers: vec![],
             assumptions: vec!["Daemon owns session".into()],
             repositories_reviewed: vec![ReviewedRepositoryWire {
-                repository_id: "north".into(),
+                repository_id: "00000000-0000-4000-8000-000000000001".into(),
                 commit_sha: "abc123".into(),
             }],
         }),
@@ -1045,6 +1053,47 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .sessions
         .iter()
         .any(|session| session.session_id == session_id));
+    for _ in 0..2 {
+        let ServerFrame::Command(resent) = next_server_frame(&mut socket).await else {
+            panic!("expected unacknowledged command replay");
+        };
+        socket
+            .send(Message::Text(
+                encode_daemon_frame(&DaemonFrame::CommandAck(CommandAck {
+                    command_id: resent.command_id,
+                    session_id: resent.session_id,
+                    server_command_seq: resent.server_command_seq,
+                    schema_version: SCHEMA_VERSION,
+                }))
+                .expect("encode replay ACK")
+                .into(),
+            ))
+            .await
+            .expect("send replay ACK");
+    }
+    for _ in 0..100 {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM server_command_outbox
+             WHERE daemon_id = $1 AND acknowledged_at IS NULL",
+        )
+        .bind(&claimed.daemon_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count replay work");
+        if pending == 0 {
+            break;
+        }
+        sleep(Duration::from_millis(5)).await;
+    }
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM server_command_outbox
+         WHERE daemon_id = $1 AND acknowledged_at IS NULL",
+    )
+    .bind(&claimed.daemon_id)
+    .fetch_one(&pool)
+    .await
+    .expect("final count replay work");
+    assert_eq!(pending, 0);
 
     let response = app_for_request(&app, Method::POST, &claimed.daemon_id, &requester.token).await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -1155,6 +1204,19 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
+    sqlx::query(
+        "DELETE FROM server_command_tombstones
+         WHERE session_id = $1",
+    )
+    .bind(format!("assessment-session-{}", claimed.daemon_id))
+    .execute(&pool)
+    .await
+    .expect("cleanup command tombstones");
+    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
+        .bind(format!("assessment-session-{}", claimed.daemon_id))
+        .execute(&pool)
+        .await
+        .expect("cleanup event tombstones");
     sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(format!("assessment-session-{}", claimed.daemon_id))
         .execute(&pool)

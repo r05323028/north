@@ -15,7 +15,10 @@ assumptions, and `repositories_reviewed` entries carrying non-empty repository
 identity plus the inspected commit SHA. The server SHALL explicitly convert
 these transport values to the domain assessment; wire types SHALL remain
 domain-independent. Assessment matching SHALL use `requirement_revision`, not
-mutable `state_version`.
+mutable `state_version`, `assessment_id`, or `accepted_state_version`; those
+identities are not inbound assessment concurrency tokens. Accepted readiness
+evidence creates/binds `assessment_id` and records the resulting Ready-generation
+`accepted_state_version`.
 
 #### Scenario: Assessment cites its sources
 
@@ -108,15 +111,22 @@ bound to the payload Requirement, validate event identity, deduplicate the event
 and detect per-session sequence conflicts before loading/locking the current
 Requirement. Identity or sequence conflicts SHALL be protocol errors with no
 assessment row or event ACK. For a uniquely identified, sequence-valid event,
-the server SHALL load/lock the current Requirement, validate the event revision,
-run domain readiness gates, persist immutable evidence with its
-accepted/rejected result, record the post-promotion `state_version` on an
-accepted assessment, apply any valid transition and exactly one `state_version`
-increment, and commit as one transaction. Only after commit SHALL it send
-`event_ack(status=accepted)` for a valid effect or
+the server SHALL load/lock the current Requirement, validate
+`requirement_revision` against its current revision, verify every cited
+`repository_id` identifies an existing durable configured-repository row and was
+valid for the session/run context, run domain readiness gates, persist immutable
+evidence with its accepted/rejected result, record the post-promotion
+`state_version` as `accepted_state_version` on accepted evidence, apply any valid
+transition and exactly one `state_version` increment, and commit as one
+transaction. `assessment_id` and `accepted_state_version` are created/bound by
+accepted readiness evidence, not supplied as inbound concurrency tokens. Only
+after commit SHALL it send `event_ack(status=accepted)` for a valid effect or
 `event_ack(status=rejected)` for a durable rejection. A stale/invalid event SHALL
 not change Requirement revision, state_version, or status; a duplicate of a
-committed event SHALL not repeat its effect or version increment.
+committed event SHALL not repeat its effect or version increment. The
+`north-protocol` wire layer validates only structural non-empty repository
+identity/SHA fields; repository existence and session/run acceptability belong
+to server readiness persistence.
 
 #### Scenario: Event ACK follows durable assessment handling
 
@@ -127,6 +137,22 @@ committed event SHALL not repeat its effect or version increment.
 
 - **WHEN** an authenticated daemon sends an assessment for a Requirement different from its bound session
 - **THEN** the server rejects the event before any evidence, version, audit, or lifecycle state changes
+
+#### Scenario: Unknown repository citation is durably rejected
+
+- **WHEN** an otherwise well-formed assessment cites a non-empty unknown
+  `repository_id`
+- **THEN** the server commits a durable rejection, does not accept the evidence
+  or promote the Requirement, and does not fabricate a repository row
+
+#### Scenario: Disabled in-flight repository citation remains eligible
+
+- **WHEN** repository R was enabled in `session.start`, inspection began, R was
+  then disabled, and the assessment cites R with the exact commit SHA from that
+  authorized run
+- **THEN** readiness does not reject the citation solely because R was disabled;
+  the durable row and session/run validity remain required, and R remains
+  unavailable for new inspection selection
 
 #### Scenario: Sequence conflict is a protocol rejection
 

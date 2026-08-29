@@ -20,13 +20,13 @@
 
 ## 4. Harness
 
-- [x] 4.1 scripts/validate.sh (fast/unit/integration/e2e/smoke/ci; unsupported exit 3)
+- [x] 4.1 scripts/validate.sh (fast/unit/integration/e2e/smoke/ci; unsupported exit 3; unit/ci include Web Vitest)
 - [x] 4.2 scripts/pre-push-validation.sh (native gate + web build + act job replay, escape hatch)
 - [x] 4.3 scripts/check-commit-message.sh (--self-test covers accept/reject matrix)
 - [x] 4.4 .pre-commit-config.yaml: hygiene + rustfmt (pre-commit); commit-msg validator; pre-push entrypoint; strict OpenSpec validation stays in shared gates
-- [x] 4.5 ci.yml: pr-title job, split rust/web/openspec jobs, stable gate job
+- [x] 4.5 ci.yml: pr-title job, split rust/web/coverage/openspec jobs, stable gate job, temporary Codecov patch status exception
 - [x] 4.6 docs/development/{testing,ci,git-workflow,tooling,invariants}.md rewritten/new; AGENTS.md navigation map with conditional CodeGraph/Graphify + completion rules
-- Evidence: ./scripts/validate.sh fast OK; unit OK; integration/e2e/smoke exit 3 with explicit message; check-commit-message --self-test 8/8; ci.yml gate logic reviewed against needs.*.results.
+- Evidence: `./scripts/validate.sh unit` and `ci` run Rust, architecture, and Web unit validation; integration/e2e/smoke exit 3 with explicit message; check-commit-message --self-test 8/8; coverage uploads remain separate while temporary patch status is disabled; ci.yml gate logic reviewed against needs.*.results.
 
 ## 5. OpenSpec consistency
 

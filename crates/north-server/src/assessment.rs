@@ -110,6 +110,35 @@ pub async fn process_requirement_assessed(
     ))
 }
 
+pub async fn process_requirement_assessed_with_event_digest(
+    store: &AuthStore,
+    event_id: &str,
+    session_id: &str,
+    daemon_event_seq: u64,
+    payload: &RequirementAssessed,
+    event_digest: &str,
+) -> Result<EventAck, AssessmentError> {
+    let assessment = readiness_assessment_from_wire(payload, now_ms())
+        .map_err(AssessmentError::InvalidPayload)?;
+    let result = store
+        .record_readiness_assessment_with_event_digest(
+            event_id,
+            session_id,
+            daemon_event_seq,
+            &payload.requirement_id,
+            &assessment,
+            event_digest,
+        )
+        .await
+        .map_err(AssessmentError::Persistence)?;
+    Ok(event_ack(
+        &result.record.event_id,
+        &result.record.session_id,
+        result.record.daemon_event_seq,
+        &result,
+    ))
+}
+
 /// Process a daemon envelope. Non-assessment events remain owned by later
 /// runtime event handling and are rejected here rather than silently mutated.
 pub async fn handle_requirement_assessed(
@@ -119,12 +148,16 @@ pub async fn handle_requirement_assessed(
     let Event::RequirementAssessed(payload) = &envelope.event else {
         return Err(AssessmentError::NotAssessmentEvent);
     };
-    process_requirement_assessed(
+    let value = serde_json::to_value(envelope)
+        .map_err(|error| AssessmentError::InvalidPayload(FrameError::Json(error)))?;
+    let digest = north_persistence::canonical_payload_digest(&value);
+    process_requirement_assessed_with_event_digest(
         store,
         &envelope.event_id,
         &envelope.session_id,
         envelope.daemon_event_seq,
         payload,
+        &digest,
     )
     .await
 }
@@ -201,7 +234,9 @@ impl From<ReadinessError> for AssessmentHttpError {
             | ReadinessError::SequenceConflict
             | ReadinessError::EventIdentityConflict
             | ReadinessError::SessionRequirementMismatch => Self::Internal,
-            ReadinessError::Database(_) | ReadinessError::InvalidRevision => Self::Internal,
+            ReadinessError::Database(_)
+            | ReadinessError::InvalidRevision
+            | ReadinessError::SequenceGap { .. } => Self::Internal,
         }
     }
 }

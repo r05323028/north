@@ -6,11 +6,13 @@ use axum::{
     Extension, Router,
 };
 use north_persistence::{
-    AuthStore, DaemonRegistration, DaemonSetupClaim, DaemonSetupState, PersistenceError,
+    canonical_payload_digest, AuthStore, DaemonRegistration, DaemonSetupClaim, DaemonSetupState,
+    EventReceiptOutcome, EventReceiptRequest, PersistenceError,
 };
 use north_protocol::{
-    Command, CommandEnvelope, DaemonFrame, Heartbeat, ProtocolErrorFrame, ReconcileSnapshot,
-    ServerFrame, SessionReconcileState, Welcome, PROTOCOL_VERSION, SCHEMA_VERSION,
+    Command, CommandEnvelope, DaemonFrame, EventAck, EventAckStatus, EventEnvelope, Heartbeat,
+    ProtocolErrorFrame, ReconcileSnapshot, RepositoryContext, ServerFrame, SessionReconcileState,
+    Welcome, PROTOCOL_VERSION, SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -318,6 +320,7 @@ struct LiveConnection {
     connection_id: String,
     outbound: mpsc::Sender<ServerFrame>,
     close: mpsc::Sender<()>,
+    ready: bool,
 }
 
 #[derive(Debug)]
@@ -333,6 +336,41 @@ pub struct CommandRequest {
     pub command_id: String,
     pub session_id: String,
     pub command: Command,
+}
+
+enum EventHandleError {
+    Gap,
+    Integrity(String),
+    RequirementMismatch,
+    Internal,
+}
+
+fn map_persistence_event_error(error: PersistenceError) -> EventHandleError {
+    match error {
+        PersistenceError::EventSequenceGap { .. } => EventHandleError::Gap,
+        PersistenceError::ProtocolIntegrity(reason) => EventHandleError::Integrity(reason),
+        _ => EventHandleError::Internal,
+    }
+}
+
+fn map_assessment_event_error(error: crate::assessment::AssessmentError) -> EventHandleError {
+    match error {
+        crate::assessment::AssessmentError::Persistence(
+            north_persistence::ReadinessError::SequenceGap { .. },
+        ) => EventHandleError::Gap,
+        crate::assessment::AssessmentError::InvalidPayload(error) => {
+            EventHandleError::Integrity(error.to_string())
+        }
+        crate::assessment::AssessmentError::Persistence(
+            north_persistence::ReadinessError::SequenceConflict
+            | north_persistence::ReadinessError::EventIdentityConflict,
+        ) => EventHandleError::Integrity("event identity conflict".into()),
+        crate::assessment::AssessmentError::Persistence(
+            north_persistence::ReadinessError::SessionRequirementMismatch,
+        ) => EventHandleError::RequirementMismatch,
+        crate::assessment::AssessmentError::Persistence(_)
+        | crate::assessment::AssessmentError::NotAssessmentEvent => EventHandleError::Internal,
+    }
 }
 
 impl DaemonRuntime {
@@ -399,6 +437,11 @@ impl DaemonRuntime {
             .await
         {
             Ok(authenticated) => authenticated,
+            Err(PersistenceError::Database(_)) => {
+                // Close without a protocol error; the daemon may reconnect and
+                // retry authentication once persistence is available.
+                return;
+            }
             Err(error) => {
                 send_protocol_error(
                     &connection.outbound,
@@ -416,6 +459,7 @@ impl DaemonRuntime {
                 connection_id: authenticated.connection_id.clone(),
                 outbound: connection.outbound.clone(),
                 close: close_sender,
+                ready: false,
             },
         );
         if let Some(old) = old {
@@ -468,9 +512,12 @@ impl DaemonRuntime {
                     session_id: session.session_id,
                     command_ack_through_seq: session.command_ack_through_seq,
                     event_ack_through_seq: session.event_ack_through_seq,
-                    event_ack_sparse: Vec::new(),
+                    event_ack_sparse: session.event_ack_sparse,
                 })
                 .collect(),
+            Err(PersistenceError::Database(_)) => {
+                return;
+            }
             Err(_) => {
                 send_protocol_error(
                     &connection.outbound,
@@ -493,6 +540,46 @@ impl DaemonRuntime {
             return;
         }
 
+        let pending_commands = match self.inner.store.unacknowledged_commands(daemon_id).await {
+            Ok(commands) => commands,
+            Err(PersistenceError::Database(_)) => {
+                return;
+            }
+            Err(_) => {
+                send_protocol_error(
+                    &connection.outbound,
+                    "internal_error",
+                    "unable to load unacknowledged commands",
+                )
+                .await;
+                return;
+            }
+        };
+        for pending in pending_commands {
+            let frame = match ServerFrame::from_json(&pending.payload) {
+                Ok(ServerFrame::Command(command))
+                    if command.command_id == pending.command_id
+                        && command.session_id == pending.session_id
+                        && command.server_command_seq == pending.server_command_seq =>
+                {
+                    ServerFrame::Command(command)
+                }
+                _ => {
+                    send_protocol_error(
+                        &connection.outbound,
+                        "invalid_outbox_payload",
+                        "durable command payload identity does not match its outbox row",
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if connection.outbound.send(frame).await.is_err() {
+                return;
+            }
+        }
+        self.mark_live_ready(daemon_id, connection_id).await;
+
         loop {
             tokio::select! {
                 _ = close.recv() => {
@@ -501,23 +588,42 @@ impl DaemonRuntime {
                 }
                 frame = connection.inbound.recv() => match frame {
                     Some(DaemonFrame::Heartbeat(Heartbeat { daemon_id: reported_id, .. })) => {
-                        if reported_id != daemon_id || self.inner.store.touch_daemon(daemon_id, connection_id).await.is_err() {
+                        if reported_id != daemon_id {
+                            send_protocol_error(&connection.outbound, "daemon_identity_mismatch", "heartbeat identity rejected").await;
+                            return;
+                        }
+                        if let Err(error) = self.inner.store.touch_daemon(daemon_id, connection_id).await {
+                            if matches!(error, PersistenceError::Database(_)) {
+                                return;
+                            }
                             send_protocol_error(&connection.outbound, "daemon_identity_mismatch", "heartbeat identity rejected").await;
                             return;
                         }
                     }
                     Some(DaemonFrame::Event(event)) => {
-                        if self.inner.store.touch_daemon(daemon_id, connection_id).await.is_err()
-                            || !self.session_belongs_to_daemon(&event.session_id, daemon_id).await
+                        if let Err(error) = self
+                            .validate_daemon_session(&event.session_id, daemon_id, connection_id)
+                            .await
                         {
+                            if matches!(error, PersistenceError::Database(_)) {
+                                return;
+                            }
                             send_protocol_error(&connection.outbound, "daemon_identity_mismatch", "event session owner rejected").await;
                             return;
                         }
-                        if let north_protocol::Event::RequirementAssessed(payload) = &event.event {
-                            if !self
-                                .session_matches_requirement(&event.session_id, &payload.requirement_id)
-                                .await
-                            {
+                        match self.handle_event(&event).await {
+                            Ok(ack) => {
+                                if connection.outbound.send(ServerFrame::EventAck(ack)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Err(EventHandleError::Gap) => {
+                                // A valid frame above the next sequence remains in the
+                                // daemon journal; close without a protocol error so replay
+                                // can fill the gap on the next connection.
+                                return;
+                            }
+                            Err(EventHandleError::RequirementMismatch) => {
                                 send_protocol_error(
                                     &connection.outbound,
                                     "assessment_requirement_mismatch",
@@ -526,31 +632,49 @@ impl DaemonRuntime {
                                 .await;
                                 return;
                             }
-                            match crate::assessment::handle_requirement_assessed(&self.inner.store, &event).await {
-                                Ok(ack) => {
-                                    if connection.outbound.send(ServerFrame::EventAck(ack)).await.is_err() {
-                                        return;
-                                    }
-                                }
-                                Err(_) => {
-                                    send_protocol_error(
-                                        &connection.outbound,
-                                        "assessment_processing_failed",
-                                        "assessment was not durably handled",
-                                    )
-                                    .await;
-                                    return;
-                                }
+                            Err(EventHandleError::Integrity(reason)) => {
+                                send_protocol_error(&connection.outbound, "event_identity_conflict", &reason).await;
+                                return;
+                            }
+                            Err(EventHandleError::Internal) => {
+                                // No ACK and no protocol error: the journaled event
+                                // remains replay-eligible after this connection closes.
+                                return;
                             }
                         }
                     }
                     Some(DaemonFrame::CommandAck(ack)) => {
-                        if self.inner.store.touch_daemon(daemon_id, connection_id).await.is_err()
-                            || !self.session_belongs_to_daemon(&ack.session_id, daemon_id).await
+                        if let Err(error) = self
+                            .validate_daemon_session(&ack.session_id, daemon_id, connection_id)
+                            .await
                         {
+                            if matches!(error, PersistenceError::Database(_)) {
+                                return;
+                            }
                             send_protocol_error(&connection.outbound, "daemon_identity_mismatch", "command ACK session owner rejected").await;
                             return;
                         }
+                        match self.inner.store.acknowledge_command(
+                            &ack.command_id,
+                            &ack.session_id,
+                            ack.server_command_seq,
+                        ).await {
+                            Ok(_) => {}
+                            Err(PersistenceError::ProtocolIntegrity(reason)) => {
+                                send_protocol_error(&connection.outbound, "command_ack_conflict", &reason).await;
+                                return;
+                            }
+                            Err(_) => {
+                                // Do not turn a transient database failure into a
+                                // terminal protocol violation; the daemon will resend.
+                                return;
+                            }
+                        }
+                    }
+                    Some(DaemonFrame::ProtocolError(_)) => {
+                        // The daemon reports a terminal protocol violation;
+                        // close only this authenticated connection.
+                        return;
                     }
                     Some(DaemonFrame::Hello(_)) => {
                         send_protocol_error(&connection.outbound, "unexpected_hello", "hello is only valid at connection start").await;
@@ -562,6 +686,48 @@ impl DaemonRuntime {
         }
     }
 
+    async fn handle_event(&self, event: &EventEnvelope) -> Result<EventAck, EventHandleError> {
+        if matches!(event.event, north_protocol::Event::RequirementAssessed(_)) {
+            return crate::assessment::handle_requirement_assessed(&self.inner.store, event)
+                .await
+                .map_err(map_assessment_event_error);
+        }
+
+        let value = serde_json::to_value(event)
+            .map_err(|error| EventHandleError::Integrity(error.to_string()))?;
+        let digest = canonical_payload_digest(&value);
+        let payload = serde_json::to_string(event)
+            .map_err(|error| EventHandleError::Integrity(error.to_string()))?;
+        let receipt = self
+            .inner
+            .store
+            .record_event_receipt_with_payload(EventReceiptRequest {
+                event_id: &event.event_id,
+                session_id: &event.session_id,
+                daemon_event_seq: event.daemon_event_seq,
+                payload_digest: &digest,
+                payload: &payload,
+                outcome: EventReceiptOutcome::Rejected,
+                rejection_reason: Some("event_handler_not_implemented"),
+            })
+            .await
+            .map_err(map_persistence_event_error)?;
+        let (status, reason) = match receipt.outcome {
+            EventReceiptOutcome::Accepted => (EventAckStatus::Accepted, None),
+            EventReceiptOutcome::Rejected => {
+                (EventAckStatus::Rejected, receipt.rejection_reason.clone())
+            }
+        };
+        Ok(EventAck {
+            event_id: receipt.event_id,
+            session_id: receipt.session_id,
+            daemon_event_seq: receipt.daemon_event_seq,
+            schema_version: SCHEMA_VERSION,
+            status,
+            reason,
+        })
+    }
+
     pub async fn persist_and_dispatch_command(
         &self,
         request: CommandRequest,
@@ -569,9 +735,65 @@ impl DaemonRuntime {
     ) -> Result<north_persistence::PinnedCommand, DaemonDispatchError> {
         let command_id = request.command_id.clone();
         let session_id = request.session_id.clone();
+        if let Some(pinned) = self
+            .inner
+            .store
+            .command_by_id(&command_id)
+            .await
+            .map_err(|_| DaemonDispatchError::Internal)?
+        {
+            if pinned.session_id != session_id {
+                return Err(DaemonDispatchError::InvalidCommand);
+            }
+            if pinned.compacted {
+                let matches = if pinned.payload.is_empty() {
+                    let candidate = ServerFrame::Command(CommandEnvelope {
+                        command_id: pinned.command_id.clone(),
+                        session_id: pinned.session_id.clone(),
+                        server_command_seq: pinned.server_command_seq,
+                        sent_at: String::new(),
+                        schema_version: SCHEMA_VERSION,
+                        command: request.command.clone(),
+                    })
+                    .to_json()
+                    .map_err(|_| DaemonDispatchError::InvalidCommand)?;
+                    north_persistence::command_identity_digest(&candidate)
+                        == pinned.command_identity_digest
+                } else {
+                    let persisted = ServerFrame::from_json(&pinned.payload)
+                        .map_err(|_| DaemonDispatchError::InvalidCommand)?;
+                    let ServerFrame::Command(envelope) = persisted else {
+                        return Err(DaemonDispatchError::InvalidCommand);
+                    };
+                    same_retry_command(&request.command, &envelope.command)
+                };
+                if !matches {
+                    return Err(DaemonDispatchError::InvalidCommand);
+                }
+                return Ok(pinned);
+            }
+            let persisted = ServerFrame::from_json(&pinned.payload)
+                .map_err(|_| DaemonDispatchError::InvalidCommand)?;
+            let ServerFrame::Command(envelope) = &persisted else {
+                return Err(DaemonDispatchError::InvalidCommand);
+            };
+            if !same_retry_command(&request.command, &envelope.command) {
+                return Err(DaemonDispatchError::InvalidCommand);
+            }
+            self.dispatch_persisted_command(&pinned, persisted).await?;
+            return Ok(pinned);
+        }
+        let command = self.assemble_session_command(request.command).await?;
+        let repository_ids = match &command {
+            Command::SessionStart(start) => start
+                .repositories
+                .iter()
+                .map(|repository| repository.repository_id.clone())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
         let envelope_command_id = command_id.clone();
         let envelope_session_id = session_id.clone();
-        let command = request.command.clone();
         let requirement_id = match &command {
             Command::SessionStart(start) => Some(start.requirement.id.clone()),
             _ => None,
@@ -579,11 +801,12 @@ impl DaemonRuntime {
         let pinned = self
             .inner
             .store
-            .start_session_with_command_for_requirement(
+            .start_session_with_command_for_requirement_and_repositories(
                 &session_id,
                 &command_id,
                 required_capabilities,
                 requirement_id.as_deref(),
+                Some(&repository_ids),
                 move |_daemon_id, server_command_seq| {
                     ServerFrame::Command(CommandEnvelope {
                         command_id: envelope_command_id.clone(),
@@ -603,6 +826,9 @@ impl DaemonRuntime {
                 PersistenceError::InvalidCommandPayload => DaemonDispatchError::InvalidCommand,
                 _ => DaemonDispatchError::Internal,
             })?;
+        if pinned.compacted {
+            return Ok(pinned);
+        }
         let persisted = ServerFrame::from_json(&pinned.payload)
             .map_err(|_| DaemonDispatchError::InvalidCommand)?;
         let ServerFrame::Command(envelope) = &persisted else {
@@ -616,6 +842,31 @@ impl DaemonRuntime {
         }
         self.dispatch_persisted_command(&pinned, persisted).await?;
         Ok(pinned)
+    }
+
+    async fn assemble_session_command(
+        &self,
+        command: Command,
+    ) -> Result<Command, DaemonDispatchError> {
+        let Command::SessionStart(mut start) = command else {
+            return Ok(command);
+        };
+        let repositories = self
+            .inner
+            .store
+            .active_repositories()
+            .await
+            .map_err(|_| DaemonDispatchError::Internal)?;
+        start.repositories = repositories
+            .into_iter()
+            .map(|repository| RepositoryContext {
+                repository_id: repository.id,
+                name: repository.name,
+                url: repository.url,
+                description: repository.description,
+            })
+            .collect();
+        Ok(Command::SessionStart(start))
     }
 
     async fn dispatch_persisted_command(
@@ -648,6 +899,7 @@ impl DaemonRuntime {
             .lock()
             .await
             .get(&pinned.daemon_id)
+            .filter(|connection| connection.ready)
             .map(|connection| connection.outbound.clone())
             .ok_or(DaemonDispatchError::DaemonUnavailable)?;
         outbound
@@ -656,24 +908,33 @@ impl DaemonRuntime {
             .map_err(|_| DaemonDispatchError::DaemonUnavailable)
     }
 
-    async fn session_belongs_to_daemon(&self, session_id: &str, daemon_id: &str) -> bool {
-        self.inner
-            .store
-            .session_owner(session_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|owner| owner == daemon_id)
+    async fn mark_live_ready(&self, daemon_id: &str, connection_id: &str) {
+        let mut live = self.inner.live.lock().await;
+        if let Some(connection) = live.get_mut(daemon_id) {
+            if connection.connection_id == connection_id {
+                connection.ready = true;
+            }
+        }
     }
 
-    async fn session_matches_requirement(&self, session_id: &str, requirement_id: &str) -> bool {
+    async fn validate_daemon_session(
+        &self,
+        session_id: &str,
+        daemon_id: &str,
+        connection_id: &str,
+    ) -> Result<(), PersistenceError> {
         self.inner
             .store
-            .session_requirement(session_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|bound| bound == requirement_id)
+            .touch_daemon(daemon_id, connection_id)
+            .await?;
+        let owner = self.inner.store.session_owner(session_id).await?;
+        if owner.as_deref() == Some(daemon_id) {
+            Ok(())
+        } else {
+            Err(PersistenceError::ProtocolIntegrity(
+                "daemon session owner rejected".into(),
+            ))
+        }
     }
 
     pub async fn close_daemon(&self, daemon_id: &str, connection_id: &str) {
@@ -702,6 +963,16 @@ async fn send_protocol_error(outbound: &mpsc::Sender<ServerFrame>, code: &str, m
             message: message.into(),
         }))
         .await;
+}
+
+fn same_retry_command(requested: &Command, persisted: &Command) -> bool {
+    let mut requested = requested.clone();
+    if let (Command::SessionStart(requested), Command::SessionStart(persisted)) =
+        (&mut requested, persisted)
+    {
+        requested.repositories = persisted.repositories.clone();
+    }
+    requested == *persisted
 }
 
 fn daemon_error_code(error: &PersistenceError) -> &'static str {
@@ -733,8 +1004,15 @@ fn store_error(error: PersistenceError) -> DaemonHttpError {
         | PersistenceError::NoEligibleDaemon
         | PersistenceError::InvalidRole(_)
         | PersistenceError::InvalidCode
-        | PersistenceError::RateLimited => DaemonHttpError::BadRequest,
+        | PersistenceError::RateLimited
+        | PersistenceError::ProtocolIntegrity(_)
+        | PersistenceError::EventSequenceGap { .. } => DaemonHttpError::BadRequest,
         PersistenceError::Database(_) => DaemonHttpError::Internal,
+        PersistenceError::InvalidRepository(_) => DaemonHttpError::BadRequest,
+        PersistenceError::RepositoryNotFound => DaemonHttpError::NotFound,
+        PersistenceError::RepositoryNameConflict | PersistenceError::RepositoryUrlImmutable => {
+            DaemonHttpError::Conflict
+        }
     }
 }
 

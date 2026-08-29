@@ -9,10 +9,12 @@ checks, never replacements.
 | --- | --- |
 | `pr-title` | PR title must be a Conventional Commit (squash-merge makes it the canonical subject on `main`) |
 | `rust` | fmt --check · clippy `-D warnings` · unit tests + architecture checks |
-| `daemon-integration` | PostgreSQL-backed requirements, conversations, readiness, and daemon lifecycle integration tests |
+| `rust-coverage` | Rust workspace LCOV coverage upload |
+| `daemon-integration` | PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository, and durable protocol integration tests |
 | `web` | lint · typecheck · production build (`apps/web`) |
+| `web-coverage` | Frontend Vitest LCOV coverage upload |
 | `openspec` | `openspec validate --all --strict` |
-| `gate` | succeeds only when all required jobs succeed |
+| `gate` | succeeds only when all required jobs, including coverage jobs, succeed |
 
 Branch protection should require exactly one check: **`gate`** — internal job
 structure may evolve without touching rulesets.
@@ -25,6 +27,14 @@ GitHub branch protection / ruleset for `main`:
 - Require status check: **`gate`**.
 - Require branches up to date before merging.
 - (Recommended) Allow squash merge only, so PR titles stay the canonical history.
+
+Coverage jobs use `fail_ci_if_error: true`, so `gate` fails when coverage is not
+generated or uploaded. Codecov separately evaluates project and flag statuses;
+workflow code does not parse percentages. Patch status is temporarily disabled
+while baseline coverage is established. When re-enabled, restore patch `>= 80%`
+and add `codecov/patch` to the default-branch ruleset required status checks
+after it reports successfully. Do not require global/project Codecov status yet;
+project target remains `auto`, with allowed project regression `1%`.
 
 These settings cannot be changed from inside the repository by agents; until
 they exist, treat a red `gate` as an absolute merge blocker regardless.

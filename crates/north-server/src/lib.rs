@@ -9,6 +9,7 @@ pub mod auth;
 pub mod context;
 pub mod conversations;
 pub mod daemon;
+pub mod repositories;
 pub mod requirements;
 pub mod roles;
 pub mod transport;
@@ -25,6 +26,7 @@ pub use auth::{
     LogCodeDelivery, RequestCodeRequest, VerifyCodeRequest, CODE_REQUEST_MIN_INTERVAL_SECONDS,
 };
 pub use conversations::{ConversationHttpError, ConversationResponse, MessageResponse};
+pub use repositories::{RepositoryHttpError, RepositoryResponse};
 pub use requirements::{RequirementHttpError, RequirementResponse};
 pub use roles::{
     assign_user_role, authorize_role_assignment, current_user, require_admin, require_review,

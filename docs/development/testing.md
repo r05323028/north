@@ -65,24 +65,25 @@ member so `cargo test --workspace` executes it.
 | Layer | Status |
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
-| Integration | Partially implemented — PostgreSQL-backed requirements, conversations, readiness, and daemon lifecycle coverage; general durable coordination proofs remain pending |
+| Unit (Web) | Implemented — Vitest via `npm test` in `apps/web` |
+| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, and durable coordination coverage; execute with `NORTH_TEST_DATABASE_URL` |
 | E2E | Not implemented — browser approval UI is covered at HTTP integration; Playwright workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
-PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants.
+PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it.
 
 ## Required future proofs
 
 | Contract | Primary layer | Owning change |
 | --- | --- | --- |
-| browser approval HTML/JSON → authenticated POST → CLI claim, exact command envelope persistence/order, daemon inbox, duplicate `message.send`, restart recovery | Integration | harden-daemon-runtime-correctness covers approval flow and exact persistence/order; durable inbox/replay remains introduce-server-daemon-protocol + daemon connection |
+| browser approval HTML/JSON → authenticated POST → CLI claim, exact command envelope persistence/order, daemon inbox, duplicate `message.send`, restart recovery | Integration | daemon runtime and `introduce-server-daemon-protocol` suites |
 | sequence gaps, late/out-of-order replay, protocol errors | Integration | introduce-server-daemon-protocol |
 | expected_state_version HTTP 409, assessment identity binding, and no side effects | Integration | Implemented by requirement/readiness/conversation integration tests |
 | atomic assessment evidence/transition/dedupe before event ACK | Integration | Implemented by readiness-assessment, including authenticated daemon ACK path |
 | daemon selection, pinned reconnect, credential revocation | Integration | daemon-runtime-connection |
 | server retry authority and restart-persistent attempts | Integration | runtime-retry-and-failure-state |
 | concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
-| soft-disable history and disabled-repo rejection | Integration | configured-repositories |
+| soft-disable history, disabled-name recovery, and disabled-repo citation rules | Integration | configured-repositories |
 | SSE disconnect/missed hint/duplicate hint refetch | E2E | requirement-board + requirement-conversation-ui |
 
 Documentation, OpenSpec checkboxes, and architecture tests do not prove these
@@ -92,17 +93,22 @@ runnable test exists and passes.
 ## Profiles
 
 ```bash
-./scripts/validate.sh fast   # fmt, clippy, unit + architecture, web lint/typecheck, openspec
-./scripts/validate.sh unit   # unit + architecture
-./scripts/validate.sh ci     # full workspace + PostgreSQL integration + web build; requires NORTH_TEST_DATABASE_URL
-./scripts/validate.sh integration   # PostgreSQL-backed suites; requires NORTH_TEST_DATABASE_URL
-./scripts/validate.sh e2e | smoke    # explicit 'not yet' until real
+./scripts/validate.sh fast        # fmt, clippy, unit + architecture, web lint/typecheck, openspec
+./scripts/validate.sh rust        # full Rust merge-gate validation
+./scripts/validate.sh web         # web lint, typecheck, and production build
+./scripts/validate.sh specs       # strict OpenSpec validation
+./scripts/validate.sh unit        # Rust + Web unit tests + architecture
+./scripts/validate.sh ci          # complete local merge-gate mirror; requires NORTH_TEST_DATABASE_URL
+./scripts/validate.sh integration # PostgreSQL-backed suites; requires NORTH_TEST_DATABASE_URL
+./scripts/validate.sh e2e | smoke # explicit 'not yet' until real
 ```
 
 ## Web (apps/web)
 
 Components come from shadcn/ui (`npx shadcn@latest add <component>`); do not
-fork them casually. Frontend unit tests arrive with the board change.
+fork them casually. Frontend unit tests use Vitest (`npm test`) and run through
+`./scripts/validate.sh unit` and `ci`. Coverage generation/upload remains
+CI-specific (`npm run test:coverage`).
 
 ## Specs
 
@@ -110,23 +116,25 @@ fork them casually. Frontend unit tests arrive with the board change.
 
 ## Server↔daemon transport checks
 
-Unit tests cover every `north-protocol` frame family, JSON text round trips,
+Unit tests cover every `north-protocol` frame family, JSON text rounds trips,
 setup approval HTML/JSON negotiation, read-only GET, Origin/Host policy,
 POST mutation, claim-secret exclusion, bounded verification-attempt accounting,
-setup-row retention, restart lease invalidation, and exact outbox persistence,
+setup-row retention, restart lease invalidation, exact outbox persistence,
 assembled `session.start` context, typed readiness evidence, canonical
 `command_ack`/`event_ack` serialization, execution-only `session.resume`,
 unsupported schema/unknown frame rejection, Axum text-frame conversion, binary
 frame rejection, transport ping/pong handling, handshake phases/timeouts,
-terminal protocol classification, bounded queues, admission deadlines, reconciliation activation, and reconnect backoff reset.
+terminal protocol classification, bounded queues, admission deadlines,
+reconciliation activation, reconnect backoff reset, local journal idempotency,
+restart recovery, unknown-outcome reporting, bounded gap buffering, replay,
+and compaction tombstones.
 Architecture tests mechanically confirm pure-crate allowlists, both hosts'
 `north-protocol` dependency, server/daemon separation, and the browser
 WebSocket ban. The real transport integration test is
 `tests/transport/tests/websocket.rs` and runs with
-`cargo test -p north-transport-integration --test websocket`. The PostgreSQL-backed
-daemon lifecycle and browser approval-to-claim tests run locally with
-`NORTH_TEST_DATABASE_URL` and are required in CI job `daemon-integration`. Durable outbox redelivery/ACK processing, journal
-replay, authentication persistence, socket reconnect sequencing, durable
-reconciliation restore, and browser SSE behavior remain integration/E2E
-obligations; exact persistence-before-dispatch and restart lease behavior are
-covered by the PostgreSQL daemon suite.
+`cargo test -p north-transport-integration --test websocket`. The PostgreSQL-backed daemon lifecycle, repository lifecycle/citation, and
+durable protocol delivery tests run locally with `NORTH_TEST_DATABASE_URL` and
+are required in CI job `daemon-integration`. Browser SSE behavior remains an
+E2E obligation; server outbox redelivery/ACK processing, daemon journal replay,
+identity conflict handling, durable reconciliation restore, and exact
+persistence-before-dispatch are covered by the protocol delivery suites.

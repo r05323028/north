@@ -26,7 +26,7 @@
 | --- | --- |
 | north-domain | requirements, lifecycle, readiness, roles — pure logic |
 | north-server | HTTP/SSE API, auth, sessions, business transitions, command outbox, daemon routing, execution policy |
-| north-daemon | daemon-initiated connection, durable transport journal, isolated local checkouts, agent runtime, fact/event reporting |
+| north-daemon | daemon-initiated connection, durable transport journal, runtime coordination, fact/event reporting; production agent runtime and repository checkouts remain downstream |
 | north-protocol | command/event/control envelopes and compatibility metadata only |
 | north-persistence | SQL storage and transactional row↔domain mapping |
 

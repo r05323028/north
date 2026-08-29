@@ -136,7 +136,13 @@ impl From<PersistenceError> for AuthHttpError {
             | PersistenceError::InvalidCapabilities
             | PersistenceError::InvalidCommandPayload
             | PersistenceError::InvalidSessionState
-            | PersistenceError::SessionRequirementMismatch => Self::Internal,
+            | PersistenceError::SessionRequirementMismatch
+            | PersistenceError::InvalidRepository(_)
+            | PersistenceError::RepositoryNotFound
+            | PersistenceError::RepositoryNameConflict
+            | PersistenceError::RepositoryUrlImmutable
+            | PersistenceError::ProtocolIntegrity(_)
+            | PersistenceError::EventSequenceGap { .. } => Self::Internal,
         }
     }
 }
@@ -177,6 +183,7 @@ pub fn router(state: AuthState) -> Router {
         .route("/auth/logout", post(logout))
         .merge(crate::roles::router())
         .merge(crate::requirements::router())
+        .merge(crate::repositories::router())
         .merge(crate::daemon::protected_router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

@@ -275,6 +275,11 @@ async fn conversation_pruning_preserves_structured_requirement() {
     .await;
     assert_eq!(before, json_body(after).await);
 
+    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
+        .bind(&assessment_session_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup event tombstones");
     sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(&assessment_session_id)
         .execute(&pool)
@@ -300,6 +305,14 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
         .await
         .expect("run migrations");
     let user_id = setup_user(&pool, "readiness-user").await;
+    sqlx::query(
+        "INSERT INTO repositories (id, name, name_normalized, url, description)
+         VALUES ('00000000-0000-4000-8000-000000000001', 'North', 'north', 'https://example.test/north.git', '')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed configured repository");
 
     let created = request(
         app(pool.clone(), &user_id, Role::Requester),
@@ -340,12 +353,15 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
     assert_eq!(edited_body["state_version"], 3);
 
     let assessment_session_id = unique("assessment-session");
-    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
-        .bind(&assessment_session_id)
-        .bind(&requirement_id)
-        .execute(&pool)
-        .await
-        .expect("bind assessment session");
+    sqlx::query(
+        "INSERT INTO execution_sessions (id, requirement_id, repository_ids)
+         VALUES ($1, $2, ARRAY['00000000-0000-4000-8000-000000000001']::TEXT[])",
+    )
+    .bind(&assessment_session_id)
+    .bind(&requirement_id)
+    .execute(&pool)
+    .await
+    .expect("bind assessment session");
     let assessment_event_id = unique("assessment-event");
     let assessment_payload = RequirementAssessed {
         requirement_id: requirement_id.clone(),
@@ -354,7 +370,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
         blockers: Vec::new(),
         assumptions: vec!["One account".into()],
         repositories_reviewed: vec![ReviewedRepositoryWire {
-            repository_id: "north".into(),
+            repository_id: "00000000-0000-4000-8000-000000000001".into(),
             commit_sha: "abc123".into(),
         }],
     };
@@ -400,7 +416,10 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
     assert_eq!(packet["open_questions"][0], "Unanswered question");
     assert_eq!(packet["blockers"].as_array().expect("blockers").len(), 0);
     assert_eq!(packet["assessment_assumptions"][0], "One account");
-    assert_eq!(packet["repositories_reviewed"][0]["repository_id"], "north");
+    assert_eq!(
+        packet["repositories_reviewed"][0]["repository_id"],
+        "00000000-0000-4000-8000-000000000001"
+    );
     assert_eq!(packet["repositories_reviewed"][0]["commit_sha"], "abc123");
 
     let duplicate = process_requirement_assessed(
@@ -654,6 +673,11 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
     .await;
     assert_eq!(stale_packet.status(), StatusCode::CONFLICT);
 
+    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
+        .bind(&assessment_session_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup event tombstones");
     sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(&assessment_session_id)
         .execute(&pool)
@@ -920,6 +944,12 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
         Some(assessment_b_id.as_str())
     );
     assert_eq!(audit_state_version, Some(7));
+    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id IN ($1, $2)")
+        .bind(&session_a)
+        .bind(&session_b)
+        .execute(&pool)
+        .await
+        .expect("cleanup event tombstones");
     sqlx::query("DELETE FROM execution_sessions WHERE id IN ($1, $2)")
         .bind(&session_a)
         .bind(&session_b)

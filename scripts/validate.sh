@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unified validation entrypoint (docs/development/testing.md defines layers).
-# Usage: ./scripts/validate.sh [fast|unit|integration|e2e|smoke|ci]
+# Usage: ./scripts/validate.sh [fast|rust|web|specs|unit|integration|e2e|smoke|ci]
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -22,7 +22,15 @@ rust_fast() {
 }
 
 web_lint_tc() {
-  (cd apps/web && npm run lint && npm run typecheck)
+  (cd apps/web && npm run lint && npm run typecheck && npm run check:repository-settings)
+}
+
+web_unit() {
+  (cd apps/web && npm test)
+}
+
+web_full() {
+  (cd apps/web && npm run lint && npm run typecheck && npm run check:repository-settings && npm run build)
 }
 
 rust_full() {
@@ -44,6 +52,8 @@ database_integration() {
   cargo test -p north-server --test conversations_readiness -- --ignored
   cargo test -p north-server --test daemon_runtime -- --ignored
   cargo test -p north-server --test migration_upgrade -- --ignored
+  cargo test -p north-server --test repositories -- --ignored
+  cargo test -p north-server --test protocol_delivery -- --ignored
   cargo test -p north-transport-integration --test websocket
 }
 
@@ -53,12 +63,20 @@ fast)
   web_lint_tc
   openspec validate --all --strict
   ;;
+rust)
+  rust_full
+  ;;
+web)
+  web_full
+  ;;
+specs)
+  openspec validate --all --strict
+  ;;
 unit)
-  # Unit layer: small units, minimal externals. Frontend unit tests do not
-  # exist yet; they arrive with introduce-requirement-board.
+  # Unit layer: small units, minimal externals.
   cargo test --workspace --lib
   cargo test -p north-architecture-tests
-  printf '(frontend unit layer: not yet implemented — see testing.md)\n'
+  web_unit
   ;;
 integration)
   database_integration
@@ -75,12 +93,12 @@ ci)
   # Complete merge gate mirror: full workspace and database tests plus build.
   rust_full
   database_integration skip-persistence
-  web_lint_tc
-  (cd apps/web && npm run build)
+  web_unit
+  web_full
   openspec validate --all --strict
   ;;
 *)
-  printf 'unknown profile: %s\nusage: %s [fast|unit|integration|e2e|smoke|ci]\n' "$PROFILE" "$0" >&2
+  printf 'unknown profile: %s\nusage: %s [fast|rust|web|specs|unit|integration|e2e|smoke|ci]\n' "$PROFILE" "$0" >&2
   exit 2
   ;;
 esac

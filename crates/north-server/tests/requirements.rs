@@ -293,6 +293,11 @@ async fn requirement_api_enforces_state_version_and_review_contracts() {
             .expect("audit count");
     assert_eq!(audit_count, 3);
 
+    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .expect("cleanup event tombstones");
     sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(&session_id)
         .execute(&pool)
@@ -486,6 +491,12 @@ async fn transition_edges_are_state_version_guarded_and_assessment_bound() {
     assert_eq!(audits[5].0, "request_changes");
     assert_eq!(audits[5].3.as_deref(), Some("Clarify account scope"));
 
+    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id IN ($1, $2)")
+        .bind(&session_a)
+        .bind(&session_b)
+        .execute(&pool)
+        .await
+        .expect("cleanup event tombstones");
     sqlx::query("DELETE FROM execution_sessions WHERE id IN ($1, $2)")
         .bind(&session_a)
         .bind(&session_b)
