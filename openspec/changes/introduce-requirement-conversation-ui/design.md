@@ -27,14 +27,24 @@ are server projections, not transport caches. The existing Ready-only
   existing deterministic order. Posting through
   `POST /requirements/{id}/conversation/messages` persists one requester
   message only and returns its `message_id`; it never invokes the runtime.
-  For an initial clarification message, call
-  `POST /requirements/{id}/clarification/start` with that ID and the current
-  `expected_state_version`. For a later message, call
-  `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`.
-  The cancel control calls
-  `POST /requirements/{id}/clarification/cancel`. The UI uses canonical run
-  state and explicit operation responses to select these actions; it never
-  infers initial versus later solely from transcript contents.
+  After persistence, use canonical `GET /requirements/{id}/session` and the
+  explicit server result to choose the operation:
+  - no run (`session: null`) → call
+    `POST /requirements/{id}/clarification/start` with this ID and current
+    `expected_state_version`;
+  - reusable unassigned unavailable run → call `start` only with its recorded
+    `start_message_id` to retry that same attempt;
+  - assigned active run (`starting`/`running`, including pinned operational
+    unavailability) → call
+    `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`
+    for a later message;
+  - terminal/inapplicable latest run → call `start` with the new persisted
+    message to create a sequential run.
+  A different message during a reusable unassigned attempt or assigned active
+  run is left to the canonical server conflict; the UI does not invent a run
+  locally. The cancel control calls
+  `POST /requirements/{id}/clarification/cancel`. The UI never infers the
+  operation solely from transcript contents.
 - **Overview**: render title, description, summary, acceptance criteria,
   assumptions, open questions, lifecycle status, content revision, current
   readiness, and cited repositories from HTTP responses. Never derive fields by
@@ -56,6 +66,11 @@ returns the canonical Discussing status and incremented revision/state_version.
 The UI renders those response values. It does not locally predict or patch the
 Ready demotion. No-op edits preserve the server's no-op behavior; Accepted and
 Rejected edits surface the server error.
+
+For start conflicts or other operation conflicts, the UI preserves the persisted
+message, refetches Requirement, conversation, readiness, activity, and latest
+session state, and never retries with a newer state version or creates a local
+second run.
 
 ## Reconnect and notification behavior
 

@@ -32,10 +32,17 @@ and current `expected_state_version`. For a later message, it SHALL call
 `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`. The
 initial message SHALL be represented in `session.start` context and SHALL not
 be submitted again as `message.send`. The cancel control SHALL call
-`POST /requirements/{id}/clarification/cancel`. The UI SHALL choose initial
-`start` versus later `dispatch` from canonical run state and explicit operation
-state, never solely from transcript contents. Duplicate/replayed command
-delivery SHALL not add another logical message or runtime submission.
+`POST /requirements/{id}/clarification/cancel`. After persistence, the UI SHALL
+use canonical latest `GET /requirements/{id}/session` state and explicit server
+results to choose the operation: no run (`session: null`) starts clarification;
+a reusable unassigned unavailable run retries `start` only with its recorded
+`start_message_id`; an assigned active run (`starting`/`running`, including
+pinned operational unavailability) dispatches later messages; and a
+terminal/inapplicable latest run starts a new sequential run with the new
+message. A different message during a reusable attempt or assigned active run
+is a server conflict, not a local run. The UI never infers the operation solely
+from transcript contents. Duplicate/replayed command delivery SHALL not add
+another logical message or runtime submission.
 
 #### Scenario: Posting history does not invoke runtime
 
@@ -66,6 +73,21 @@ delivery SHALL not add another logical message or runtime submission.
 
 - **WHEN** clarification/start returns HTTP 409 for the submitted expected_state_version
 - **THEN** the UI keeps the already-persisted message, refetches canonical detail reads, and does not retry with a newer state version
+
+#### Scenario: Reusable unavailable run retries by same message
+
+- **WHEN** the latest session is an unassigned unavailable run and the UI has its recorded start_message_id
+- **THEN** a retry calls start with that same message ID and does not create a local or server-side competing run
+
+#### Scenario: Active run rejects concurrent start
+
+- **WHEN** the latest session is assigned and starting/running and the UI persists another message that is sent as a start request
+- **THEN** the canonical conflict is shown, no second run is invented locally, and canonical detail reads are refetched
+
+#### Scenario: Terminal run starts a sequential run
+
+- **WHEN** the latest run is completed or cancelled and the UI persists eligible message M2
+- **THEN** explicit start uses M2 and the current expected_state_version, and the returned newer session becomes the rendered latest run while prior history remains server-owned
 
 ### Requirement: Overview renders structured state without transcript derivation
 
@@ -119,12 +141,15 @@ all notifications, transport frames, or raw runtime/tool diagnostics.
 
 ### Requirement: Minimal session status does not require retry state
 
-The UI MAY show only the clarification change's coarse session status
-(`starting`, `running`, `completed`, or `unavailable`) and cancellation intent
-from `GET /requirements/{id}/session`. It SHALL not require or define the later
-retry state machine, attempt count, retry budget, server backoff, or terminal
-execution failure semantics. `unavailable` SHALL remain operational status and
-SHALL not be displayed as a Requirement lifecycle failure.
+The UI MAY show only the clarification change's latest-run coarse session
+status (`starting`, `running`, `completed`, or `unavailable`) and separate
+`cancel_requested` field from `GET /requirements/{id}/session`. It SHALL not
+require or define the later retry state machine, attempt count, retry budget,
+server backoff, or terminal execution failure semantics. `unavailable` SHALL
+remain operational status and SHALL not be displayed as a Requirement lifecycle
+failure. A newer sequential run replaces an older run as the rendered latest
+projection; older runs remain server-owned history and need not be exposed as a
+full run-history UI.
 
 #### Scenario: Runtime unavailability leaves Requirement truth alone
 

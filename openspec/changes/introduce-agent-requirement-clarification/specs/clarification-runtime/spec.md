@@ -1,7 +1,8 @@
 ## Purpose
 
-Runs one server-authorized clarification execution through the existing North
-protocol and durable delivery seams, persists safe runtime facts, and applies
+Defines server-authorized clarification executions through the existing North
+protocol and durable delivery seams, with sequential runs and at most one
+competing active run per Requirement. It persists safe runtime facts and applies
 readiness without moving business authority to the daemon.
 
 ## ADDED Requirements
@@ -22,23 +23,39 @@ second wire schema, alternate ACK names, daemon-event cursors in
 - **WHEN** a clarification command or runtime event is sent
 - **THEN** it crosses the existing durable outbox/journal and reconciliation paths with the canonical frame name and identity semantics
 
-### Requirement: Server assembles and pins one complete run context
+### Requirement: Server assembles and pins each run context
 
-A valid `clarification/start` SHALL create or reuse a server-owned
-clarification run before daemon selection. If an eligible connected daemon is
-available, the server SHALL persist the run's `daemon_id`, bind it to one
-Requirement, persist the run repository IDs, and atomically persist the complete
-`session.start` command before dispatch. If no eligible daemon is available, the
-run SHALL remain with `daemon_id = null`, status `unavailable`, and no
-`session.start` command. `session.start` SHALL contain the immutable Requirement
-snapshot, a bounded/relevant persisted conversation excerpt, and enabled
-repository metadata only. The envelope's `session_id` is the run identity; the
-payload SHALL NOT gain a duplicate session field. Credentials, checkout paths,
-database handles, and `north-domain` types SHALL NOT cross the daemon boundary.
-A run's repository set, start message, and requirement snapshot SHALL NOT be
-silently retargeted on later command replay. Any user-driven Draft → Discussing
-transition used by start orchestration SHALL honor the current
-`expected_state_version` contract; `revision` is the content snapshot token,
+A valid `clarification/start` SHALL resolve the latest run before daemon
+selection. The latest run MAY be reused only when all of these are true:
+`daemon_id = null`; no `session.start` was successfully created or dispatched;
+it has not been cancelled or closed; the request is the same logical start
+attempt; and the incoming `message_id` equals its recorded
+`start_message_id`. In this case the server SHALL reuse the run identity and
+attempt daemon selection again. A different message while that unassigned
+attempt is reusable SHALL return the canonical conflict.
+
+If the latest run is assigned and active (`starting` or `running`, including an
+assigned run that is operationally unavailable because its daemon disconnected),
+a different start message SHALL return the canonical conflict and SHALL create
+no second run or `session.start` command. Later requester messages use the
+explicit dispatch operation. If the latest run is completed, cancelled, or
+otherwise explicitly terminal/inapplicable for start reuse, a new persisted
+eligible start message SHALL create a new run identity rather than retargeting
+the prior run.
+
+When a daemon is selected for a new or reused run, the server SHALL persist the
+run's immutable `daemon_id`, bind it to one Requirement, persist the run
+repository IDs, and atomically persist the complete `session.start` command
+before dispatch. A new run SHALL receive the current Requirement snapshot and
+revision, its own `start_message_id`, repository set, and command/event
+sequence. `session.start` SHALL contain the immutable Requirement snapshot, a
+bounded/relevant persisted conversation excerpt, and enabled repository metadata
+only. The envelope's `session_id` is the run identity; the payload SHALL NOT gain
+a duplicate session field. Credentials, checkout paths, database handles, and
+`north-domain` types SHALL NOT cross the daemon boundary. A run's repository set,
+start message, and snapshot SHALL NOT be silently retargeted on later command
+replay. Any user-driven Draft → Discussing transition used by start orchestration
+SHALL honor `expected_state_version`; `revision` is the content snapshot token,
 not the write precondition.
 
 #### Scenario: Start sees server context, not storage
@@ -69,14 +86,19 @@ introducing a generic command API:
   `{ "message_id": string, "expected_state_version": u64 }`. It SHALL verify
   that the message belongs to this Requirement's conversation and is eligible
   as the start message, apply the canonical Draft → Discussing operation when
-  required, and create/reuse the run before daemon selection. An assigned start
-  returns `202` with canonical Requirement/run data; no eligible daemon returns
-  `503 clarification_unavailable` with the unassigned run projection. A stale
+  required, and resolve the latest run before daemon selection. A reusable
+  unassigned attempt requires `daemon_id = null`, no successfully created or
+  dispatched `session.start`, no cancellation/closure, the same logical start
+  attempt, and the recorded `start_message_id`; that request reuses the run.
+  A different message while that attempt remains reusable returns the canonical
+  conflict. An assigned active run also rejects a different start message.
+  After a completed, cancelled, or otherwise terminal/inapplicable run, a new
+  eligible persisted message creates a new run with a new identity and current
+  Requirement snapshot. An assigned start returns `202` with canonical
+  Requirement/run data; no eligible daemon returns `503
+  clarification_unavailable` with the unassigned run projection. A stale
   `expected_state_version` returns the canonical `409` conflict before any
-  run/command mutation, while preserving the already-persisted message. A
-  repeated request with the recorded `start_message_id` is idempotent; a
-  different message or a non-reusable latest run returns a canonical conflict
-  without creating a competing run.
+  run/command mutation, while preserving the already-persisted message.
 - `POST /requirements/{requirement_id}/clarification/messages/{message_id}/dispatch`
   has no message body. It SHALL verify the persisted requester message, its
   Requirement/conversation binding, and ownership of the current assigned
@@ -85,13 +107,14 @@ introducing a generic command API:
   unassigned/no-owner run returns `503 clarification_unavailable` without a
   `message.send` command. It SHALL never create a second conversation message.
 - `POST /requirements/{requirement_id}/clarification/cancel` has no message
-  body and targets the latest applicable run. It SHALL create or reuse exactly
-  one durable `session.cancel` command/intent, return the public run projection,
-  and be idempotent. With no run it returns `404 clarification_not_started`.
-  An unassigned run records the durable run-bound cancellation intent without
-  dispatching to a nonexistent daemon; an assigned run uses the pinned daemon
-  outbox. Cancellation SHALL not mutate Requirement lifecycle, content,
-  revision, or state_version.
+  body and targets the latest run. It SHALL persist `cancel_requested` and
+  return the public run projection. If the run is assigned, it SHALL also
+  create or reuse exactly one durable `session.cancel` command for the pinned
+  daemon. If the run is unassigned, cancellation is server-owned run state only:
+  it SHALL create no `session.cancel` command and no command identity. Repeated
+  cancellation returns the persisted state. With no run it returns `404
+  clarification_not_started`. Cancellation SHALL not mutate Requirement
+  lifecycle, content, revision, or state_version.
 
 #### Scenario: Posting history does not invoke runtime
 
@@ -113,10 +136,45 @@ introducing a generic command API:
 - **WHEN** a persisted later message M is dispatched more than once
 - **THEN** all requests reuse one message-to-command mapping and the runtime receives at most one logical `message.send`; dispatching the recorded start message is rejected and cannot create a second command
 
-#### Scenario: Cancellation targets latest run
+#### Scenario: Reuse unavailable start attempt
 
-- **WHEN** an authenticated requester cancels the latest clarification run repeatedly
-- **THEN** the server reuses one durable `session.cancel` command/intent and changes only run cancellation facts
+- **WHEN** run A is unassigned and unavailable, has never created or dispatched `session.start`, is not cancelled, and `/clarification/start` is retried with A's recorded `start_message_id`
+- **THEN** the server reuses A's run identity and attempts daemon selection again without creating a competing run
+
+#### Scenario: Different message cannot replace reusable attempt
+
+- **WHEN** an unassigned reusable run A exists and `/clarification/start` references a different persisted message
+- **THEN** the server returns the canonical conflict and creates no new run or `session.start` command
+
+#### Scenario: Active assigned run rejects concurrent start
+
+- **WHEN** run A is assigned and `starting` or `running` and a requester attempts `/clarification/start` with another persisted message
+- **THEN** the server returns the canonical conflict and creates no second run or `session.start` command
+
+#### Scenario: New run after completion
+
+- **WHEN** clarification run A is completed, requester persists eligible message M2, and calls `/clarification/start` with M2 and the current `expected_state_version`
+- **THEN** the server creates run B with a new run/session identity and current Requirement snapshot, while run A remains immutable historical data
+
+#### Scenario: Cancel before daemon assignment
+
+- **WHEN** an unassigned unavailable run A is cancelled
+- **THEN** `cancel_requested` becomes true, A is ineligible for reuse, no `session.cancel` command or command identity exists, and Requirement state remains unchanged
+
+#### Scenario: Repeated unassigned cancellation is state-only
+
+- **WHEN** cancellation is requested repeatedly for an unassigned run A
+- **THEN** the server returns the same persisted cancellation state and creates no daemon command
+
+#### Scenario: Assigned cancellation uses pinned command
+
+- **WHEN** an assigned active run A is cancelled
+- **THEN** the server creates or reuses exactly one durable `session.cancel` command for A's pinned daemon and does not invoke cancellation twice
+
+#### Scenario: New run after cancelled unassigned attempt
+
+- **WHEN** run A was cancelled before daemon assignment, requester persists a new eligible message M2, and explicitly starts clarification
+- **THEN** A remains historical and the server creates run B instead of reusing A
 
 ### Requirement: Requester messages are durable before runtime dispatch
 
@@ -244,17 +302,32 @@ completion and failure events SHALL not repeat projections.
 - **WHEN** an assessment and completion are replayed with their original event identities
 - **THEN** the assessment transaction and completion projection each apply at most once, with their existing ACK outcomes returned for duplicates
 
-### Requirement: Clarification run identity survives daemon unavailability
+### Requirement: Clarification runs are sequential and never competing
 
-A valid explicit clarification start SHALL create or reuse the latest applicable
-server-owned run before daemon selection. If no eligible daemon is connected,
-the run SHALL exist with `daemon_id = null`, status `unavailable`, and no
-`session.start` command. The operation SHALL return `503
-clarification_unavailable` with that run projection and SHALL NOT fabricate a
-runtime event, mark the Requirement failed, consume a retry attempt, or select a
-daemon implicitly later. A later daemon selection requires another explicit
-start request. An unassigned run that has never been assigned, dispatched, or
-cancelled SHALL be reused, so repeated starts cannot create competing runs.
+A valid explicit clarification start SHALL resolve the latest run before daemon
+selection. The latest run MAY be reused only when `daemon_id = null`, no
+`session.start` was successfully created or dispatched, it has not been
+cancelled or closed, the request is the same logical start attempt, and the
+incoming message is its recorded `start_message_id`. A different message while
+that attempt remains reusable SHALL return the canonical conflict. An assigned
+active run (`starting` or `running`, including an assigned run temporarily
+unavailable because its daemon disconnected) SHALL also reject a different
+start message and SHALL create no second run or `session.start` command.
+
+If the latest run is completed, cancelled, or otherwise explicitly
+terminal/inapplicable for start reuse, a new eligible persisted requester message
+and explicit start SHALL create a new run with a new run/session identity, the
+current Requirement snapshot/revision, its own `start_message_id`, repository
+set, eventual daemon pin, and independent command/event sequence. The prior run
+SHALL remain immutable historical data. Transport unavailability alone SHALL
+not be treated as permission to migrate or create a competing run.
+
+If no eligible daemon is connected for a new or reused unassigned run, the run
+SHALL exist with `daemon_id = null`, status `unavailable`, and no `session.start`
+command. The operation SHALL return `503 clarification_unavailable` with that
+run projection and SHALL NOT fabricate a runtime event, mark the Requirement
+failed, consume a retry attempt, or select a daemon implicitly later. A later
+selection for that same unassigned start attempt requires another explicit start.
 
 Once a run has a `daemon_id`, that owner is immutable for this change. If the
 pinned daemon disconnects, the run remains pinned, durable commands remain
@@ -272,15 +345,25 @@ server backoff, or automatic `session.resume`; those belong to
 - **WHEN** a valid requester start finds no eligible daemon
 - **THEN** the server returns `503 clarification_unavailable` with a run identity, `daemon_id = null` internally, status `unavailable`, no `session.start` command, and any explicit valid Draft → Discussing Requirement transition already committed
 
-#### Scenario: Repeated unavailable start reuses one run
+#### Scenario: Reuse unavailable start attempt
 
-- **WHEN** the requester explicitly starts again while the latest run is unassigned, never dispatched, and not cancelled
-- **THEN** the server reuses that run identity, retries daemon selection only for this explicit request, and creates no competing run
+- **WHEN** run A is unassigned and unavailable, has never been dispatched or cancelled, and the requester retries `/clarification/start` with A's recorded `start_message_id`
+- **THEN** the server reuses A's run identity and attempts daemon selection again without creating a competing run
 
-#### Scenario: Offline owner is not silently replaced
+#### Scenario: No concurrent run while active
 
-- **WHEN** the pinned daemon disconnects during a run
-- **THEN** the run remains owned by that daemon, pending delivery stays replayable, the read reports `unavailable`, and no other daemon is selected by this change
+- **WHEN** run A is assigned and `starting` or `running` and the requester starts with another persisted message
+- **THEN** the server returns the canonical conflict and creates no second run or `session.start` command
+
+#### Scenario: New run after completion
+
+- **WHEN** run A is completed, the requester persists eligible message M2, and calls `/clarification/start` with M2 and the current `expected_state_version`
+- **THEN** the server creates run B with a new identity and current Requirement snapshot, while run A remains immutable history
+
+#### Scenario: Cancelled run allows a new run
+
+- **WHEN** run A is cancelled and the requester later persists a new eligible message M2 and explicitly starts clarification
+- **THEN** the server creates run B instead of reusing A, and A remains historical data
 
 ### Requirement: Canonical read models are server-owned
 
@@ -296,12 +379,14 @@ browser UI without requiring daemon traffic or SSE replay:
   and
 - `GET /requirements/{requirement_id}/session` for the latest clarification run
   for this Requirement, ordered by creation time, including minimal
-  `starting`/`running`/`completed`/`unavailable` status and cancellation intent.
-  It SHALL return `{ "session": null }` only when clarification has never been
-  started. An unassigned no-daemon start returns its run as `unavailable`; an
-  assigned/offline run returns the same run as `unavailable` without exposing
-  its pinned `daemon_id` or daemon details; completed runs remain readable as
-  the latest run.
+  `starting`/`running`/`completed`/`unavailable` status and separate
+  `cancel_requested`. It SHALL return `{ "session": null }` only when no run has
+  ever existed. An unassigned no-daemon run returns that run as `unavailable`;
+  an assigned/offline run returns the same pinned run as `unavailable`; a
+  completed or cancelled run remains readable until a newer run exists. After
+  Run B is created, it is the latest result while prior runs remain internal
+  historical persistence. Daemon IDs and other unnecessary daemon details are
+  not exposed.
 
 Missing assessment/history SHALL be represented as empty data, not inferred from
 transport absence. The existing Ready-only review-packet projection remains
@@ -319,8 +404,8 @@ separate.
 
 #### Scenario: Session read returns latest run semantics
 
-- **WHEN** a requester reads `/requirements/{requirement_id}/session`
-- **THEN** the server returns `{ "session": null }` only if no clarification run has ever existed, otherwise returns the latest run including completed or unavailable status without exposing daemon details
+- **WHEN** a requester reads `/requirements/{requirement_id}/session` after an unassigned, assigned/offline, completed, or cancelled run exists
+- **THEN** the server returns that latest run projection; it returns `{ "session": null }` only before any run exists, and a newer sequential run replaces the prior run as the latest result without deleting history
 
 ### Requirement: Clarification extends Board-owned browser SSE
 
@@ -341,27 +426,38 @@ clients refetch canonical HTTP reads.
 - **WHEN** a browser misses a conversation, readiness, activity, or session notification while disconnected
 - **THEN** reconnect/refocus refetch returns current canonical state without replaying an SSE history
 
-### Requirement: Cancellation is one idempotent durable command
+### Requirement: Cancellation distinguishes run state from daemon command
 
 An authenticated requester cancellation SHALL use
 `POST /requirements/{requirement_id}/clarification/cancel` and target the latest
-applicable clarification run. For an assigned run, it SHALL create or reuse
-one durable `session.cancel` command for the pinned daemon. For an unassigned
-run, it SHALL persist the same stable run-bound cancellation command/intent
-without dispatching to a nonexistent daemon. With no run it SHALL return
-`404 clarification_not_started`. Repeated requests and command replays SHALL
-stop runtime cancellation at most once and SHALL not append duplicate messages.
-Cancellation remains a run fact; it SHALL not mutate Requirement lifecycle,
-content, revision, or state_version, start a retry, or decide final execution
-failure. A cancelled unassigned run is not eligible for later start reuse in
-this slice.
+clarification run. It SHALL persist `cancel_requested` without mutating
+Requirement lifecycle, content, revision, or state_version. If the run is
+assigned (`daemon_id != null`), the server SHALL also create or reuse exactly one
+durable `session.cancel` command for that pinned daemon. If the run is unassigned
+(`daemon_id = null`) and has never created/dispatched `session.start`, the
+server SHALL create no `session.cancel` command and no command identity; the
+persisted run cancellation state alone makes it ineligible for reuse. With no
+run it SHALL return `404 clarification_not_started`. Repeated cancellation
+returns the persisted run state. Assigned command replays SHALL invoke runtime
+cancellation at most once; cancellation never migrates the run or decides retry
+or final execution failure policy.
 
-#### Scenario: Repeated cancel is harmless
+#### Scenario: Cancel before daemon assignment
 
-- **WHEN** a requester cancels an active assigned run and the cancel command is retried
-- **THEN** the server reuses one durable command, the daemon receives one logical cancellation operation, and prior conversation/Requirement state remains intact
+- **WHEN** an unassigned unavailable run is cancelled
+- **THEN** `cancel_requested` becomes true, the run becomes ineligible for reuse, no `session.cancel` command or command identity exists, and Requirement state remains unchanged
 
-#### Scenario: Unassigned cancel has no fabricated owner
+#### Scenario: Repeated unassigned cancellation
 
-- **WHEN** a requester cancels the latest unassigned `status=unavailable` run
-- **THEN** the server records one durable cancellation intent with no daemon dispatch, preserves the nullable owner, and does not mutate Requirement state
+- **WHEN** cancellation is requested repeatedly for an unassigned run
+- **THEN** the server returns the same persisted cancellation state and creates no daemon command
+
+#### Scenario: Assigned cancellation
+
+- **WHEN** an assigned active run is cancelled
+- **THEN** the server creates or reuses exactly one durable `session.cancel` command for the pinned daemon and does not invoke runtime cancellation twice
+
+#### Scenario: New run after cancelled unassigned attempt
+
+- **WHEN** run A was cancelled before daemon assignment, requester later persists a new eligible message M2, and explicitly starts clarification
+- **THEN** run A remains historical and the server creates run B instead of reusing A

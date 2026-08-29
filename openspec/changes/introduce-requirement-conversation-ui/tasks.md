@@ -9,11 +9,12 @@
 ## 2. Conversation
 
 - [ ] 2.1 Render persisted requester/agent/system messages; keep `POST /requirements/{id}/conversation/messages` persistence-only and preserve returned message identity.
-- [ ] 2.2 For an initial message, call `POST /requirements/{id}/clarification/start` with `message_id` and `expected_state_version`; never submit that message as `message.send`.
+- [ ] 2.2 Use canonical latest `/session` state to choose no-run initial `start`, same-message retry for a reusable unassigned run, later-message `dispatch` for an assigned active run, or new `start` for a terminal/inapplicable run; always send `expected_state_version` on start and never submit the start message as `message.send`.
 - [ ] 2.3 For a later persisted message, call `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`; prove repeated dispatch reuses one command mapping and creates no second message.
 - [ ] 2.4 Call `POST /requirements/{id}/clarification/cancel` for cancellation; render returned operational status without changing Requirement content/lifecycle.
-- [ ] 2.5 Preserve persisted messages and refetch the detail bundle on start HTTP 409 or operational unavailability; never retry with a newer state version.
+- [ ] 2.5 Preserve persisted messages and refetch the detail bundle on start HTTP 409 or operational unavailability; never retry with a newer state version or invent a local run.
 - [ ] 2.6 Add reconnect/refocus refetch for conversation and prove agent messages survive missed SSE hints.
+- [ ] 2.7 Add UI coverage for sequential run creation after completion/cancellation, active-run concurrent-start conflict, and same-message unavailable-start reuse.
 
 ## 3. Overview and concurrency
 
@@ -24,7 +25,7 @@
 ## 4. Activity and minimal status
 
 - [ ] 4.1 Add Activity tab backed by canonical HTTP coarse-activity reads; SSE only triggers refetch and raw diagnostics never render.
-- [ ] 4.2 Add minimal starting/running/completed/unavailable status and cancellation intent; do not add retry budget, attempt, backoff, or final execution-failure UI.
+- [ ] 4.2 Add minimal latest-run starting/running/completed/unavailable status and separate `cancel_requested`; do not add run-history UI, retry budget, attempt, backoff, or final execution-failure UI.
 - [ ] 4.3 Show readiness outcome/current flag and repository ID/full SHA citations without exposing checkout paths or runtime internals.
 
 ## 5. Reconnect and privacy tests
@@ -32,7 +33,7 @@
 - [ ] 5.1 Refetch Requirement, conversation, readiness, activity, and session status after initial load, focus/refocus, reload, SSE disconnect, reconnect, and relevant hints.
 - [ ] 5.2 Add fault-injection coverage proving missing transcript does not alter Overview and missed activity hints recover through HTTP.
 - [ ] 5.3 Add snapshot/structural checks for no chain-of-thought, raw tool/runtime diagnostics, credentials, checkout paths, or browser WebSocket.
-- [ ] 5.4 Add E2E coverage for duplicate/delayed hints, durable requester post, agent reply recovery, and conflict refetch behavior.
+- [ ] 5.4 Add E2E coverage for duplicate/delayed hints, durable requester post, agent reply recovery, sequential start selection, and conflict refetch behavior.
 
 ## 6. Validation
 

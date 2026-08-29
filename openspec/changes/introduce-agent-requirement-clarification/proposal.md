@@ -21,12 +21,13 @@ move ACK ownership, or duplicate reconciliation/retry rules.
 
 ## What Changes
 
-- Server orchestration for one clarification run: select and durably pin an
-  eligible daemon, assemble the immutable requirement snapshot, bounded
-  conversation excerpt, and enabled repository metadata, then persist and
-  dispatch `session.start` through the existing delivery path. User-driven
-  Draft → Discussing starts honor `expected_state_version`; `revision` remains
-  content identity, not the write precondition.
+- Server orchestration for sequential clarification runs: select and durably
+  pin an eligible daemon, assemble each run's immutable Requirement snapshot,
+  bounded conversation excerpt, and enabled repository metadata, then persist
+  and dispatch `session.start` through the existing delivery path. At most one
+  active run may compete for a Requirement; terminal runs remain historical.
+  User-driven Draft → Discussing starts honor `expected_state_version`; `revision`
+  remains content identity, not the write precondition.
 - Durable requester-message ordering: persist the canonical message first,
   then create a stable `message.send` command using its persisted identity;
   initial-run messages belong in `session.start` context instead of being sent
@@ -39,7 +40,7 @@ move ACK ownership, or duplicate reconciliation/retry rules.
   SDK lifecycle details stay inside the daemon and `north-domain`/
   `north-protocol` remain SDK-independent.
 - Server processing for runtime events that the protocol already carries:
-  durable agent-message, coarse-activity, and one-run session projections,
+  durable agent-message, coarse-activity, and per-run session projections,
   followed by ACK only after the relevant projection commits.
 - Readiness application through the existing typed assessment conversion and
   atomic persistence/domain path. A stale assessment is durable rejection, not
@@ -66,30 +67,39 @@ POST /requirements/{id}/clarification/start
 POST /requirements/{id}/clarification/messages/{message_id}/dispatch
   -> create/reuse one durable message.send
 POST /requirements/{id}/clarification/cancel
-  -> create/reuse one durable session.cancel command/intent
+-> persist cancel_requested; assigned run creates/reuses session.cancel; unassigned run creates no daemon command
 ```
 
 `clarification/start` validates the persisted start message and state-version
 precondition before any run or command mutation. A valid start with no eligible
-daemon still returns its unassigned unavailable run. Later dispatch never
-creates another conversation message. Cancellation targets the latest applicable
-run and never changes Requirement lifecycle or content. `GET
+daemon still returns its unassigned unavailable run. A reusable unavailable
+attempt is retried only with the same recorded `start_message_id`; a terminal or
+otherwise inapplicable latest run plus a new eligible message creates a new
+sequential run. Later dispatch never creates another conversation message.
+Cancellation targets the latest run and never changes Requirement lifecycle or
+content; an unassigned cancellation persists `cancel_requested` only and creates
+no daemon command or command identity, while an assigned run gets the durable
+`session.cancel` command. `GET
 /requirements/{id}/session` means latest clarification run: it returns
 `{ "session": null }` only before any run exists, and returns unassigned,
-assigned/offline, or completed run projections otherwise. No generic command API
-is introduced.
+assigned/offline, completed, or `cancel_requested` projections otherwise;
+status remains within the minimal starting/running/completed/unavailable set. No
+generic command API is introduced.
 
 ## Minimal execution scope
 
-This change supports one clarification execution and its minimal persisted
-run facts: requirement/run binding, nullable daemon owner until assignment,
-durable commands/events, cancellation intent, coarse
-starting/running/completed/unavailable projection, and runtime facts. A valid
-`clarification/start` creates or reuses the latest unassigned run before daemon
-selection. With no eligible daemon, that run has `daemon_id = null`, status
-`unavailable`, and no `session.start` command; its run identity is still
-returned with the operational-unavailable result. Once assigned, the daemon
-pin is immutable and durable commands stay bound to it across disconnects.
+This change supports sequential clarification runs while allowing at most one
+active/competing run per Requirement. Each run has its own requirement/run
+binding, immutable snapshot, start message, nullable daemon owner until
+assignment, repository set, durable commands/events, cancellation intent, and
+coarse starting/running/completed/unavailable projection. A start retry reuses
+the latest run only when `daemon_id = null`, no `session.start` was created or
+dispatched, it is not cancelled, it is the same logical start attempt, and the
+request uses its recorded `start_message_id`. With no eligible daemon, that run
+returns `status=unavailable`; after assignment, its daemon pin and run context
+are immutable. If the latest run is terminal/inapplicable and a new eligible
+persisted message is explicitly started, the server creates a new run with the
+current Requirement snapshot; the prior run remains immutable history.
 This does
 **not** introduce the later execution retry state machine, attempt accounting,
 retry budget, server backoff policy, or terminal execution `Failed` decision.
@@ -111,8 +121,9 @@ source mutation, PR creation, or new credential/provenance subsystem.
 
 ### New Capabilities
 
-- `clarification-runtime`: server orchestration, one-run runtime invocation,
-  event projections, canonical read models, and browser invalidation hints.
+- `clarification-runtime`: server orchestration, per-run runtime invocation,
+sequential run lifecycle, event projections, canonical read models, and
+clarification notification extensions.
 
 ### Modified Capabilities
 

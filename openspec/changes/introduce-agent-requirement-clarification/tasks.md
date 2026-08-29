@@ -2,16 +2,16 @@
 
 ## 1. Server orchestration and context
 
-- [ ] 1.1 Add one clarification-run service that creates/reuses the server-owned run before daemon selection; on assignment, atomically persist owner, Requirement binding, repository IDs, and `session.start` before dispatch, while no-owner starts retain an unassigned unavailable run with no start command.
+- [ ] 1.1 Add one clarification-run service for sequential runs with at most one competing active run per Requirement; reuse only an unassigned same-start attempt before daemon selection, and atomically persist owner, Requirement binding, repository IDs, and `session.start` before dispatch when assigned.
 - [ ] 1.2 Assemble immutable Requirement snapshot, bounded/relevant conversation excerpt, and enabled repository metadata through existing server DTO conversion; remove any checkout/credential/domain values from the wire input.
-- [ ] 1.3 Define the latest-run session projection (`starting`, `running`, `completed`, `unavailable`) plus cancellation intent; return `{ "session": null }` only before any clarification run exists, without adding retry state, attempt count, budget, backoff, or final `Failed` policy.
+- [ ] 1.3 Define the latest-run session projection (`starting`, `running`, `completed`, `unavailable`) plus separate cancellation intent; return `{ "session": null }` only before any clarification run exists, keep older runs as internal history, and do not add retry state, attempt count, budget, backoff, or final `Failed` policy.
 - [ ] 1.4 Ensure any Draft → Discussing start transition uses the caller's `expected_state_version`; stale conflict creates no session command while preserving the already-persisted requester message.
 
 ## 2. Requester message and command ordering
 
 - [ ] 2.1 Keep requester persistence first; for the initial message include the persisted identity/content in `session.start` context and do not create a second `message.send` command.
 - [ ] 2.2 For later messages create/reuse the durable message-to-command mapping and dispatch/replay the exact `message.send` envelope through existing outbox/journal semantics; expose it through the explicit authenticated dispatch operation.
-- [ ] 2.3 Add the explicit authenticated clarification cancellation operation and prove duplicate/replayed cancellation cannot invoke runtime twice.
+- [ ] 2.3 Add the explicit authenticated clarification cancellation operation; prove unassigned cancellation persists run state without a daemon command, while assigned cancellation creates/reuses one pinned `session.cancel` command and duplicate delivery cannot invoke runtime twice.
 
 ## 3. Daemon runtime boundary
 
@@ -46,7 +46,15 @@
 ## 8. Explicit HTTP intent boundaries
 
 - [ ] 8.1 Keep `POST /requirements/{id}/conversation/messages` persistence-only; prove it returns a durable `message_id` without runtime lookup, run creation, or daemon command.
-- [ ] 8.2 Add authenticated `POST /requirements/{id}/clarification/start` with persisted-message validation, `expected_state_version`, explicit Draft → Discussing behavior, start-context assembly, idempotent repeat/start-message rules, no duplicate `message.send`, and unassigned no-daemon response.
+- [ ] 8.2 Add authenticated `POST /requirements/{id}/clarification/start` with persisted-message validation, `expected_state_version`, reusable-unassigned versus active-conflict versus terminal-new-run rules, current start-context assembly, idempotent same-message behavior, no duplicate `message.send`, and unassigned no-daemon response.
 - [ ] 8.3 Add authenticated later-message dispatch by `message_id`; prove Requirement/conversation/run ownership, one durable message-to-command mapping, and idempotent replay without a second conversation message.
-- [ ] 8.4 Add authenticated `POST /requirements/{id}/clarification/cancel`; prove one durable `session.cancel` command/intent, pinned-owner behavior, unassigned handling, idempotency, and no Requirement mutation.
-- [ ] 8.5 Add HTTP integration scenarios for stale start conflict, no-daemon run identity, explicit unavailable restart reuse, assigned-owner disconnect, duplicate dispatch, and repeated cancellation.
+- [ ] 8.4 Add authenticated `POST /requirements/{id}/clarification/cancel`; prove separate unassigned run cancellation state with no `session.cancel` command or command identity, assigned pinned-command idempotency, and no Requirement mutation.
+- [ ] 8.5 Add HTTP integration scenarios for stale start conflict, no-daemon run identity, unavailable same-message reuse, active concurrent-start conflict, new run after completion/cancellation, current-snapshot capture, duplicate dispatch, and repeated assigned/unassigned cancellation.
+
+## 9. Sequential run lifecycle
+
+- [ ] 9.1 Prove a completed run followed by a new persisted eligible start message creates a new run/session identity with the current Requirement snapshot and independent repository/command context; preserve the prior run as immutable history.
+- [ ] 9.2 Prove an assigned active run rejects a different start message with the canonical conflict and creates no second run or `session.start` command.
+- [ ] 9.3 Prove an unassigned unavailable run reuses only the same recorded `start_message_id` and same logical start attempt; a different message conflicts until the attempt is cancelled.
+- [ ] 9.4 Prove unassigned cancellation persists `cancel_requested` only, creates no `session.cancel` command or command identity, and allows a later new message to create a new run; prove assigned cancellation reuses one pinned command.
+- [ ] 9.5 Prove `GET /requirements/{id}/session` returns latest-only data: null before any run, A until B exists, and B after sequential creation, while cancelled/completed A remains historical persistence.

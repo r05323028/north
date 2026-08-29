@@ -11,9 +11,10 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
 - Deep-linkable `/requirements/[id]` route with Conversation, Overview, and
   Activity tabs.
 - Conversation uses the persisted conversation API for requester and agent
-  messages. Initial clarification explicitly calls `POST
-  /clarification/start` after persistence; later messages explicitly call the
-  clarification dispatch operation. SSE only hints that a refetch may be useful.
+  messages. After persistence, canonical latest-run state selects explicit
+  `start`, same-message unavailable-start retry, later-message `dispatch`, or a
+  new sequential start after a terminal/inapplicable run. SSE only hints that a
+  refetch may be useful; transcript contents never select the operation.
 - Overview renders canonical Requirement fields, readiness/repository evidence,
   lifecycle status, content revision, and the minimal clarification session
   status supplied by the backend.
@@ -31,10 +32,12 @@ This change consumes existing `GET /requirements/{id}` and paged conversation
 reads plus the existing persistence-only
 `POST /requirements/{id}/conversation/messages`. It then uses clarification's
 explicit authenticated `start`, message `dispatch`, and `cancel` mutations,
-plus its canonical readiness, activity, and latest-run reads. It consumes the
-Board-owned shared `GET /events` endpoint and clarification's added categories;
-it does not interpret daemon frames, SSE replay, or a future retry state machine
-as product truth.
+plus its canonical readiness, activity, and latest-run reads. The latest-run
+read selects no-run start, reusable same-message start retry, active-run later
+message dispatch, or new start after terminal/inapplicable state. It consumes
+the Board-owned shared `GET /events` endpoint and clarification's added
+categories; it does not interpret daemon frames, SSE replay, or a future retry
+state machine as product truth.
 
 ## Execution-status boundary
 
