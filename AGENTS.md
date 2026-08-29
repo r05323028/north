@@ -55,6 +55,42 @@ lands. Do not invent competing specification systems.
 ./scripts/pre-push-validation.sh  # ci gate + act parity vs real workflow jobs
 ```
 
+### Pre-push validation decision
+
+Before deciding whether to run the pre-push hook, inspect the actual Git
+changed-file set. Include staged and unstaged tracked changes plus untracked
+files (for example, the union of `git diff --name-only HEAD` and
+`git ls-files --others --exclude-standard`). Include pre-existing changes; do
+not decide from task intent or commit-message text.
+
+A change qualifies as documentation-only when, and only when, every changed
+file matches this allowlist:
+
+- `*.md` files;
+- documentation-content files under `docs/**`; and
+- documentation-site content files, such as Markdown/MDX pages, that contain
+  only documentation content and cannot affect site build or runtime
+  configuration.
+
+Documentation-site configuration is not allowlisted, even when adjacent to
+content. Unknown or ambiguous files default to non-documentation-only.
+
+Decision rule:
+
+```text
+all changed files are docs-only allowlisted files
+    -> skip ./scripts/pre-push-validation.sh
+any changed file is outside the docs-only allowlist
+    -> run ./scripts/pre-push-validation.sh
+```
+
+Any source, test, manifest or lockfile, build/tool/formatter/linter/compiler
+configuration, CI workflow, script, container file, generated code, schema or
+fixture consumed by executable code, documentation-site configuration, or
+mixed documentation plus non-documentation diff requires the normal pre-push
+validation. Skipping the hook for a strictly allowlisted documentation diff
+does not remove other relevant documentation or specification checks.
+
 Unsupported test profiles exit explicitly — never fake a suite for a
 name. Any command documented here must actually work.
 
