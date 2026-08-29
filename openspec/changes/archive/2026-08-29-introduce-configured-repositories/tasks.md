@@ -2,7 +2,7 @@
 
 ## 1. Domain model and schema
 
-- [x] 1.1 Add migration 0006 for `repositories` with immutable UUID `id`, trimmed `name`, persistence-only `name_normalized`, immutable `url`, editable `description`, `created_at`, `updated_at`, nullable `disabled_at`, and no credential columns; encode the timestamp/no-op lifecycle contract.
+- [x] 1.1 Add migration 0013 for `repositories` with immutable UUID `id`, trimmed `name`, persistence-only `name_normalized`, immutable `url`, editable `description`, `created_at`, `updated_at`, nullable `disabled_at`, and no credential columns; encode the timestamp/no-op lifecycle contract.
 - [x] 1.2 Add repository domain/value validation for name, description, supported Git URL shape, URL immutability, and derived normalized-name key.
 - [x] 1.3 Add database uniqueness and indexes for `name_normalized` across enabled and disabled rows, deterministic `name_normalized ASC, id ASC` reads, and historical row retention.
 - [x] 1.4 Add persistence mappings and transactional create/update/disable/re-enable operations with server-generated timestamps, exact idempotent no-op behavior, and no hard-delete method.
@@ -44,6 +44,13 @@
 ## 6. Validation gates
 
 - [x] 6.1 Add Rust unit/integration/PostgreSQL tests for schema, normalization, URL credential rejection, the chosen literal-`git` username policy, permissions, conflicts, ordering, lifecycle timestamps/no-ops, citation existence/provenance, disable-during-inflight behavior, and history.
-- [x] 6.2 Run `cd apps/web && npm run lint`, `npm run typecheck`, and `npm run build` after Settings UI implementation.
-- [x] 6.3 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
-- [x] 6.4 Run `openspec validate --all --strict` and `git diff --check`; do not mark repository implementation complete while any required catalog or validation task is unchecked.
+- [x] 6.2 Run `cd apps/web && npm run lint`, `npm run typecheck`, and `npm run build` on the corrected current head.
+- [x] 6.3 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` on the corrected current head.
+- [x] 6.4 Run `openspec validate --all --strict` and `git diff --check` on corrected migration head; do not mark repository implementation complete while any required catalog or validation task is unchecked.
+
+## 7. Release correction
+
+- [x] 7.1 Move repository schema to `0013_repositories.sql`, keep protocol delivery after it at `0014_protocol_delivery.sql`, and update migration references/docs without modifying historical 0001–0012 files.
+- [x] 7.2 Replace the migration regression with an exact historical-main-head (`0001`–`0005`, `0007`–`0012`) to new-head (`0013`, `0014`) upgrade, including legacy users, Requirements, readiness, daemon/session/outbox data, constraints, backfills, and retained repository citations.
+- [x] 7.3 Preserve and verify disable-during-inflight citation behavior: new selection requires enabled state, while valid in-flight evidence remains accepted after disable because the durable row remains.
+- [x] 7.4 Run corrected-head PostgreSQL integration, Rust, web, strict OpenSpec, diff, and CI-equivalent validation; archive only after all required gates pass.

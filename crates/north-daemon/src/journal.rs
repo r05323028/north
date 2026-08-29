@@ -1597,10 +1597,11 @@ mod tests {
             .expect("started");
         let recovered = journal.recover(&executor).expect("recover");
         assert_eq!(recovered[0].emitted_events.len(), 1);
-        let reason = match &recovered[0].emitted_events[0].event {
-            Event::SessionFailed(failed) => &failed.reason,
+        let (recoverable, reason) = match &recovered[0].emitted_events[0].event {
+            Event::SessionFailed(failed) => (failed.recoverable, &failed.reason),
             _ => panic!("expected session.failed"),
         };
+        assert!(!recoverable);
         assert!(reason.contains("execution_outcome_unknown"));
         assert!(reason.contains("automatic_resubmit=false"));
         assert!(!reason.contains("secret"));

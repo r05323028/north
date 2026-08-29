@@ -27,13 +27,13 @@
 - [x] 2.17 Implement reconciliation merge for command watermark, event contiguous watermark, sparse event ACKs, ascending command resend, ascending event replay, and late duplicate inertness.
 - [x] 2.18 Persist command/event watermarks and ID/digest tombstones across daemon/server restart; prove no late replay can reapply a business effect.
 - [x] 2.19 Implement safe compaction: payload removal only at durable boundaries, retained `processed_through_seq`, retained event dedupe protection, and no time-only tombstone expiry for relevant sessions.
-- [x] 2.20 Add fault-injection integration tests for lost ACKs, reconnect, daemon restart after each journal state, crash-after-dispatch unknown outcome, gap overflow, duplicate delivery, and compaction/restart.
+- [x] 2.20 Add fault-injection integration tests for lost ACKs, reconnect, daemon restart after each journal state, crash-after-dispatch unknown outcome, gap overflow, duplicate delivery, and compaction/restart. Executable coverage is provided by `durable_delivery_survives_lost_ack_gaps_and_retry`, `received_command_recovers_after_journal_reopen`, `dispatch_started_recovery_does_not_dispatch_again`, `terminal_command_is_inert_after_journal_reopen`, `unknown_recovery_emits_non_resubmittable_failure_fact`, `bounded_gap_buffers_then_drains_in_order`, and the compaction/replay restart tests.
 
 ## 3. Boundaries and validation
 
 - [x] 3.1 Architecture tests confirm protocol purity and no new server↔daemon crate edge after adding dependencies.
 - [x] 3.2 Existing wire/transport foundation validation completed; prior `./scripts/validate.sh fast` and `openspec validate --all --strict` coverage applies to that foundation, with durable-delivery validation recorded in task 3.3.
-- [x] 3.3 Final durable-delivery validation: focused journal/restart/fault-injection tests, PostgreSQL-backed server integration, protocol transport integration, Rust `cargo fmt`/`cargo clippy`/`cargo test`, web validation, and `openspec validate --all --strict` after all owning 2.x tasks are implemented.
+- [x] 3.3 Final durable-delivery validation: focused journal/restart/fault-injection tests, PostgreSQL-backed server integration, protocol transport integration, Rust `cargo fmt`/`cargo clippy`/`cargo test`, web validation, and `openspec validate --all --strict` after the corrected migration head is verified.
 
 ## 4. Transport standardization slice
 
@@ -56,5 +56,12 @@
 - [x] 6.3 Bound post-upgrade hello and coordinator admission deadlines in the Axum adapter.
 - [x] 6.4 Remove protocol-error severity state and define every `protocol.error` as terminal to the current connection.
 - [x] 6.5 Add real Axum↔tokio-tungstenite integration tests for empty/multi-session snapshots, gating, protocol failure, and admission backpressure.
-- [x] 6.6 Align architecture/docs/OpenSpec contracts; durable outbox/journal/session coordination are implemented by the completed 2.x tasks.
+- [x] 6.6 Align architecture/docs/OpenSpec contracts; durable outbox/journal/session coordination are implemented by the completed 2.x tasks, while generic runtime-event business projections remain deferred.
 - [x] 6.7 Add bidirectional protocol-error integration tests proving daemon-reported and server-reported violations close only the current connection and retain unacknowledged durable work.
+
+## 7. Release correction
+
+- [x] 7.1 Renumber repository and protocol migrations strictly after published main head 0012 as `0013_repositories.sql` then `0014_protocol_delivery.sql`; update exact SQL references and documentation.
+- [x] 7.2 Replace the unsafe pre-0012 repository migration fixture with a forward-upgrade regression that applies exact historical 0001–0005 and 0007–0012 SQL, inserts legacy state, then applies exact 0013 and 0014 SQL; assert retained state, backfills, constraints, and citation data.
+- [x] 7.3 Make generic event rejection, local `recoverable` meaning, server retry ownership, and `LocalRuntime` placeholder explicit across implementation-adjacent OpenSpec artifacts.
+- [x] 7.4 Run corrected-head Rust, PostgreSQL integration, web, strict OpenSpec, diff, and CI-equivalent validation; archive only after all required gates pass.

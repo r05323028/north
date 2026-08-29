@@ -22,8 +22,9 @@ Requirement remains Ready and reviewable; later review transitions advance the
 Requirement without mutating historical evidence. Migrations 0007–0009
 implement daemon registration/setup-request, execution-session/outbox records,
 and requirement binding used to authorize assessment events. Migration 0013
-adds immutable outbox payload fingerprints, command/event contiguous
-watermarks, and durable server event identity/outcome records. Readiness
+adds the configured repository catalog. Migration 0014 adds immutable outbox
+payload fingerprints, command/event contiguous watermarks, and durable server
+event identity/outcome records. Readiness
 evidence rows are append-only; database triggers reject direct mutation of
 evidence, repository source identity, and command outbox payloads. Requirement
 delete is restrictive so evidence never changes via a cascade. Requirements

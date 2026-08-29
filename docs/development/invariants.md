@@ -64,7 +64,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Clarification never intentionally persists mutations to source repos | Specified | hardening + local-inspection contract; disposable-workspace integration test pending; process-level, NOT sandbox-enforced |
 | Concurrent sessions never share a mutable inspection checkout | Specified | hardening/local-inspection tasks; concurrent workspace test pending |
 | Git credentials never centralized in the server | Specified | repository schema task must omit credential fields; architecture schema check when schema exists |
-| Configured repositories are soft-disabled, not normally hard-deleted | Enforced | migration 0006, Admin/Owner lifecycle routes, idempotent timestamps, and retained identity |
+| Configured repositories are soft-disabled, not normally hard-deleted | Enforced | migration 0013, Admin/Owner lifecycle routes, idempotent timestamps, and retained identity |
 | Disabled repositories are excluded from new inspections | Partially Enforced | enabled-only `AuthStore::active_repositories` catalog is enforced; downstream inspection selection remains owned by local-repository-inspection |
 | Inspections cite exact commit SHAs | Specified | pending introduce-local-repository-inspection |
 

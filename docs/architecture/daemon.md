@@ -63,8 +63,9 @@ are current where stated. Repository inspection remains a downstream contract.
   heartbeat-based application liveness, and supports owner/admin revocation.
 - Migrations 0007–0009 store setup requests, registrations, requirement-bound
   execution sessions, the server command outbox, and bounded verification-attempt
-  state. Migration 0013 adds outbox payload fingerprints, command/event
-  watermarks, and server event identity/outcome records.
+  state. Migration 0013 adds the configured repository catalog; migration 0014
+  adds outbox payload fingerprints, command/event watermarks, and server event
+  identity/outcome records.
   Plaintext credentials remain on daemon hosts; the server stores hashes only.
   Setup rows older than the retention window are removed opportunistically in
   bounded indexed batches.
@@ -82,8 +83,11 @@ are current where stated. Repository inspection remains a downstream contract.
   and report exact commit SHAs.
 - The durable coordinator converts runtime output into typed facts/events,
   journals them before transmission, replays them in `daemon_event_seq` order,
-  and reports recoverability/failure. Unknown outcomes emit an explicit
-  `session.failed` fact without automatic resubmission.
+  and reports recoverability/failure. The shipped `LocalRuntime` is a
+  placeholder, so executable commands currently surface a not-configured/
+  unknown fact; the production agent adapter belongs to the downstream runtime
+  change. Unknown outcomes emit an explicit `session.failed` fact without
+  automatic resubmission.
 - Reconnect the WebSocket with local backoff and replay eligible Journal buffers
   after reconciliation; execution recovery remains a server `session.resume`
   command.

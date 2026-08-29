@@ -69,7 +69,7 @@ member so `cargo test --workspace` executes it.
 | E2E | Not implemented — browser approval UI is covered at HTTP integration; Playwright workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
-PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants.
+PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it.
 
 ## Required future proofs
 

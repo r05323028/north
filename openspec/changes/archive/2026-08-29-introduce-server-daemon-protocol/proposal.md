@@ -69,7 +69,8 @@ coordination remains responsible for it.
   business effect or a durable rejection before sending
   `event_ack(status=accepted)` or `event_ack(status=rejected)`; both are
   terminal transport acknowledgements for that exact event.
-- Durable command coordination decides journal state and idempotency before crossing a narrow internal dispatch/execution seam. The seam accepts stable command/runtime operation identity; durable-delivery tests may use a deterministic fake executor. The future `introduce-agent-requirement-clarification` change supplies the real agent-runtime adapter behind it.
+- Durable command coordination decides journal state and idempotency before crossing a narrow internal dispatch/execution seam. The seam accepts stable command/runtime operation identity; durable-delivery tests may use a deterministic fake executor. The shipped `north-daemon` wires only a `LocalRuntime` placeholder; the future `introduce-agent-requirement-clarification` change supplies the real agent-runtime adapter behind it.
+- Current generic event handling is protocol delivery only: identity and sequence are validated, a durable accepted/rejected receipt is recorded, and the matching terminal ACK suppresses replay. Only `requirement.assessed` has a business projection; `session.started`, `agent.message`, `agent.activity`, `session.completed`, and `session.failed` are durably rejected with `event_handler_not_implemented` until later runtime/execution changes own their projections.
 - Reconciliation uses one finite connection-level snapshot with one state per
   pinned session. The server resends unacknowledged commands in sequence order;
   the daemon replays unacknowledged events in sequence order after applying the
@@ -77,9 +78,10 @@ coordination remains responsible for it.
 - A crash after dispatch begins never causes blind resubmission of a
   side-effecting operation. Recovery first reattaches by stable operation
   identity; if outcome remains unknowable, the daemon records terminal unknown
-  state and emits an execution `session.failed` fact. Its `recoverable` value
-  reports only whether the existing runtime operation can be locally
-  reattached/resumed; server retry and failure policy remains authoritative.
+  state and emits an execution `session.failed` fact. `recoverable: false` means
+  only that the existing operation cannot be safely recovered locally; it does
+  not decide final execution failure. The server owns attempt count, retry
+  budget, `session.resume` policy, and final execution `Failed` state.
 
 Repository preparation events stay out unless a later change proves genuine
 protocol value. The protocol does not own the agent runtime abstraction or adapter, agent

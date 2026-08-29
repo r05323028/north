@@ -74,6 +74,9 @@ struct LocalState {
     capabilities: Vec<String>,
 }
 
+/// Placeholder until `introduce-agent-requirement-clarification` supplies
+/// North's production agent runtime adapter. Durable coordination is real, but
+/// executable commands currently produce a not-configured/unknown fact.
 struct LocalRuntime;
 
 impl RuntimeExecutor for LocalRuntime {

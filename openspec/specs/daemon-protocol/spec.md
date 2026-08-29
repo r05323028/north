@@ -434,6 +434,35 @@ persistence.
 - **THEN** it contains execution-recovery data only; directional event sequence
   and replay watermarks remain in reconciliation state
 
+### Requirement: Generic runtime events have delivery-only handling until projected
+
+For well-formed `session.started`, `agent.message`, `agent.activity`,
+`session.completed`, and `session.failed` events, the current server SHALL
+validate event identity, sequence, and payload integrity, durably record a
+rejected receipt with `event_handler_not_implemented`, and send
+`event_ack(status=rejected)` only after that receipt commits. It SHALL not
+silently accept a business effect. Business projections for runtime/session
+state, activity or conversation data, and retry policy are deferred to their
+own changes. A rejected generic event remains retained/replay-safe according
+to the delivery watermarks and tombstones.
+
+#### Scenario: Generic event receives terminal delivery rejection
+
+- **WHEN** a valid generic runtime event arrives before its owning business
+  projection exists
+- **THEN** server records its identity, sequence, payload digest, rejected
+  outcome, and `event_handler_not_implemented` before sending a rejected ACK;
+  no execution-state, activity, conversation, or retry-budget mutation occurs
+
+#### Scenario: Unknown outcome remains a local execution fact
+
+- **WHEN** `session.failed` reports `recoverable: false` with
+  `execution_outcome_unknown`
+- **THEN** the fact means the existing runtime operation cannot be safely
+  recovered locally; it does not decide final execution failure, and server
+  attempt count, retry budget, `session.resume` policy, and final `Failed`
+  state remain server-owned
+
 ### Requirement: Runtime and business retry ownership stays separated
 
 The daemon SHALL own only transport reconnect/backoff, local journal recovery,

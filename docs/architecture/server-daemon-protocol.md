@@ -1,7 +1,7 @@
 # Server ↔ daemon protocol
 
-Canonical message catalog: `crates/north-protocol/src/lib.rs` + the active
-`introduce-server-daemon-protocol` contract. Daemon connection and distributed
+Canonical message catalog: `crates/north-protocol/src/lib.rs` + the canonical
+`openspec/specs/daemon-protocol/spec.md` contract. Daemon connection and distributed
 architecture guardrails are established prerequisites in the canonical OpenSpec
 specs. This doc fixes the wire and reconciliation contract; it does not make
 the server or daemon own each other's business logic.
@@ -136,6 +136,16 @@ retry and the real agent runtime remain downstream responsibilities.
 `requirement.assessed` evidence, repository citation gates, revision checks, and
 post-commit ACKs are implemented by the server readiness path.
 
+Current generic-event handling is deliberately only protocol delivery: the
+server validates event identity and sequence, records one durable accepted or
+rejected receipt, sends the matching terminal ACK after commit, and suppresses
+replay after that ACK. Only `requirement.assessed` has a business projection in
+this slice. `session.started`, `agent.message`, `agent.activity`,
+`session.completed`, and `session.failed` are durably rejected with
+`event_handler_not_implemented`; they do not transition execution state,
+project activity/conversation data, consume retry budget, or claim that server
+retry policy ran. Those projections belong to later runtime/retry changes.
+
 Only delivery envelopes carry envelope fields:
 
 - Every `CommandEnvelope` carries `command_id`, `session_id`,
@@ -179,9 +189,12 @@ successfully while the session remains `Running`, followed later by a separate
 The durable command coordinator decides journal state and idempotency before
 crossing a narrow internal dispatch/execution seam that accepts stable command
 and runtime-operation identity. Durable-delivery tests may use a deterministic
-fake executor. The future `introduce-agent-requirement-clarification` change
-provides the real runtime adapter; this protocol change does not introduce
-agent prompting, SDK behavior, tool choice, repository inspection, or readiness
+fake executor. The shipped `north-daemon` binary currently wires a `LocalRuntime` placeholder.
+It performs durable protocol/runtime coordination but has no production agent
+runtime adapter; executable commands therefore surface a not-configured/unknown
+execution fact. The future `introduce-agent-requirement-clarification` change
+provides the real adapter. This protocol change does not introduce agent
+prompting, SDK behavior, tool choice, repository inspection, or readiness
 judgment.
 
 A crash between dispatch and outcome first attempts reattachment by
@@ -190,8 +203,11 @@ existing runtime operation cannot be safely recovered locally, so the daemon
 emits journaled `session.failed` with `recoverable: false`,
 `execution_outcome_unknown`, the command/runtime identity, and
 `automatic_resubmit=false`. `recoverable` is only the daemon's fact about local
-resume/reattach ability; either value leaves server retry/failure policy
-authoritative. The daemon never blindly resubmits a side-effecting operation;
+resume/reattach ability; `false` means the existing operation cannot be safely
+recovered locally. Either value leaves server retry/failure policy authoritative.
+The server alone owns execution-attempt count, retry budget, `session.resume`
+policy, and final execution `Failed` state. The daemon never blindly resubmits
+a side-effecting operation;
 any later attempt is an explicit server-directed command with a new identity.
 
 The readiness path validates assessment event identity, session binding,
@@ -201,9 +217,12 @@ server/domain readiness gates, atomically records immutable evidence and any
 valid `Discussing` -> `Ready` promotion, records the resulting Ready-generation
 `state_version` as `accepted_state_version`, commits, and sends
 `event_ack(status=accepted)` (or commits a rejection and sends
-`event_ack(status=rejected)`). The current server durably rejects runtime event
-types without an owning business projection with
-`event_handler_not_implemented`; this is not reported as a false accepted effect.
+`event_ack(status=rejected)`). Generic runtime events use the same durable
+identity/sequence/rejection boundary but have no business projection here:
+`session.started`, `agent.message`, `agent.activity`, `session.completed`, and
+`session.failed` receive `event_handler_not_implemented`, a durable rejected
+receipt, and `event_ack(status=rejected)`. No execution-state transition,
+retry-budget decision, or activity/conversation projection is implied.
 Accepted evidence creates/binds `assessment_id`
 and `accepted_state_version`; neither is an inbound assessment concurrency
 token. Later human Accept, Reject, or Request Changes uses `assessment_id`,

@@ -410,6 +410,22 @@ transitions, readiness evidence, and all `revision`/`state_version`/
 `assessment_id`/`accepted_state_version` transaction rules. Protocol delivery
 of a fact never grants the daemon authority to mutate Requirement state.
 
+The current server event seam is intentionally narrow. It validates identity,
+sequence, and payload integrity, records a durable accepted or rejected event
+receipt, and emits the matching ACK only after commit. `requirement.assessed`
+has the only business projection in this change. `session.started`,
+`agent.message`, `agent.activity`, `session.completed`, and `session.failed`
+are durably rejected with `event_handler_not_implemented`; execution-state,
+activity/conversation, and retry-budget projections remain deferred to their
+own changes. A rejected `session.failed` fact is still retained and replay-safe;
+it does not mean server retry policy was applied.
+
+The binary's `LocalRuntime` is an explicit placeholder: durable coordination is
+wired, but no production agent runtime adapter exists yet. Its
+`runtime_adapter_not_configured` unknown outcome is an execution fact, not a
+claim of final server execution failure. The real adapter remains owned by
+`introduce-agent-requirement-clarification`.
+
 ## Risks / Trade-offs
 
 - **Crash after a side-effecting runtime call** → stable operation identity and
