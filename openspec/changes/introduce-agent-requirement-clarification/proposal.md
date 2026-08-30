@@ -19,6 +19,48 @@ envelopes, stable IDs, directional sequences, canonical
 This change consumes that contract. It does not add aliases, redesign payloads,
 move ACK ownership, or duplicate reconciliation/retry rules.
 
+## North 0.1 runtime strategy
+
+North 0.1 intentionally implements one concrete clarification runtime
+integration: `PiClarificationAdapter` in `north-daemon`, backed by Pi Agent. Pi
+Agent is North's reference clarification runtime adapter and first end-to-end
+runtime vertical slice. This is a deliberate slice to validate the complete
+clarification architecture behind a stable North-owned seam, not an attempt to
+design or ship a multi-provider runtime framework in 0.1.
+
+The vertical slice is:
+
+1. Requirement clarification starts in North.
+2. `north-server` assembles canonical Requirement, deterministic conversation,
+   and repository context for the run.
+3. The daemon receives the existing North protocol command.
+4. The daemon's generic North-owned runtime seam invokes `PiClarificationAdapter`.
+5. Pi may inspect only repositories already authorized and bound to that run.
+6. Pi produces agent-visible responses, coarse product-visible activity, and
+   readiness evidence.
+7. `PiClarificationAdapter` maps those results into North-neutral runtime facts.
+8. `north-server` persists canonical conversation, readiness, and session
+   projections.
+
+Claude Code, Codex, OpenCode, and other runtime integrations are out of scope
+for this change. North still MUST keep the seam clean enough to replace Pi
+without changing North-owned contracts.
+
+### Architectural invariants
+
+These are architectural invariants, not implementation suggestions:
+
+- **Pi Agent is the North 0.1 reference clarification runtime adapter and first
+  end-to-end runtime vertical slice.** Pi-specific APIs, lifecycle concepts,
+  configuration, event types, and SDK types MUST remain confined to the
+  `north-daemon` adapter and MUST NOT become North protocol, domain,
+  persistence, server, or browser concepts.
+- **The clarification runtime seam SHALL be defined from North's execution
+  needs rather than from Pi Agent's API.** Replacing the Pi adapter with
+  another compatible runtime MUST NOT require changes to `north-domain`,
+  canonical Requirement/conversation/readiness models, or the server-daemon
+  wire protocol.
+
 ## What Changes
 
 - Server orchestration for sequential clarification runs: select and durably
@@ -36,9 +78,11 @@ move ACK ownership, or duplicate reconciliation/retry rules.
   message operation persists history only; `clarification/start` starts from a
   persisted message and `expected_state_version`; later message dispatch and
   cancellation explicitly create/reuse their durable protocol commands.
-- One concrete daemon runtime adapter behind North's internal execution seam;
-  SDK lifecycle details stay inside the daemon and `north-domain`/
-  `north-protocol` remain SDK-independent.
+- One North 0.1 concrete daemon runtime integration:
+  `PiClarificationAdapter` behind North's internal execution seam, with Pi
+  Agent as its provider. Pi SDK lifecycle details stay inside the adapter and
+  `north-daemon`; `north-domain`, `north-protocol`, and server contracts remain
+  Pi-independent.
 - Server processing for runtime events that the protocol already carries:
   durable agent-message, coarse-activity, and per-run session projections,
   followed by ACK only after the relevant projection commits.
@@ -113,9 +157,11 @@ canonical.
 
 ## Out of scope
 
-No wire-protocol redesign, multi-runtime plugin registry, daemon-owned business
-retry, live daemon migration, raw model reasoning, raw tool output, coding or
-source mutation, PR creation, or new credential/provenance subsystem.
+No wire-protocol redesign, multi-runtime plugin registry, Claude Code, Codex,
+OpenCode, or other runtime adapters; no user-facing provider selection;
+no daemon-owned business retry, live daemon migration, raw model reasoning, raw
+tool output, coding or source mutation, PR creation, or new
+credential/provenance subsystem.
 
 ## Capabilities
 

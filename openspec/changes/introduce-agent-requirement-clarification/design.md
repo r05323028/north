@@ -32,7 +32,7 @@ for the clarification projections; it does not change the wire contract.
 | Session selection/pinning and command outbox | `north-server`/`north-persistence` |
 | Requirement lifecycle, revision, state version, readiness gates | `north-domain` through server persistence |
 | Repository selection and run-bound inspection | server context + `introduce-local-repository-inspection` |
-| Agent SDK/runtime invocation | one internal `north-daemon` adapter |
+| Pi Agent invocation and provider mapping | `PiClarificationAdapter` in `north-daemon`, behind the North-owned seam |
 | Agent messages/activity/session projections and HTTP reads | `north-server`/`north-persistence` |
 | Base browser SSE endpoint and `requirement.changed` | `introduce-requirement-board` |
 | Clarification SSE categories and post-commit emission | `north-server` in this change, extending Board's `/events` |
@@ -175,20 +175,95 @@ explicit start operation; clients do not classify it from transcript contents.
 
 The existing durable command journal remains outside the runtime adapter and
 continues to pass `runtime_operation_id = command_id` into its narrow seam.
-Behind that seam, define one daemon-private North-facing runtime interface:
+North 0.1 implements exactly one concrete clarification runtime integration:
+`PiClarificationAdapter` in `north-daemon`, backed by Pi Agent. The adapter is
+an implementation detail of `north-daemon`, not a North domain or wire-protocol
+concept.
 
-- input: stable operation/session identity, server-assembled North-neutral
-  requirement/conversation/repository context, cancellation handle, and
-  session/task checkout handles supplied by local inspection when needed;
-- output: North-neutral facts for agent message, coarse activity, readiness
-  assessment, completion, or failure; and
-- control: one explicit cancellation operation and local recovery/reattachment
-  mechanics only.
+The daemon-private `ClarificationRuntime` seam is North-owned and
+provider-neutral. Its shape is derived from North clarification execution
+needs, not copied from Pi Agent's API or lifecycle. Conceptual layering:
 
-The interface must not mirror a provider SDK's callback graph, expose provider
-objects, or return raw tool/chain-of-thought records. One concrete adapter is
-implemented first. SDK dependencies remain in `north-daemon`; no SDK type
-crosses into `north-server`, `north-domain`, or `north-protocol`.
+```text
+north-server
+    |
+    | existing north-protocol commands/events
+    v
+north-daemon
+    |
+    | North-owned ClarificationRuntime seam
+    v
+PiClarificationAdapter
+    |
+    v
+Pi Agent
+```
+
+The seam's conceptual North-owned inputs are:
+
+- stable operation identity;
+- session/run identity;
+- immutable Requirement snapshot;
+- deterministic persisted conversation context;
+- authorized, run-bound repository inspection handles/context; and
+- cancellation/control intent.
+
+Its conceptual North-owned outputs are:
+
+- agent message;
+- coarse product-visible activity;
+- readiness assessment;
+- completion; and
+- operational failure.
+
+These are conceptual responsibilities, not a prescribed Rust trait or set of
+provider-shaped types. The seam SHALL NOT carry or expose:
+
+- Pi SDK types;
+- Pi event names;
+- Pi session objects;
+- Pi tool-call schemas;
+- provider-specific lifecycle state;
+- raw tool output;
+- chain-of-thought or reasoning; or
+- Pi-specific configuration structures.
+
+`PiClarificationAdapter` owns all Pi-specific mapping. It translates Pi
+callbacks and results into the North-neutral facts consumed by the daemon,
+or drops details that have no North meaning. The daemon then emits only the
+existing North protocol events; no Pi event is mirrored as a protocol frame.
+The daemon and adapter report facts only: they cannot mutate Requirement state,
+apply Requirement business transitions, or access server persistence directly.
+`north-server` applies canonical conversation, readiness, and session
+projections through existing North domain/persistence paths.
+
+For the 0.1 vertical slice, the execution path is:
+
+1. Requirement clarification starts in North through the explicit authenticated
+   server operation.
+2. `north-server` assembles the immutable Requirement snapshot, deterministic
+   conversation context, and run-bound repository metadata into the existing
+   `session.start` command.
+3. `north-daemon` receives that existing protocol command and invokes the
+   North-owned `ClarificationRuntime` seam with North concepts.
+4. `PiClarificationAdapter` invokes Pi using only repository inspection
+   context/handles already authorized and bound to the run.
+5. Pi produces agent-visible response, coarse activity, and readiness evidence;
+   the adapter maps them into North-neutral facts.
+6. `north-daemon` maps those facts to existing typed protocol events, while
+   filtering Pi-only callbacks, raw tool output, and reasoning.
+7. `north-server` persists canonical conversation, readiness, and session
+   projections after durable event handling.
+
+Exact Pi SDK/API call, process boundary, and low-level callback wiring are
+implementation decisions inside `PiClarificationAdapter`; this repository does
+not establish them. This change does not introduce a provider registry,
+provider-selection API, or abstractions for hypothetical runtimes. It defines
+the smallest stable seam needed to implement Pi cleanly and preserve future
+runtime replacement without changing North-owned contracts. SDK dependencies
+and Pi-specific types SHALL remain confined to `PiClarificationAdapter` within
+`north-daemon`, and SHALL NOT appear in `north-server`, `north-domain`,
+`north-protocol`, persistence, or browser contracts.
 
 ## Event projection and ordering
 

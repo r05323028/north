@@ -15,9 +15,15 @@
 
 ## 3. Daemon runtime boundary
 
-- [ ] 3.1 Refine the existing durable runtime seam to accept stable North operation identity and North-neutral clarification input/output rather than a provider SDK lifecycle.
-- [ ] 3.2 Add one concrete SDK-backed adapter inside `north-daemon`; keep SDK dependencies and provider types out of `north-server`, `north-domain`, and `north-protocol`.
-- [ ] 3.3 Map adapter output to typed protocol events and filter raw tool output/chain-of-thought before journaling or transmission.
+- [ ] 3.1 Define/refine the daemon-private North-owned `ClarificationRuntime` seam from North clarification execution needs: stable operation/session identity, immutable Requirement snapshot, deterministic conversation context, authorized run-bound repository inspection context, cancellation/control intent, and North-neutral runtime facts; do not copy Pi Agent's API or lifecycle.
+- [ ] 3.2 Implement `PiClarificationAdapter` as the only North 0.1 concrete clarification runtime adapter, backed by Pi Agent; do not add a provider registry, user-facing provider selection, or adapters for other runtimes.
+- [ ] 3.3 Keep all Pi SDK dependencies, SDK/provider types, Pi configuration, event names, session objects, tool-call schemas, and lifecycle handling inside `PiClarificationAdapter`/`north-daemon`; leave exact low-level Pi SDK/API wiring as an implementation decision inside that boundary.
+- [ ] 3.4 Map Pi callbacks/results into existing North-neutral agent message, coarse activity, readiness assessment, completion, and operational failure facts; emit only existing typed North protocol events and filter/drop Pi-only events, raw tool output, and chain-of-thought before journaling or transmission.
+- [ ] 3.5 Ensure Pi and `PiClarificationAdapter` cannot mutate Requirement state, apply Requirement business transitions, or access server persistence directly; `north-server` remains the authority for canonical projections.
+- [ ] 3.6 Integrate authorized run-bound repository inspection into `PiClarificationAdapter` using only North-supplied repository context/handles; prevent arbitrary repository selection, credentials, checkout paths, and filesystem/server-persistence access.
+- [ ] 3.7 Add boundary tests proving Pi SDK dependencies/types do not appear in `north-domain`, `north-protocol`, or `north-server` contracts.
+- [ ] 3.8 Add an end-to-end vertical-slice test covering requester clarification → server-assembled Requirement/conversation/repository context → existing North protocol command → daemon → `PiClarificationAdapter` → canonical agent response, readiness, activity, and session projections.
+- [ ] 3.9 Add tests proving unsupported/provider-specific Pi callbacks, tool records, and lifecycle events are mapped to existing North-neutral facts or dropped, without introducing new protocol event types.
 
 ## 4. Server event projections and readiness
 
@@ -36,7 +42,7 @@
 - [ ] 6.1 Test no eligible daemon/runtime availability creates/reuses an unassigned run, preserves durable messages, and leaves Requirement lifecycle/revision/state_version unchanged except for the explicit valid Draft → Discussing transition.
 - [ ] 6.2 Test revision edit during a run makes the old assessment stale and produces durable rejection without a Requirement mutation.
 - [ ] 6.3 Test duplicate command/event delivery, reconnect, agent-message persistence, coarse activity persistence, and atomic assessment ACK ordering.
-- [ ] 6.4 Run architecture checks proving no browser WebSocket, no SDK dependency in protocol/domain, no daemon business retry authority, and no second SSE/source-of-truth path.
+- [ ] 6.4 Run architecture checks proving no browser WebSocket, no Pi SDK dependency/type in `north-domain`, `north-protocol`, or `north-server` contracts, no daemon business retry authority, and no second SSE/source-of-truth path.
 
 ## 7. Validation
 
