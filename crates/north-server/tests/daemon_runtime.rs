@@ -622,6 +622,37 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             .expect("assessment session binding"),
         Some(assessment_requirement_id.clone())
     );
+    let follow_up_command_id = format!("assessment-follow-up-{}", claimed.daemon_id);
+    let follow_up = CommandRequest {
+        command_id: follow_up_command_id.clone(),
+        session_id: assessment_session_id.clone(),
+        command: Command::MessageSend(MessageSend {
+            message_id: "assessment-follow-up-message".into(),
+            content: "repository binding remains stable".into(),
+        }),
+    };
+    runtime
+        .persist_and_dispatch_command(follow_up, std::slice::from_ref(&required_capability))
+        .await
+        .expect("dispatch follow-up without retargeting repository context");
+    let ServerFrame::Command(follow_up_envelope) = next_server_frame(&mut socket).await else {
+        panic!("expected follow-up command");
+    };
+    assert_eq!(follow_up_envelope.command_id, follow_up_command_id);
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&DaemonFrame::CommandAck(CommandAck {
+                command_id: follow_up_envelope.command_id,
+                session_id: follow_up_envelope.session_id,
+                server_command_seq: follow_up_envelope.server_command_seq,
+                schema_version: SCHEMA_VERSION,
+            }))
+            .expect("encode follow-up ACK")
+            .into(),
+        ))
+        .await
+        .expect("send follow-up ACK");
+
     store
         .disable_repository("00000000-0000-4000-8000-000000000001")
         .await
@@ -1235,6 +1266,11 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .execute(&pool)
         .await
         .expect("cleanup event tombstones");
+    sqlx::query("DELETE FROM server_message_command_map WHERE session_id = $1")
+        .bind(format!("assessment-session-{}", claimed.daemon_id))
+        .execute(&pool)
+        .await
+        .expect("cleanup message command map");
     sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(format!("assessment-session-{}", claimed.daemon_id))
         .execute(&pool)

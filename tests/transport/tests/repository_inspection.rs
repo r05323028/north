@@ -154,7 +154,11 @@ fn git_http_server(root: PathBuf, stop: Arc<AtomicBool>) -> (String, thread::Joi
     let handle = thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((mut stream, _)) => serve_git_http_request(&mut stream, &root),
+                Ok((mut stream, _)) => {
+                    if stream.set_nonblocking(false).is_ok() {
+                        serve_git_http_request(&mut stream, &root);
+                    }
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(10));
                 }
@@ -317,7 +321,7 @@ fn run_credential_helper_child() {
         .unwrap_or_else(|_| panic!("credential helper authorization"));
     let prepared = inspector
         .prepare(&request, &authorization)
-        .unwrap_or_else(|_| panic!("credentialed host-Git preparation"));
+        .unwrap_or_else(|error| panic!("credentialed host-Git preparation: {error}"));
     assert_eq!(prepared.commit_sha(), fixture.first_commit);
     inspector
         .dispose(prepared)

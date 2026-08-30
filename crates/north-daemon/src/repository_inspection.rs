@@ -1174,52 +1174,8 @@ impl RepositoryInspector {
         };
         let mut failure =
             primary_failure.map(|(phase, reason)| InspectionError::new(phase, reason));
-        let revision_failure = match resolve_commit(
-            &workspace.path,
-            &workspace.workspace_root,
-            workspace.workspace_root_identity,
-            Some(&workspace.workspace_identity),
-        ) {
-            Ok(commit) if commit == workspace.commit_sha => None,
-            Ok(_) => Some(InspectionError::new(
-                InspectionPhase::Revision,
-                "checkout revision changed after inspection",
-            )),
-            Err(error) => Some(error),
-        };
-        if let Some(revision_failure) = revision_failure {
-            if let Some(error) = failure.as_mut() {
-                error.reason = format!("{}; {}", error.reason, revision_failure.reason);
-            } else {
-                failure = Some(revision_failure);
-            }
-        }
-        match dirty_details_for_workspace(&workspace) {
-            Ok(Some(details)) => {
-                if let Some(error) = failure.as_mut() {
-                    error.contamination = Some(details);
-                } else {
-                    failure = Some(InspectionError {
-                        phase: InspectionPhase::DirtyTree,
-                        reason: "unexpected changes detected in disposable checkout".into(),
-                        contamination: Some(details),
-                        cleanup_failure: None,
-                    });
-                }
-            }
-            Ok(None) => {}
-            Err(reason) => {
-                if let Some(error) = failure.as_mut() {
-                    error.contamination =
-                        Some(format!("workspace integrity check failed: {reason}"));
-                } else {
-                    failure = Some(InspectionError::new(
-                        InspectionPhase::DirtyTree,
-                        format!("workspace integrity check failed: {reason}"),
-                    ));
-                }
-            }
-        }
+        record_revision_failure(&mut failure, &workspace);
+        record_dirty_failure(&mut failure, &workspace);
         if let Err(reason) = remove_owned_workspace_path(
             &workspace.workspace_root,
             &workspace.path,
@@ -1828,6 +1784,57 @@ fn dirty_details_for_workspace(workspace: &PreparedWorkspace) -> Result<Option<S
     )
 }
 
+fn record_revision_failure(failure: &mut Option<InspectionError>, workspace: &PreparedWorkspace) {
+    let revision_failure = match resolve_commit(
+        &workspace.path,
+        &workspace.workspace_root,
+        workspace.workspace_root_identity,
+        Some(&workspace.workspace_identity),
+    ) {
+        Ok(commit) if commit == workspace.commit_sha => None,
+        Ok(_) => Some(InspectionError::new(
+            InspectionPhase::Revision,
+            "checkout revision changed after inspection",
+        )),
+        Err(error) => Some(error),
+    };
+    if let Some(revision_failure) = revision_failure {
+        if let Some(error) = failure.as_mut() {
+            error.reason = format!("{}; {}", error.reason, revision_failure.reason);
+        } else {
+            *failure = Some(revision_failure);
+        }
+    }
+}
+
+fn record_dirty_failure(failure: &mut Option<InspectionError>, workspace: &PreparedWorkspace) {
+    match dirty_details_for_workspace(workspace) {
+        Ok(Some(details)) => {
+            if let Some(error) = failure.as_mut() {
+                error.contamination = Some(details);
+            } else {
+                *failure = Some(InspectionError {
+                    phase: InspectionPhase::DirtyTree,
+                    reason: "unexpected changes detected in disposable checkout".into(),
+                    contamination: Some(details),
+                    cleanup_failure: None,
+                });
+            }
+        }
+        Ok(None) => {}
+        Err(reason) => {
+            if let Some(error) = failure.as_mut() {
+                error.contamination = Some(format!("workspace integrity check failed: {reason}"));
+            } else {
+                *failure = Some(InspectionError::new(
+                    InspectionPhase::DirtyTree,
+                    format!("workspace integrity check failed: {reason}"),
+                ));
+            }
+        }
+    }
+}
+
 fn create_checkout(
     context: CheckoutContext<'_>,
     workspace_identity: &mut Option<WorkspaceIdentity>,
@@ -2187,8 +2194,11 @@ where
         .output()
         .map_err(|error| format!("run git {operation}: {error}"))?;
     if !output.status.success() {
-        let detail = format!("git {operation} failed with {}", output.status);
-        return Err(detail);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(format!(
+            "git {operation} failed with {}: {stderr}",
+            output.status
+        ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -3049,5 +3059,257 @@ mod tests {
             let source = RepositorySource::new("repo", url);
             assert!(source.validate().is_err(), "{url} must be rejected");
         }
+    }
+
+    #[test]
+    fn public_contracts_and_failure_states_are_exercised() {
+        for (phase, name) in [
+            (InspectionPhase::Authorization, "authorization"),
+            (InspectionPhase::Cache, "cache"),
+            (InspectionPhase::Workspace, "workspace"),
+            (InspectionPhase::Revision, "revision"),
+            (InspectionPhase::Runtime, "runtime"),
+            (InspectionPhase::Cancellation, "cancellation"),
+            (InspectionPhase::DirtyTree, "dirty-tree"),
+            (InspectionPhase::Cleanup, "cleanup"),
+        ] {
+            assert_eq!(phase.to_string(), name);
+        }
+
+        let mut error = InspectionError::new(InspectionPhase::Cache, "cache failed");
+        assert_eq!(
+            error.to_string(),
+            "repository inspection cache: cache failed"
+        );
+        assert!(!error.is_contaminated());
+        assert!(!error.cleanup_failed());
+        error.contamination = Some("dirty files".into());
+        error.cleanup_failure = Some("staging retained".into());
+        assert!(error.is_contaminated());
+        assert!(error.cleanup_failed());
+        assert_eq!(
+            error.to_string(),
+            "repository inspection cache: cache failed; contamination: dirty files; cleanup failed: staging retained"
+        );
+        assert!(InspectionError::new(InspectionPhase::DirtyTree, "dirty").is_contaminated());
+        assert!(InspectionError::new(InspectionPhase::Cleanup, "cleanup").cleanup_failed());
+
+        let mut report = CleanupReport::default();
+        assert!(report.is_clean());
+        report.failures.push(CleanupFailure {
+            path: PathBuf::from("retained"),
+            reason: "unsafe".into(),
+        });
+        assert!(!report.is_clean());
+
+        let cancellation = InspectionCancellation::new();
+        assert!(!cancellation.is_cancelled());
+        cancellation.cancel();
+        assert!(cancellation.is_cancelled());
+    }
+
+    #[test]
+    fn authorization_and_context_boundaries_are_exercised() {
+        let source = RepositorySource::new("repo", "https://example.test/repo.git");
+        assert!(source.validate().is_ok());
+        for invalid in [
+            RepositorySource::new(" ", source.url.clone()),
+            RepositorySource::new("repo", " "),
+            RepositorySource::new("repo", "https://example.test/repo .git"),
+            RepositorySource::new("repo", "https://user@example.test/repo.git"),
+        ] {
+            assert!(invalid.validate().is_err());
+        }
+
+        let context = RepositoryContext {
+            repository_id: source.repository_id.clone(),
+            name: "Repository".into(),
+            url: source.url.clone(),
+            description: "Read-only source".into(),
+        };
+        let start = north_protocol::SessionStart {
+            requirement: north_protocol::RequirementContext {
+                id: "requirement".into(),
+                revision: 1,
+                title: "Title".into(),
+                description: "Description".into(),
+                summary: "Summary".into(),
+                acceptance_criteria: vec![],
+                assumptions: vec![],
+                open_questions: vec![],
+            },
+            conversation: north_protocol::ConversationContext { excerpt: vec![] },
+            repositories: vec![context.clone()],
+        };
+        let authorization =
+            RunAuthorization::from_session_start("session", &start).expect("session authorization");
+        assert_eq!(authorization.session_id(), "session");
+        assert_eq!(authorization.repositories(), std::slice::from_ref(&source));
+        assert!(RunAuthorization::new(" ", vec![]).is_err());
+        assert!(RunAuthorization::new("session", vec![source.clone(), source.clone()]).is_err());
+
+        let invalid_context = RepositoryContext {
+            url: "file:///tmp/repository.git".into(),
+            ..context
+        };
+        assert!(RepositorySource::from_context(&invalid_context).is_err());
+
+        assert!(InspectionRequest::new("", "task", source.clone())
+            .validate()
+            .is_err());
+        assert!(InspectionRequest::new("session", " ", source)
+            .validate()
+            .is_err());
+        assert!(InspectionRequest::new(
+            "session",
+            "task",
+            RepositorySource::new("repo", "https://example.test/repo.git",)
+        )
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn cleanup_gate_rejects_active_and_duplicate_cleanup() {
+        let gate = Arc::new(CleanupGate::default());
+        let operation = gate.enter_operation();
+        assert!(gate.begin_cleanup().is_err());
+        drop(operation);
+        let cleanup = gate.begin_cleanup().expect("cleanup permit");
+        assert!(gate.begin_cleanup().is_err());
+        drop(cleanup);
+        let operation = gate.enter_operation();
+        drop(operation);
+    }
+
+    #[test]
+    fn prepared_workspace_contracts_and_result_wire_are_exercised() {
+        let gate = Arc::new(CleanupGate::default());
+        let prepared = PreparedWorkspace {
+            session_id: "session".into(),
+            repository_id: "repo".into(),
+            repository_url: "https://example.test/repo.git".into(),
+            commit_sha: "abcdef".into(),
+            workspace_root: PathBuf::from("workspace-root"),
+            workspace_root_identity: FsIdentity {
+                first: 1,
+                second: 2,
+            },
+            workspace_identity: WorkspaceIdentity {
+                name: "workspace".into(),
+                workspace: FsIdentity {
+                    first: 3,
+                    second: 4,
+                },
+                git_directory: FsIdentity {
+                    first: 5,
+                    second: 6,
+                },
+                marker: FsIdentity {
+                    first: 7,
+                    second: 8,
+                },
+            },
+            git_config: Vec::new(),
+            path: PathBuf::from("workspace-root/session/task/repo"),
+            _cleanup_permit: OperationPermit {
+                _lease: Arc::new(OperationLease { gate }),
+            },
+        };
+        assert_eq!(prepared.repository_id(), "repo");
+        assert_eq!(prepared.commit_sha(), "abcdef");
+        assert_eq!(
+            prepared.path(),
+            Path::new("workspace-root/session/task/repo")
+        );
+        assert_eq!(prepared, prepared.clone());
+        let mut changed = prepared.clone();
+        changed.path.push("changed");
+        assert_ne!(prepared, changed);
+
+        let authorization = RunAuthorization::new(
+            "session",
+            vec![RepositorySource::new(
+                "repo",
+                "https://example.test/repo.git",
+            )],
+        )
+        .expect("authorization");
+        let error = prepared
+            .read_git(&authorization, &["status".into()])
+            .expect_err("missing workspace must be rejected");
+        assert_eq!(error.phase, InspectionPhase::Workspace);
+
+        let result = InspectionResult {
+            repository_id: "repo".into(),
+            commit_sha: "abcdef".into(),
+        };
+        assert_eq!(
+            result.reviewed_repository(),
+            north_protocol::ReviewedRepositoryWire {
+                repository_id: "repo".into(),
+                commit_sha: "abcdef".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn inspector_roots_and_name_validators_cover_boundaries() {
+        assert!(roots_overlap(
+            Path::new("/tmp/root"),
+            Path::new("/tmp/root")
+        ));
+        assert!(roots_overlap(
+            Path::new("/tmp/root"),
+            Path::new("/tmp/root/nested")
+        ));
+        assert!(!roots_overlap(
+            Path::new("/tmp/root"),
+            Path::new("/tmp/other")
+        ));
+
+        let root = std::env::temp_dir().join(format!(
+            "north-overlap-{}-{}",
+            std::process::id(),
+            next_cache_cleanup_sequence()
+        ));
+        let nested = root.join("nested");
+        let error = RepositoryInspector::new(&root, &nested).expect_err("overlapping roots");
+        assert_eq!(error.phase, InspectionPhase::Workspace);
+        fs::remove_dir_all(root).expect("remove overlap roots");
+
+        assert!(is_cache_staging_name(OsStr::new(".source-1")));
+        assert!(!is_cache_staging_name(OsStr::new("source.git")));
+        assert!(is_cache_namespace_name(OsStr::new("id-6162")));
+        assert!(!is_cache_namespace_name(OsStr::new("id-")));
+        assert!(!is_cache_namespace_name(OsStr::new("id-6")));
+        assert!(!is_cache_namespace_name(OsStr::new("id-gg")));
+        assert!(!is_cache_namespace_name(OsStr::new("repo")));
+        assert_eq!(non_empty_reason(" ".into(), "fallback"), "fallback");
+        assert_eq!(non_empty_reason("specific".into(), "fallback"), "specific");
+
+        assert!(server_repository_location("https://example.test/repo.git"));
+        assert!(server_repository_location(
+            "ssh://git@example.test/repo.git"
+        ));
+        assert!(server_repository_location("git@example.test:repo.git"));
+        assert!(!server_repository_location("file:///tmp/repo.git"));
+        assert!(credential_free_location("https://example.test/repo.git"));
+        assert!(credential_free_location("ssh://git@example.test/repo.git"));
+        assert!(credential_free_location("git@example.test:repo.git"));
+        assert!(!credential_free_location(
+            "https://example.test/repo.git?token=x"
+        ));
+        assert!(!credential_free_location("https://example.test"));
+        assert!(!credential_free_location(
+            "ssh://user@example.test/repo.git"
+        ));
+        assert!(!credential_free_location(
+            "file://user@example.test/repo.git"
+        ));
+        assert!(complete_commit_sha(&"a".repeat(40)));
+        assert!(complete_commit_sha(&"A".repeat(64)));
+        assert!(!complete_commit_sha(&"a".repeat(39)));
+        assert!(!complete_commit_sha(&format!("{}g", "a".repeat(39))));
     }
 }
