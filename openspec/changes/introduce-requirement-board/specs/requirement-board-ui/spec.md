@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Gives requesters fast orientation through a lifecycle board and precise lookup
+Gives users fast orientation through a lifecycle board and precise lookup
 through a server-backed list, without making browser notifications a source of
 Requirement truth.
 
@@ -19,7 +19,7 @@ a separate change first defines them.
 
 #### Scenario: Query controls stay server-backed
 
-- **WHEN** a requester enters search text or selects status, creator, or updated sort
+- **WHEN** a user enters search text or selects status, creator, or updated sort
 - **THEN** the UI sends the corresponding supported query parameters and renders the returned collection without a client-side full-collection filter pass
 
 #### Scenario: No page-size promise is implied
@@ -27,13 +27,34 @@ a separate change first defines them.
 - **WHEN** the current collection grows within the single-instance 0.1 product scope
 - **THEN** the UI consumes the array returned by the existing endpoint and makes no claim that behavior is invariant under an undefined page size
 
+### Requirement: Board owns minimal Requirement detail route
+
+The Board change SHALL provide the read-only `/requirements/[id]` route reached
+from board, list, and creation flows. It SHALL load the existing authenticated
+`GET /requirements/{id}` response and render only canonical Requirement fields,
+including title, description, status, creator (`created_by`), updated time,
+summary, acceptance criteria, assumptions, open questions, revision, and
+state_version where useful. The base shell SHALL not require clarification or
+runtime availability and SHALL not add clarification controls, activity,
+readiness interaction, or editing.
+
+#### Scenario: Board detail route works without clarification
+
+- **WHEN** board, list, or creation navigation opens `/requirements/[id]` before clarification is shipped or while it is unavailable
+- **THEN** the route loads `GET /requirements/{id}` and renders a valid read-only Requirement detail shell from that response
+
+#### Scenario: Base detail uses canonical creator data
+
+- **WHEN** the detail response includes `created_by`
+- **THEN** the shell renders that canonical creator value and does not infer a Requirement owner or assignee field
+
 ### Requirement: Board groups by lifecycle state
 
 The board SHALL render one fixed column for each Requirement lifecycle state:
 Draft, Discussing, Ready, Accepted, and Rejected. Cards SHALL be placed using
-the server-reported status and SHALL show at least title, status, requester,
-and updated time. A create action and navigation to the Requirement detail
-route SHALL be available.
+the server-reported status and SHALL show at least title, status, creator
+(`created_by`), and updated time. A create action and navigation to the
+Board-owned Requirement detail route SHALL be available.
 
 #### Scenario: Column placement matches server state
 
@@ -43,12 +64,14 @@ route SHALL be available.
 ### Requirement: List supports server search, filters, and sorting
 
 The list SHALL expose text search, status and creator filters, and updated-time
-sorting with the existing server query contract. It SHALL render status and
-requester/ownership columns and navigate to the same detail route.
+sorting with the existing server query contract. Its creator filter SHALL use the
+existing `created_by` query parameter. It SHALL render status and creator
+(`created_by`) columns and navigate to the same detail route. It SHALL not
+invent Requirement owner or assignee fields.
 
 #### Scenario: Status filter narrows returned data
 
-- **WHEN** a requester selects Ready
+- **WHEN** a user selects Ready
 - **THEN** the UI requests `status=ready` and renders only rows returned by the server for that query
 
 ### Requirement: Creation is minimal and canonical
@@ -60,7 +83,7 @@ client-predicted lifecycle/version values.
 
 #### Scenario: Two fields reach a Draft
 
-- **WHEN** a requester submits valid title and description
+- **WHEN** a user submits valid title and description
 - **THEN** the server-created Draft is rendered/navigated to using its returned ID, status, revision, and state_version
 
 ### Requirement: Browser transport is HTTP plus notification-only SSE
@@ -113,11 +136,13 @@ never duplicate a Requirement row or lifecycle transition.
 ### Requirement: Board scope excludes unrelated product features
 
 The board/list change SHALL include only lifecycle board, list search/filter/sort,
-minimal creation, detail navigation, live notification refetch, and frontend
-test foundation. It SHALL not add labels, attachments, advanced prioritization,
-drag-and-drop lifecycle mutation, or unrelated administration.
+minimal creation, the Board-owned minimal read-only Requirement detail shell,
+detail navigation, live notification refetch, and frontend test foundation. It
+SHALL not add clarification, runtime status, activity, readiness interaction,
+editing, labels, attachments, advanced prioritization, drag-and-drop lifecycle
+mutation, or unrelated administration.
 
 #### Scenario: Card actions do not mutate lifecycle by drag
 
-- **WHEN** a requester reorders or drags a card in the board
+- **WHEN** a user reorders or drags a card in the board
 - **THEN** no unrequested lifecycle mutation API is invoked; lifecycle changes remain server/domain operations outside this surface

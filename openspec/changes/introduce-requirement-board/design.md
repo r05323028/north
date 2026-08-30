@@ -23,13 +23,21 @@ page-size invariant that the API does not define.
 
 - Board maps the stable server status strings Draft, Discussing, Ready,
   Accepted, and Rejected to fixed columns. A card renders title, status,
-  requester, and updated timestamp and links to `/requirements/[id]`.
+  creator (`created_by`), and updated timestamp and links to
+  `/requirements/[id]`.
 - List preserves server order, renders search/filter/sort controls, and sends
-  each control as query parameters. It does not fetch the full collection and
+  each control as query parameters. Its creator filter uses the existing
+  `created_by` query parameter; it does not fetch the full collection and
   filter it in the browser.
+- The Board-owned detail shell at `/requirements/[id]` reads the existing
+  `GET /requirements/{id}` response and renders canonical title, description,
+  status, creator, updated time, summary, acceptance criteria, assumptions,
+  open questions, revision, and state_version where useful. It is read-only and
+  does not require clarification, runtime status, activity, readiness
+  interaction, or editing.
 - Create sends only title and description, uses the returned Requirement as
-  canonical, and navigates to its detail route. No wizard or optimistic
-  lifecycle prediction is needed.
+  canonical, and navigates to the Board-owned detail shell. No wizard or
+  optimistic lifecycle prediction is needed.
 
 ## Shared browser notification path
 
@@ -49,14 +57,19 @@ create another endpoint, event bus, browser event store, or WebSocket path.
 
 ## Explicit boundary
 
-Board/list owns browser rendering, query state, subscription, base `/events`
-transport, and refetch. Clarification owns its canonical runtime read models
-and extends the shared notification categories. No browser WebSocket, daemon
-connection, durable browser event store, or second SSE producer is added.
+Board/list and the minimal read-only detail shell own browser rendering, query
+state, subscription, base `/events` transport, and canonical refetch. The route
+`/requirements/[id]` is owned here and reads only the existing Requirement
+endpoint. Clarification owns its canonical runtime read models and extends the
+shared notification categories. No browser WebSocket, daemon connection,
+durable browser event store, or second SSE producer is added.
 
 ## Test foundation
 
 Use the existing web test/lint stack. Start with a pure grouping test for mixed
-Requirement statuses and an interaction test proving query controls map to
-server parameters. Add an end-to-end fixture that drops and duplicates hints,
-then verifies HTTP refetch restores the current collection.
+Requirement statuses, an interaction test proving query controls map to server
+parameters, and a route test proving `/requirements/[id]` renders from
+`GET /requirements/{id}` without clarification data. Add an end-to-end fixture
+that drops and duplicates hints, then verifies HTTP refetch restores the current
+collection. The Board/detail slice remains runnable when clarification is
+unavailable or not shipped.

@@ -8,11 +8,13 @@ activity, and minimal clarification status.
 
 ### Requirement: Detail uses canonical HTTP read models
 
-The detail route SHALL read Requirement, conversation, latest/current readiness,
-coarse activity, and minimal session/runtime status from authenticated HTTP
-APIs. It SHALL not read daemon WebSocket traffic, interpret protocol events as
-product truth, or reconstruct any model from an SSE replay log. The page SHALL
-offer Conversation, Overview, and Activity tabs.
+The Board-owned `/requirements/[id]` route is the base Requirement detail shell.
+This change SHALL extend that existing route rather than create or take ownership
+of another detail route. The detail page SHALL read Requirement, conversation,
+latest/current readiness, coarse activity, and minimal session/runtime status
+from authenticated HTTP APIs. It SHALL not read daemon WebSocket traffic,
+interpret protocol events as product truth, or reconstruct any model from an SSE
+replay log. The page SHALL offer Conversation, Overview, and Activity tabs.
 
 #### Scenario: Refetch restores the complete detail bundle
 
@@ -22,42 +24,52 @@ offer Conversation, Overview, and Activity tabs.
 ### Requirement: Conversation persistence and clarification intent are separate
 
 Conversation SHALL render requester and agent messages returned by the canonical
-conversation API. `POST /requirements/{id}/conversation/messages` SHALL persist
-one requester message and return its `message_id`; it SHALL not infer runtime
-intent, start a run, choose a daemon, or create `session.start`/`message.send`.
+conversation API. `POST /requirements/{requirement_id}/conversation/messages`
+SHALL persist one requester message and return its `message_id`; it SHALL not
+infer runtime intent, start a run, choose a daemon, or create
+`session.start`/`message.send`.
 
-For an initial clarification message, the UI SHALL call
-`POST /requirements/{id}/clarification/start` with the persisted `message_id`
-and current `expected_state_version`. For a later message, it SHALL call
-`POST /requirements/{id}/clarification/messages/{message_id}/dispatch`. The
-initial message SHALL be represented in `session.start` context and SHALL not
-be submitted again as `message.send`. The cancel control SHALL call
-`POST /requirements/{id}/clarification/cancel`. After persistence, the UI SHALL
-use canonical latest `GET /requirements/{id}/session` state and explicit server
+For an initial clarification message, the UI SHALL call the identity-creating
+`POST /requirements/{requirement_id}/clarification/start` with the persisted
+`message_id` and current `expected_state_version`; the response includes the
+public `run_id`. For a later message, it SHALL use the known `run_id` from that start response
+or the explicit `run_id` exposed by the canonical session read and call
+`POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`.
+The URL's explicit `run_id`, not the read's latestness, determines the mutation
+target. The initial message SHALL be represented in `session.start` context and SHALL
+not be submitted again as `message.send`. The cancel control SHALL use a known
+`run_id` and call
+`POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel`.
+After persistence, the latest `GET /requirements/{requirement_id}/session` read
+may guide presentation, but it SHALL NOT determine mutation identity. Except
+for identity-creating `start`, the UI SHALL never perform dispatch or
+cancellation without a known `run_id`; a stale known ID remains in the URL and
+is never replaced with a newer latest-run ID. The UI SHALL use explicit server
 results to choose the operation: no run (`session: null`) starts clarification;
 a reusable unassigned unavailable run retries `start` only with its recorded
 `start_message_id`; an assigned active run (`starting`/`running`, including
-pinned operational unavailability) dispatches later messages; and a
-terminal/inapplicable latest run starts a new sequential run with the new
-message. A different message during a reusable attempt or assigned active run
-is a server conflict, not a local run. The UI never infers the operation solely
-from transcript contents. Duplicate/replayed command delivery SHALL not add
-another logical message or runtime submission.
+pinned operational unavailability) dispatches later messages to its explicit
+`run_id`; and a terminal/inapplicable latest run starts a new sequential run
+with the new message. A different message during a reusable attempt or
+assigned active run is a server conflict, not a local run. The UI never infers
+the operation solely from transcript contents or selects canonical context
+messages. Duplicate/replayed command delivery SHALL not add another logical
+message or runtime submission.
 
 #### Scenario: Posting history does not invoke runtime
 
-- **WHEN** a requester posts `POST /requirements/{id}/conversation/messages`
+- **WHEN** a requester posts `POST /requirements/{requirement_id}/conversation/messages`
 - **THEN** the persisted requester message is returned and no run or daemon command is created
 
 #### Scenario: Initial message starts explicitly
 
 - **WHEN** the UI has persisted message M and calls clarification/start with M's ID and the current expected_state_version
-- **THEN** the server creates/reuses the clarification run, includes M in `session.start` context when assigned, and creates no `message.send` for M
+- **THEN** the server creates/reuses the clarification run, returns its `run_id`, includes M in `session.start` context when assigned, and creates no `message.send` for M
 
 #### Scenario: Later message dispatch is explicit
 
-- **WHEN** the UI persists later message M and calls the message dispatch operation
-- **THEN** the server creates/reuses exactly one durable `message.send` mapping for M and does not create another conversation message
+- **WHEN** the UI persists later message M and calls `/requirements/{requirement_id}/clarification/runs/A/messages/M/dispatch` with known run A
+- **THEN** the server creates/reuses exactly one durable `message.send` mapping for M and does not create another conversation message or retarget the request to a newer run
 
 #### Scenario: Agent reply survives transport loss
 
@@ -76,18 +88,31 @@ another logical message or runtime submission.
 
 #### Scenario: Reusable unavailable run retries by same message
 
-- **WHEN** the latest session is an unassigned unavailable run and the UI has its recorded start_message_id
-- **THEN** a retry calls start with that same message ID and does not create a local or server-side competing run
+- **WHEN** the session read contains unassigned unavailable run A and the UI has A's `run_id` and recorded `start_message_id`
+- **THEN** the identity-creating start retry uses that same start message ID and does not create a local or server-side competing run
 
 #### Scenario: Active run rejects concurrent start
 
-- **WHEN** the latest session is assigned and starting/running and the UI persists another message that is sent as a start request
+- **WHEN** the session read contains assigned active run A (`starting`/`running`) and the UI persists another message that is sent as a start request
 - **THEN** the canonical conflict is shown, no second run is invented locally, and canonical detail reads are refetched
 
 #### Scenario: Terminal run starts a sequential run
 
-- **WHEN** the latest run is completed or cancelled and the UI persists eligible message M2
-- **THEN** explicit start uses M2 and the current expected_state_version, and the returned newer session becomes the rendered latest run while prior history remains server-owned
+- **WHEN** the session read contains terminal run A and the UI persists eligible message M2
+- **THEN** identity-creating start uses M2 and the current expected_state_version, returns run B's `run_id`, and B becomes the rendered latest run while A remains server-owned history
+
+#### Scenario: Stale run mutation cannot affect a newer run
+
+- **GIVEN** browser state references run A
+- **AND** run A becomes terminal
+- **AND** run B is subsequently created
+- **WHEN** the stale browser sends a dispatch or cancel targeting run A
+- **THEN** the server evaluates only A according to its current eligibility, MUST NOT mutate or cancel B, and the UI does not substitute B's `run_id`
+
+#### Scenario: UI does not select canonical context
+
+- **WHEN** the UI starts clarification with a persisted message
+- **THEN** it sends the message identity and expected state only, while North selects the deterministic bounded `session.start` excerpt and always retains `start_message_id`
 
 ### Requirement: Overview renders structured state without transcript derivation
 

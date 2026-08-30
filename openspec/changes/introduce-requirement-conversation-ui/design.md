@@ -2,8 +2,8 @@
 
 ## Data flow and canonical reads
 
-The detail page owns no daemon connection. It uses the authenticated server
-API:
+The detail page extends the Board-owned `/requirements/[id]` shell and owns no
+daemon connection or route creation. It uses the authenticated server API:
 
 ```text
 GET /requirements/{id}
@@ -25,32 +25,39 @@ are server projections, not transport caches. The existing Ready-only
 
 - **Conversation**: render persisted requester/agent/system messages in the
   existing deterministic order. Posting through
-  `POST /requirements/{id}/conversation/messages` persists one requester
-  message only and returns its `message_id`; it never invokes the runtime.
-  After persistence, use canonical `GET /requirements/{id}/session` and the
-  explicit server result to choose the operation:
+  `POST /requirements/{requirement_id}/conversation/messages` persists one
+  requester message only and returns its `message_id`; it never invokes the
+  runtime. The identity-creating `start` operation may run before a client has
+  a `run_id`; it creates/reuses the sequential run and returns that ID.
+  After persistence, use canonical
+  `GET /requirements/{requirement_id}/session` only to guide presentation. If
+  it exposes a `run_id`, the UI may retain that explicit ID for a later mutation
+  URL; latestness itself never selects the mutation target:
   - no run (`session: null`) → call
-    `POST /requirements/{id}/clarification/start` with this ID and current
-    `expected_state_version`;
-  - reusable unassigned unavailable run → call `start` only with its recorded
-    `start_message_id` to retry that same attempt;
+    `POST /requirements/{requirement_id}/clarification/start` with this ID and
+    current `expected_state_version`, then retain returned `run_id`;
+  - reusable unassigned unavailable run → call the identity-creating `start`
+    retry only with its recorded `start_message_id`, then retain returned
+    `run_id`;
   - assigned active run (`starting`/`running`, including pinned operational
     unavailability) → call
-    `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`
-    for a later message;
+    `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`
+    using the known `run_id` from the session read or prior start response;
   - terminal/inapplicable latest run → call `start` with the new persisted
-    message to create a sequential run.
-  A different message during a reusable unassigned attempt or assigned active
-  run is left to the canonical server conflict; the UI does not invent a run
-  locally. The cancel control calls
-  `POST /requirements/{id}/clarification/cancel`. The UI never infers the
-  operation solely from transcript contents.
+    message to create a sequential run, then retain its returned `run_id`.
+  Dispatch and cancel controls SHALL not run without a known `run_id`. The
+  cancel control calls
+  `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel`.
+  If a newer run becomes latest after the UI learned run A, the UI keeps A in
+  the mutation URL; the server evaluates A and never retargets the request to B.
+  The UI never infers the operation solely from transcript contents.
 - **Overview**: render title, description, summary, acceptance criteria,
   assumptions, open questions, lifecycle status, content revision, current
   readiness, and cited repositories from HTTP responses. Never derive fields by
   summarizing transcript messages.
 - **Activity**: refetch `/activity` and render safe coarse summaries only. An
-  SSE notification is a hint to refetch; it is not an activity entry.
+  SSE notification is a hint to refetch; it is not an activity entry. The UI
+  does not select the server's deterministic `session.start` excerpt.
 
 ## Optimistic concurrency and Ready edits
 
@@ -70,7 +77,9 @@ Rejected edits surface the server error.
 For start conflicts or other operation conflicts, the UI preserves the persisted
 message, refetches Requirement, conversation, readiness, activity, and latest
 session state, and never retries with a newer state version or creates a local
-second run.
+second run. Dispatch and cancellation conflicts remain bound to their explicit
+`run_id`; refetching a newer latest session never rewrites an in-flight mutation
+from run A to run B.
 
 ## Reconnect and notification behavior
 

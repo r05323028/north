@@ -8,13 +8,15 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
 
 ## What Changes
 
-- Deep-linkable `/requirements/[id]` route with Conversation, Overview, and
-  Activity tabs.
+- Extend the Board-owned `/requirements/[id]` Requirement detail shell with
+  Conversation, Overview, and Activity tabs.
 - Conversation uses the persisted conversation API for requester and agent
-  messages. After persistence, canonical latest-run state selects explicit
-  `start`, same-message unavailable-start retry, later-message `dispatch`, or a
-  new sequential start after a terminal/inapplicable run. SSE only hints that a
-  refetch may be useful; transcript contents never select the operation.
+  messages. The identity-creating `start` operation may create/reuse a
+  sequential run and returns `run_id`; later-message `dispatch` and
+  cancellation use explicit run-scoped URLs with a known `run_id`. The latest
+  session read may guide presentation, but never supplies implicit mutation
+  identity. SSE only hints that a refetch may be useful; transcript contents
+  never select the operation.
 - Overview renders canonical Requirement fields, readiness/repository evidence,
   lifecycle status, content revision, and the minimal clarification session
   status supplied by the backend.
@@ -28,16 +30,23 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
 
 ## Backend contract consumed
 
-This change consumes existing `GET /requirements/{id}` and paged conversation
-reads plus the existing persistence-only
-`POST /requirements/{id}/conversation/messages`. It then uses clarification's
-explicit authenticated `start`, message `dispatch`, and `cancel` mutations,
-plus its canonical readiness, activity, and latest-run reads. The latest-run
-read selects no-run start, reusable same-message start retry, active-run later
-message dispatch, or new start after terminal/inapplicable state. It consumes
-the Board-owned shared `GET /events` endpoint and clarification's added
-categories; it does not interpret daemon frames, SSE replay, or a future retry
-state machine as product truth.
+This change extends the Board-owned `/requirements/[id]` Requirement detail
+shell; it does not create or take ownership of that route. It consumes existing
+`GET /requirements/{id}` and paged conversation reads plus the existing
+persistence-only `POST /requirements/{id}/conversation/messages`. It then uses
+clarification's explicit authenticated `start`, run-scoped message dispatch,
+and run-scoped cancellation mutations, plus its canonical readiness, activity,
+and latest-run reads. `start` is the identity-creating exception and returns
+`run_id`; the UI may retain an explicit ID returned by `start` or exposed by a
+session read and includes it in every later dispatch/cancel URL. The URL's
+explicit `run_id`, not read recency, determines the mutation target. Latest-run
+reads may guide presentation but MUST NOT supply an implicit target, and the UI
+never performs dispatch or cancellation without a known `run_id`. Existing
+protocol `session_id` carries
+the same identity (`session_id = run_id`). It consumes the Board-owned shared
+`GET /events` endpoint and clarification's added categories; it does not
+interpret daemon frames, SSE replay, or a future retry state machine as product
+truth.
 
 ## Execution-status boundary
 
@@ -70,11 +79,11 @@ advanced execution controls, or new Requirement business transitions.
 - Upstream: archived conversation/readiness/concurrency contracts and current
   Requirement/conversation HTTP APIs.
 - Required backend: `introduce-agent-requirement-clarification` provides
-  persisted agent messages, explicit clarification mutations, readiness read
-  model, coarse activity, and latest-run status.
-- `introduce-requirement-board` provides the shared authenticated `GET /events`
-  infrastructure and `requirement.changed`; this detail UI consumes it but does
-  not depend on Board rendering code.
+  persisted agent messages, explicit run-scoped clarification mutations,
+  readiness read model, coarse activity, and latest-run status.
+- `introduce-requirement-board` owns the shared authenticated `GET /events`
+  infrastructure, `requirement.changed`, and the base read-only
+  `/requirements/[id]` detail shell; this change extends that shell.
 - Clarification extends Board's `/events` categories with conversation,
   readiness, activity, and session hints.
 - `introduce-runtime-retry-and-failure-state` is a later UI extension, not an
@@ -84,12 +93,13 @@ Dependency graph:
 
 ```text
 introduce-requirement-board
+  ├─ board/list/create/minimal read-only detail
   └─ base GET /events + requirement.changed
 
 introduce-local-repository-inspection
   └─> introduce-agent-requirement-clarification
-       └─ extends shared /events categories
 
 introduce-requirement-board + introduce-agent-requirement-clarification
   └─> introduce-requirement-conversation-ui
+       extends the existing detail shell
 ```

@@ -2,20 +2,21 @@
 
 ## 1. Server orchestration and context
 
-- [ ] 1.1 Add one clarification-run service for sequential runs with at most one competing active run per Requirement; reuse only an unassigned same-start attempt before daemon selection, and atomically persist owner, Requirement binding, repository IDs, and `session.start` before dispatch when assigned.
-- [ ] 1.2 Assemble immutable Requirement snapshot, bounded/relevant conversation excerpt, and enabled repository metadata through existing server DTO conversion; remove any checkout/credential/domain values from the wire input.
-- [ ] 1.3 Define the latest-run session projection (`starting`, `running`, `completed`, `unavailable`) plus separate cancellation intent; return `{ "session": null }` only before any clarification run exists, keep older runs as internal history, and do not add retry state, attempt count, budget, backoff, or final `Failed` policy.
+- [ ] 1.1 Add one clarification-run service for sequential runs with at most one competing active run per Requirement; reuse only an unassigned same-start attempt before daemon selection, return public `run_id`, and atomically persist daemon pin, Requirement binding, repository IDs, and `session.start` before dispatch when assigned.
+- [ ] 1.2 Assemble immutable Requirement snapshot, North-selected deterministic bounded persisted conversation excerpt, and enabled repository metadata through existing server DTO conversion; always retain `start_message_id` and remove checkout/credential/domain values from the wire input.
+- [ ] 1.3 Define the latest-run session projection with public `run_id` (`starting`, `running`, `completed`, `unavailable`) plus separate cancellation intent; keep latest-run reads UI-only and never use them as mutation identity; return `{ "session": null }` only before any clarification run exists, keep older runs as internal history, and do not add retry state, attempt count, budget, backoff, or final `Failed` policy.
 - [ ] 1.4 Ensure any Draft → Discussing start transition uses the caller's `expected_state_version`; stale conflict creates no session command while preserving the already-persisted requester message.
+- [ ] 1.5 Define and test North-owned deterministic context selection: canonical persisted order, configured bound, oldest non-start truncation, mandatory `start_message_id`, identical replay/reconstruction, and no provider relevance selection.
 
 ## 2. Requester message and command ordering
 
 - [ ] 2.1 Keep requester persistence first; for the initial message include the persisted identity/content in `session.start` context and do not create a second `message.send` command.
-- [ ] 2.2 For later messages create/reuse the durable message-to-command mapping and dispatch/replay the exact `message.send` envelope through existing outbox/journal semantics; expose it through the explicit authenticated dispatch operation.
-- [ ] 2.3 Add the explicit authenticated clarification cancellation operation; prove unassigned cancellation persists run state without a daemon command, while assigned cancellation creates/reuses one pinned `session.cancel` command and duplicate delivery cannot invoke runtime twice.
+- [ ] 2.2 For later messages use known `run_id` and create/reuse the durable message-to-command mapping at `/clarification/runs/{run_id}/messages/{message_id}/dispatch`; dispatch/replay the exact `message.send` envelope through existing outbox/journal semantics and never resolve the latest run implicitly.
+- [ ] 2.3 Add explicit authenticated run-scoped cancellation at `/clarification/runs/{run_id}/cancel`; validate run/Requirement binding and eligibility, prove unassigned cancellation persists run state without a daemon command, assigned cancellation creates/reuses one pinned `session.cancel` command, and stale run A cannot affect newer run B.
 
 ## 3. Daemon runtime boundary
 
-- [ ] 3.1 Define/refine the daemon-private North-owned `ClarificationRuntime` seam from North clarification execution needs: stable operation/session identity, immutable Requirement snapshot, deterministic conversation context, authorized run-bound repository inspection context, cancellation/control intent, and North-neutral runtime facts; do not copy Pi Agent's API or lifecycle.
+- [ ] 3.1 Define/refine the daemon-private North-owned `ClarificationRuntime` seam from North clarification execution needs: stable operation/session identity, immutable Requirement snapshot, North-selected deterministic bounded conversation excerpt, authorized run-bound repository inspection context, cancellation/control intent, and North-neutral runtime facts; do not copy Pi Agent's API or lifecycle.
 - [ ] 3.2 Implement `PiClarificationAdapter` as the only North 0.1 concrete clarification runtime adapter, backed by Pi Agent; do not add a provider registry, user-facing provider selection, or adapters for other runtimes.
 - [ ] 3.3 Keep all Pi SDK dependencies, SDK/provider types, Pi configuration, event names, session objects, tool-call schemas, and lifecycle handling inside `PiClarificationAdapter`/`north-daemon`; leave exact low-level Pi SDK/API wiring as an implementation decision inside that boundary.
 - [ ] 3.4 Map Pi callbacks/results into existing North-neutral agent message, coarse activity, readiness assessment, completion, and operational failure facts; emit only existing typed North protocol events and filter/drop Pi-only events, raw tool output, and chain-of-thought before journaling or transmission.
@@ -51,16 +52,17 @@
 
 ## 8. Explicit HTTP intent boundaries
 
-- [ ] 8.1 Keep `POST /requirements/{id}/conversation/messages` persistence-only; prove it returns a durable `message_id` without runtime lookup, run creation, or daemon command.
-- [ ] 8.2 Add authenticated `POST /requirements/{id}/clarification/start` with persisted-message validation, `expected_state_version`, reusable-unassigned versus active-conflict versus terminal-new-run rules, current start-context assembly, idempotent same-message behavior, no duplicate `message.send`, and unassigned no-daemon response.
-- [ ] 8.3 Add authenticated later-message dispatch by `message_id`; prove Requirement/conversation/run ownership, one durable message-to-command mapping, and idempotent replay without a second conversation message.
-- [ ] 8.4 Add authenticated `POST /requirements/{id}/clarification/cancel`; prove separate unassigned run cancellation state with no `session.cancel` command or command identity, assigned pinned-command idempotency, and no Requirement mutation.
-- [ ] 8.5 Add HTTP integration scenarios for stale start conflict, no-daemon run identity, unavailable same-message reuse, active concurrent-start conflict, new run after completion/cancellation, current-snapshot capture, duplicate dispatch, and repeated assigned/unassigned cancellation.
+- [ ] 8.1 Keep `POST /requirements/{requirement_id}/conversation/messages` persistence-only; prove it returns a durable `message_id` without runtime lookup, run creation, or daemon command.
+- [ ] 8.2 Add authenticated `POST /requirements/{requirement_id}/clarification/start` with persisted-message validation, `expected_state_version`, reusable-unassigned versus active-conflict versus terminal-new-run rules, current start-context assembly, idempotent same-message behavior, no duplicate `message.send`, and unassigned no-daemon response.
+- [ ] 8.3 Add authenticated later-message dispatch by explicit `run_id` and `message_id` at `/requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`; prove run/Requirement/conversation binding, operation eligibility, one durable message-to-command mapping, and idempotent replay without a second conversation message or retargeting a newer run.
+- [ ] 8.4 Add authenticated `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel`; prove explicit run validation, separate unassigned cancellation state with no `session.cancel` command or command identity, assigned pinned-command idempotency, no Requirement mutation, and stale-run isolation.
+- [ ] 8.5 Add HTTP integration scenarios for stale start conflict, no-daemon `run_id`, unavailable same-message reuse, active concurrent-start conflict, new run after completion/cancellation, current-snapshot capture, deterministic context selection/replay, duplicate dispatch, explicit run-scoped stale dispatch/cancel races, and repeated assigned/unassigned cancellation.
 
 ## 9. Sequential run lifecycle
 
-- [ ] 9.1 Prove a completed run followed by a new persisted eligible start message creates a new run/session identity with the current Requirement snapshot and independent repository/command context; preserve the prior run as immutable history.
+- [ ] 9.1 Prove a completed run followed by a new persisted eligible start message creates a new `run_id` (carried as protocol `session_id`) with the current Requirement snapshot and independent repository/command context; preserve the prior run as immutable history.
 - [ ] 9.2 Prove an assigned active run rejects a different start message with the canonical conflict and creates no second run or `session.start` command.
 - [ ] 9.3 Prove an unassigned unavailable run reuses only the same recorded `start_message_id` and same logical start attempt; a different message conflicts until the attempt is cancelled.
 - [ ] 9.4 Prove unassigned cancellation persists `cancel_requested` only, creates no `session.cancel` command or command identity, and allows a later new message to create a new run; prove assigned cancellation reuses one pinned command.
-- [ ] 9.5 Prove `GET /requirements/{id}/session` returns latest-only data: null before any run, A until B exists, and B after sequential creation, while cancelled/completed A remains historical persistence.
+- [ ] 9.5 Prove `GET /requirements/{requirement_id}/session` returns latest-only data with public `run_id`: null before any run, A until B exists, and B after sequential creation, while cancelled/completed A remains historical persistence and stale A mutations never target B.
+- [ ] 9.6 Prove stale browser dispatch and cancellation requests addressed to terminal run A after run B exists act only on A's current eligibility and cannot affect B.

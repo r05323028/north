@@ -2,19 +2,19 @@
 
 ## 1. Route and canonical reads
 
-- [ ] 1.1 Add deep-linkable `/requirements/[id]` shell with Conversation, Overview, and Activity tabs.
-- [ ] 1.2 Add API client/load state for Requirement, existing paged conversation, clarification readiness, coarse activity, and minimal session/runtime reads.
+- [ ] 1.1 Extend the Board-owned `/requirements/[id]` Requirement detail shell with Conversation, Overview, and Activity tabs; do not create a second route or replace the Board shell.
+- [ ] 1.2 Add API client/load state for Requirement, existing paged conversation, clarification readiness, coarse activity, minimal session/runtime reads, and public `run_id` handling.
 - [ ] 1.3 Render structured Requirement fields, lifecycle status, content revision, current assessment/repository citations, and minimal session status from HTTP responses only.
 
 ## 2. Conversation
 
-- [ ] 2.1 Render persisted requester/agent/system messages; keep `POST /requirements/{id}/conversation/messages` persistence-only and preserve returned message identity.
-- [ ] 2.2 Use canonical latest `/session` state to choose no-run initial `start`, same-message retry for a reusable unassigned run, later-message `dispatch` for an assigned active run, or new `start` for a terminal/inapplicable run; always send `expected_state_version` on start and never submit the start message as `message.send`.
-- [ ] 2.3 For a later persisted message, call `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`; prove repeated dispatch reuses one command mapping and creates no second message.
-- [ ] 2.4 Call `POST /requirements/{id}/clarification/cancel` for cancellation; render returned operational status without changing Requirement content/lifecycle.
+- [ ] 2.1 Render persisted requester/agent/system messages; keep `POST /requirements/{requirement_id}/conversation/messages` persistence-only and preserve returned message identity.
+- [ ] 2.2 Use latest `/session` only to guide presentation; invoke identity-creating `start` for no-run/same-message retry/new sequential start and retain returned `run_id`; require a known `run_id` for every later dispatch/cancel, always send `expected_state_version` on start, and never submit the start message as `message.send`.
+- [ ] 2.3 For a later persisted message, call `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch` with known `run_id`; prove run binding, repeated dispatch reuse, no second message, and no retargeting to a newer run.
+- [ ] 2.4 Call `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel` with known `run_id`; validate/render returned operational status without changing Requirement content/lifecycle or substituting latest-run identity.
 - [ ] 2.5 Preserve persisted messages and refetch the detail bundle on start HTTP 409 or operational unavailability; never retry with a newer state version or invent a local run.
 - [ ] 2.6 Add reconnect/refocus refetch for conversation and prove agent messages survive missed SSE hints.
-- [ ] 2.7 Add UI coverage for sequential run creation after completion/cancellation, active-run concurrent-start conflict, and same-message unavailable-start reuse.
+- [ ] 2.7 Add UI coverage for sequential run creation after completion/cancellation, active-run concurrent-start conflict, same-message unavailable-start reuse, and preserving returned `run_id`.
 
 ## 3. Overview and concurrency
 
@@ -33,7 +33,7 @@
 - [ ] 5.1 Refetch Requirement, conversation, readiness, activity, and session status after initial load, focus/refocus, reload, SSE disconnect, reconnect, and relevant hints.
 - [ ] 5.2 Add fault-injection coverage proving missing transcript does not alter Overview and missed activity hints recover through HTTP.
 - [ ] 5.3 Add snapshot/structural checks for no chain-of-thought, raw tool/runtime diagnostics, credentials, checkout paths, or browser WebSocket.
-- [ ] 5.4 Add E2E coverage for duplicate/delayed hints, durable requester post, agent reply recovery, sequential start selection, and conflict refetch behavior.
+- [ ] 5.4 Add E2E coverage for duplicate/delayed hints, durable requester post, agent reply recovery, sequential start selection, explicit run-scoped dispatch/cancel URLs, stale run A versus newer run B isolation, and conflict refetch behavior.
 
 ## 6. Validation
 
