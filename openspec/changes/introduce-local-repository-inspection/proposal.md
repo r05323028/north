@@ -49,8 +49,10 @@ accepted at any phase.
 - Keep the existing read-class Git and post-task dirty-tree guard. A dirty
   checkout is an invariant violation, not proof of OS-level sandboxing.
 - Dispose workspaces on normal completion, inspection error, cancellation, and
-  runtime failure. Startup may safely clean stale disposable directories under
-  the dedicated workspace root without touching reusable caches.
+  runtime failure. Clean failed mirror-clone staging immediately when ownership
+  is proven and recover clearly named stale staging during a separate,
+  cache-root-bounded startup pass; neither cleanup path touches the other's
+  namespace or the reusable `source.git` cache.
 
 ## Explicit non-goals
 

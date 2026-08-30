@@ -20,9 +20,12 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
 };
+
+#[cfg(not(any(unix, windows)))]
+compile_error!("north-daemon requires stable filesystem identity support");
 
 /// Git subcommands exposed to runtime inspection. Everything else is denied.
 pub const READ_ONLY_GIT_COMMANDS: &[&str] = &[
@@ -37,6 +40,7 @@ pub const READ_ONLY_GIT_COMMANDS: &[&str] = &[
 ];
 
 const WORKSPACE_PREFIX: &str = "workspace-";
+const CACHE_STAGING_PREFIX: &str = ".source-";
 const WORKSPACE_MARKER: &str = "north-workspace-identity";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,12 +49,109 @@ struct FsIdentity {
     second: u64,
 }
 
+#[derive(Debug, Default)]
+struct CleanupGate {
+    state: Mutex<CleanupGateState>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct CleanupGateState {
+    active_operations: usize,
+    cleanup_running: bool,
+}
+
+#[derive(Debug)]
+struct OperationLease {
+    gate: Arc<CleanupGate>,
+}
+
+impl Drop for OperationLease {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_operations = state.active_operations.saturating_sub(1);
+        self.gate.wake.notify_all();
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OperationPermit {
+    _lease: Arc<OperationLease>,
+}
+
+#[derive(Debug)]
+struct CleanupPermit {
+    gate: Arc<CleanupGate>,
+}
+
+impl Drop for CleanupPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .gate
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.cleanup_running = false;
+        self.gate.wake.notify_all();
+    }
+}
+
+impl CleanupGate {
+    fn enter_operation(self: &Arc<Self>) -> OperationPermit {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.cleanup_running {
+            state = self
+                .wake
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        state.active_operations += 1;
+        drop(state);
+        OperationPermit {
+            _lease: Arc::new(OperationLease {
+                gate: Arc::clone(self),
+            }),
+        }
+    }
+
+    fn begin_cleanup(self: &Arc<Self>) -> Result<CleanupPermit, String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.cleanup_running {
+            return Err("startup cleanup is already running".into());
+        }
+        if state.active_operations != 0 {
+            return Err("startup cleanup skipped while repository inspection is active".into());
+        }
+        state.cleanup_running = true;
+        drop(state);
+        Ok(CleanupPermit {
+            gate: Arc::clone(self),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkspaceIdentity {
     name: String,
     workspace: FsIdentity,
     git_directory: FsIdentity,
     marker: FsIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CacheStagingIdentity {
+    namespace: FsIdentity,
+    staging: FsIdentity,
 }
 
 struct CheckoutContext<'a> {
@@ -64,6 +165,7 @@ struct CheckoutContext<'a> {
 }
 
 static WORKSPACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static CACHE_CLEANUP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InspectionPhase {
@@ -150,6 +252,11 @@ pub struct CleanupReport {
 }
 
 impl CleanupReport {
+    fn append(&mut self, mut other: Self) {
+        self.removed.append(&mut other.removed);
+        self.failures.append(&mut other.failures);
+    }
+
     pub fn is_clean(&self) -> bool {
         self.failures.is_empty()
     }
@@ -317,7 +424,7 @@ impl InspectionRequest {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PreparedWorkspace {
     session_id: String,
     repository_id: String,
@@ -328,7 +435,24 @@ pub struct PreparedWorkspace {
     workspace_identity: WorkspaceIdentity,
     git_config: Vec<u8>,
     path: PathBuf,
+    _cleanup_permit: OperationPermit,
 }
+
+impl PartialEq for PreparedWorkspace {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.repository_id == other.repository_id
+            && self.repository_url == other.repository_url
+            && self.commit_sha == other.commit_sha
+            && self.workspace_root == other.workspace_root
+            && self.workspace_root_identity == other.workspace_root_identity
+            && self.workspace_identity == other.workspace_identity
+            && self.git_config == other.git_config
+            && self.path == other.path
+    }
+}
+
+impl Eq for PreparedWorkspace {}
 
 impl PreparedWorkspace {
     pub fn repository_id(&self) -> &str {
@@ -387,6 +511,7 @@ pub struct RepositoryInspector {
     workspace_root: PathBuf,
     workspace_root_identity: FsIdentity,
     locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    cleanup_gate: Arc<CleanupGate>,
 }
 
 impl fmt::Debug for RepositoryInspector {
@@ -473,6 +598,7 @@ impl RepositoryInspector {
             workspace_root,
             workspace_root_identity,
             locks: Arc::new(Mutex::new(HashMap::new())),
+            cleanup_gate: Arc::new(CleanupGate::default()),
         })
     }
 
@@ -490,21 +616,27 @@ impl RepositoryInspector {
         self.cache_root.join(path_component(repository_id))
     }
 
-    /// Remove stale, clearly named disposable workspaces without following
-    /// symlinks or scanning outside the dedicated workspace root.
+    /// Remove stale cache staging and disposable workspaces in separate,
+    /// independently bounded cleanup passes.
     pub fn startup_cleanup(&self) -> CleanupReport {
-        if let Err(reason) =
-            validate_root_identity(&self.workspace_root, self.workspace_root_identity)
-        {
-            return CleanupReport {
-                removed: Vec::new(),
-                failures: vec![CleanupFailure {
-                    path: self.workspace_root.clone(),
-                    reason,
-                }],
-            };
-        }
-        cleanup_stale_workspaces(&self.workspace_root, self.workspace_root_identity)
+        let _cleanup = match self.cleanup_gate.begin_cleanup() {
+            Ok(permit) => permit,
+            Err(reason) => {
+                return CleanupReport {
+                    removed: Vec::new(),
+                    failures: vec![CleanupFailure {
+                        path: self.cache_root.clone(),
+                        reason,
+                    }],
+                };
+            }
+        };
+        let mut report = cleanup_stale_cache_staging(&self.cache_root, self.cache_root_identity);
+        report.append(cleanup_stale_workspaces(
+            &self.workspace_root,
+            self.workspace_root_identity,
+        ));
+        report
     }
 
     /// Prepare a detached, independently mutable checkout. The per-repository
@@ -538,6 +670,7 @@ impl RepositoryInspector {
         request: &InspectionRequest,
     ) -> Result<PreparedWorkspace, InspectionError> {
         request.validate()?;
+        let operation = self.cleanup_gate.enter_operation();
         self.validate_roots()?;
         let lock = self.lock_for(&request.repository.repository_id);
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -617,6 +750,7 @@ impl RepositoryInspector {
             workspace_identity,
             git_config,
             path,
+            _cleanup_permit: operation,
         })
     }
 
@@ -738,6 +872,9 @@ impl RepositoryInspector {
             path_component(&source.repository_id),
             InspectionPhase::Cache,
         )?;
+        let namespace_identity =
+            validate_cache_namespace(&self.cache_root, self.cache_root_identity, &repository_root)
+                .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
         let cache = repository_root.join("source.git");
         if fs::symlink_metadata(&cache)
             .map(|metadata| metadata.file_type().is_symlink() || !metadata.is_dir())
@@ -749,6 +886,13 @@ impl RepositoryInspector {
             ));
         }
         if cache.exists() {
+            validate_expected_cache_namespace(
+                &self.cache_root,
+                self.cache_root_identity,
+                &repository_root,
+                namespace_identity,
+            )
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
             validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
                 .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
             sanitize_local_git_config(&cache, &self.cache_root, self.cache_root_identity, None)
@@ -783,14 +927,32 @@ impl RepositoryInspector {
         }
 
         let temporary = repository_root.join(format!(
-            ".source-{}-{}",
+            "{CACHE_STAGING_PREFIX}{}-{}",
             std::process::id(),
             next_workspace_sequence()
         ));
-        validate_cache_namespace(&self.cache_root, self.cache_root_identity, &repository_root)
-            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
-        ensure_path_absent(&temporary)
-            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        let staging_identity = create_owned_cache_staging_path(
+            &self.cache_root,
+            self.cache_root_identity,
+            &repository_root,
+            &temporary,
+            namespace_identity,
+        )?;
+        let staged_cache = temporary.join("source.git");
+        if let Err(reason) = ensure_path_absent(&staged_cache) {
+            let mut error = InspectionError::new(InspectionPhase::Cache, reason);
+            if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+                &self.cache_root,
+                self.cache_root_identity,
+                &repository_root,
+                namespace_identity,
+                staging_identity.staging,
+                &temporary,
+            ) {
+                error.cleanup_failure = Some(cleanup_failure);
+            }
+            return Err(error);
+        }
         let clone = git_output(
             &self.cache_root,
             &self.cache_root,
@@ -802,20 +964,24 @@ impl RepositoryInspector {
                 "--mirror".to_owned(),
                 "--".to_owned(),
                 source.url.clone(),
-                temporary.to_string_lossy().into_owned(),
+                staged_cache.to_string_lossy().into_owned(),
             ],
         );
         if let Err(reason) = clone {
             let mut error = InspectionError::new(InspectionPhase::Cache, reason);
-            if fs::symlink_metadata(&temporary).is_ok() {
-                error.cleanup_failure = Some(
-                    "temporary repository cache ownership was not established; path retained"
-                        .into(),
-                );
+            if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+                &self.cache_root,
+                self.cache_root_identity,
+                &repository_root,
+                namespace_identity,
+                staging_identity.staging,
+                &temporary,
+            ) {
+                error.cleanup_failure = Some(cleanup_failure);
             }
             return Err(error);
         }
-        let staging_identity = match validate_cache_staging_path(
+        let current_staging_identity = match validate_cache_staging_path(
             &self.cache_root,
             self.cache_root_identity,
             &repository_root,
@@ -824,16 +990,62 @@ impl RepositoryInspector {
             Ok(identity) => identity,
             Err(reason) => {
                 let mut error = InspectionError::new(InspectionPhase::Cache, reason);
-                if fs::symlink_metadata(&temporary).is_ok() {
-                    error.cleanup_failure = Some(
-                        "temporary repository cache ownership was not established; path retained"
-                            .into(),
-                    );
+                if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+                    &self.cache_root,
+                    self.cache_root_identity,
+                    &repository_root,
+                    namespace_identity,
+                    staging_identity.staging,
+                    &temporary,
+                ) {
+                    error.cleanup_failure = Some(cleanup_failure);
                 }
                 return Err(error);
             }
         };
-        if let Err(reason) = ensure_path_absent(&cache) {
+        if current_staging_identity != staging_identity {
+            let mut error = InspectionError::new(
+                InspectionPhase::Cache,
+                "temporary repository cache identity changed during clone",
+            );
+            if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+                &self.cache_root,
+                self.cache_root_identity,
+                &repository_root,
+                namespace_identity,
+                staging_identity.staging,
+                &temporary,
+            ) {
+                error.cleanup_failure = Some(cleanup_failure);
+            }
+            return Err(error);
+        }
+        let staged_cache_identity =
+            match validate_staged_cache_path(&temporary, staging_identity.staging, &staged_cache) {
+                Ok(identity) => identity,
+                Err(reason) => {
+                    let mut error = InspectionError::new(InspectionPhase::Cache, reason);
+                    if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+                        &self.cache_root,
+                        self.cache_root_identity,
+                        &repository_root,
+                        namespace_identity,
+                        staging_identity.staging,
+                        &temporary,
+                    ) {
+                        error.cleanup_failure = Some(cleanup_failure);
+                    }
+                    return Err(error);
+                }
+            };
+        if let Err(reason) = validate_expected_cache_namespace(
+            &self.cache_root,
+            self.cache_root_identity,
+            &repository_root,
+            namespace_identity,
+        )
+        .and_then(|()| ensure_path_absent(&cache))
+        {
             let mut error = InspectionError::new(InspectionPhase::Cache, reason);
             if let Err(cleanup_failure) = remove_owned_cache_staging_path(
                 &self.cache_root,
@@ -846,7 +1058,7 @@ impl RepositoryInspector {
             }
             return Err(error);
         }
-        if let Err(error) = fs::rename(&temporary, &cache) {
+        if let Err(error) = fs::rename(&staged_cache, &cache) {
             let mut failure = InspectionError::new(
                 InspectionPhase::Cache,
                 format!("install repository cache {}: {error}", cache.display()),
@@ -862,8 +1074,63 @@ impl RepositoryInspector {
             }
             return Err(failure);
         }
-        validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
-            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        let cleanup_staging_after_install =
+            |mut error: InspectionError| -> Result<PathBuf, InspectionError> {
+                if let Err(cleanup_failure) = remove_owned_cache_staging_path(
+                    &self.cache_root,
+                    self.cache_root_identity,
+                    &repository_root,
+                    &temporary,
+                    staging_identity,
+                ) {
+                    error.cleanup_failure = Some(cleanup_failure);
+                }
+                Err(error)
+            };
+        if let Err(reason) = validate_expected_cache_namespace(
+            &self.cache_root,
+            self.cache_root_identity,
+            &repository_root,
+            namespace_identity,
+        )
+        .and_then(|()| validate_cache_path(&self.cache_root, self.cache_root_identity, &cache))
+        {
+            return cleanup_staging_after_install(InspectionError::new(
+                InspectionPhase::Cache,
+                reason,
+            ));
+        }
+        let installed_identity = match fs::symlink_metadata(&cache) {
+            Ok(metadata) => metadata_identity(&metadata),
+            Err(error) => {
+                return cleanup_staging_after_install(InspectionError::new(
+                    InspectionPhase::Cache,
+                    error.to_string(),
+                ));
+            }
+        };
+        if installed_identity != staged_cache_identity {
+            return cleanup_staging_after_install(InspectionError::new(
+                InspectionPhase::Cache,
+                "installed repository cache identity changed",
+            ));
+        }
+        if let Err(reason) = remove_owned_cache_staging_path(
+            &self.cache_root,
+            self.cache_root_identity,
+            &repository_root,
+            &temporary,
+            staging_identity,
+        ) {
+            let mut error = InspectionError::new(
+                InspectionPhase::Cache,
+                "temporary repository cache cleanup failed",
+            );
+            error.cleanup_failure = Some(reason);
+            return Err(error);
+        }
+        // Canonical source.git is never disposable cleanup; failed post-install
+        // validation leaves it for the next identity-checked recovery attempt.
         sanitize_local_git_config(&cache, &self.cache_root, self.cache_root_identity, None)
             .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
         Ok(cache)
@@ -907,6 +1174,26 @@ impl RepositoryInspector {
         };
         let mut failure =
             primary_failure.map(|(phase, reason)| InspectionError::new(phase, reason));
+        let revision_failure = match resolve_commit(
+            &workspace.path,
+            &workspace.workspace_root,
+            workspace.workspace_root_identity,
+            Some(&workspace.workspace_identity),
+        ) {
+            Ok(commit) if commit == workspace.commit_sha => None,
+            Ok(_) => Some(InspectionError::new(
+                InspectionPhase::Revision,
+                "checkout revision changed after inspection",
+            )),
+            Err(error) => Some(error),
+        };
+        if let Some(revision_failure) = revision_failure {
+            if let Some(error) = failure.as_mut() {
+                error.reason = format!("{}; {}", error.reason, revision_failure.reason);
+            } else {
+                failure = Some(revision_failure);
+            }
+        }
         match dirty_details_for_workspace(&workspace) {
             Ok(Some(details)) => {
                 if let Some(error) = failure.as_mut() {
@@ -1140,10 +1427,7 @@ fn metadata_identity(metadata: &fs::Metadata) -> FsIdentity {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        FsIdentity {
-            first: metadata.len(),
-            second: 0,
-        }
+        panic!("filesystem identity unsupported on this platform")
     }
 }
 
@@ -1174,9 +1458,12 @@ fn validate_cache_namespace(
     root: &Path,
     expected_root_identity: FsIdentity,
     repository_root: &Path,
-) -> Result<(), String> {
+) -> Result<FsIdentity, String> {
     validate_root_identity(root, expected_root_identity)?;
     let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    if repository_root.parent() != Some(root.as_path()) {
+        return Err("repository cache namespace is not a direct child of daemon-owned root".into());
+    }
     let metadata = fs::symlink_metadata(repository_root).map_err(|error| error.to_string())?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("repository cache namespace is not a real directory".into());
@@ -1184,6 +1471,19 @@ fn validate_cache_namespace(
     let canonical = fs::canonicalize(repository_root).map_err(|error| error.to_string())?;
     if canonical.parent() != Some(root.as_path()) {
         return Err("repository cache namespace is outside daemon-owned root".into());
+    }
+    Ok(metadata_identity(&metadata))
+}
+
+fn validate_expected_cache_namespace(
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+    expected_namespace_identity: FsIdentity,
+) -> Result<(), String> {
+    let identity = validate_cache_namespace(root, expected_root_identity, repository_root)?;
+    if identity != expected_namespace_identity {
+        return Err("repository cache namespace identity changed".into());
     }
     Ok(())
 }
@@ -1196,13 +1496,128 @@ fn ensure_path_absent(path: &Path) -> Result<(), String> {
     }
 }
 
+fn create_owned_cache_staging_path(
+    cache_root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+    staging: &Path,
+    expected_namespace_identity: FsIdentity,
+) -> Result<CacheStagingIdentity, InspectionError> {
+    if staging.parent() != Some(repository_root)
+        || !staging.file_name().is_some_and(is_cache_staging_name)
+    {
+        return Err(InspectionError::new(
+            InspectionPhase::Cache,
+            "temporary repository cache is not a direct child of its namespace",
+        ));
+    }
+    let namespace_identity =
+        validate_cache_namespace(cache_root, expected_root_identity, repository_root)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+    if namespace_identity != expected_namespace_identity {
+        return Err(InspectionError::new(
+            InspectionPhase::Cache,
+            "repository cache namespace identity changed",
+        ));
+    }
+    ensure_path_absent(staging)
+        .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+    fs::create_dir(staging).map_err(|error| {
+        InspectionError::new(
+            InspectionPhase::Cache,
+            format!(
+                "create temporary repository cache {}: {error}",
+                staging.display()
+            ),
+        )
+    })?;
+    let created_staging_identity = match fs::symlink_metadata(staging) {
+        Ok(metadata) => metadata_identity(&metadata),
+        Err(error) => {
+            let mut inspection_error = InspectionError::new(
+                InspectionPhase::Cache,
+                format!(
+                    "temporary repository cache {} ownership could not be verified; path retained: {error}",
+                    staging.display()
+                ),
+            );
+            inspection_error.cleanup_failure = Some(
+                "temporary repository cache ownership was not established; path retained".into(),
+            );
+            return Err(inspection_error);
+        }
+    };
+    let cleanup_created = |reason: String| -> Result<CacheStagingIdentity, InspectionError> {
+        let mut error = InspectionError::new(InspectionPhase::Cache, reason);
+        if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+            cache_root,
+            expected_root_identity,
+            repository_root,
+            expected_namespace_identity,
+            created_staging_identity,
+            staging,
+        ) {
+            error.cleanup_failure = Some(cleanup_failure);
+        }
+        Err(error)
+    };
+    if let Err(error) = restrict_root_permissions(staging) {
+        return cleanup_created(format!(
+            "restrict temporary repository cache {}: {error}",
+            staging.display()
+        ));
+    }
+    let identity = match validate_cache_staging_path(
+        cache_root,
+        expected_root_identity,
+        repository_root,
+        staging,
+    ) {
+        Ok(identity) => identity,
+        Err(reason) => return cleanup_created(reason),
+    };
+    if identity.namespace != expected_namespace_identity {
+        return cleanup_created("repository cache namespace identity changed".into());
+    }
+    Ok(identity)
+}
+
+fn validate_staged_cache_path(
+    staging_root: &Path,
+    expected_staging_identity: FsIdentity,
+    cache: &Path,
+) -> Result<FsIdentity, String> {
+    let staging_metadata = fs::symlink_metadata(staging_root).map_err(|error| error.to_string())?;
+    if staging_metadata.file_type().is_symlink() || !staging_metadata.is_dir() {
+        return Err("temporary repository cache is not an owned directory".into());
+    }
+    if metadata_identity(&staging_metadata) != expected_staging_identity {
+        return Err("temporary repository cache identity changed".into());
+    }
+    if cache.parent() != Some(staging_root) || cache.file_name() != Some(OsStr::new("source.git")) {
+        return Err("staged repository cache has an invalid destination".into());
+    }
+    let metadata = fs::symlink_metadata(cache).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("staged repository cache is not a real directory".into());
+    }
+    let canonical_root = fs::canonicalize(staging_root).map_err(|error| error.to_string())?;
+    let canonical = fs::canonicalize(cache).map_err(|error| error.to_string())?;
+    if canonical.parent() != Some(canonical_root.as_path())
+        || canonical.file_name() != Some(OsStr::new("source.git"))
+    {
+        return Err("staged repository cache resolves outside staging".into());
+    }
+    Ok(metadata_identity(&metadata))
+}
+
 fn validate_cache_staging_path(
     cache_root: &Path,
     expected_root_identity: FsIdentity,
     repository_root: &Path,
     staging: &Path,
-) -> Result<FsIdentity, String> {
-    validate_cache_namespace(cache_root, expected_root_identity, repository_root)?;
+) -> Result<CacheStagingIdentity, String> {
+    let namespace = validate_cache_namespace(cache_root, expected_root_identity, repository_root)?;
     let metadata = fs::symlink_metadata(staging).map_err(|error| error.to_string())?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("temporary repository cache is not an owned directory".into());
@@ -1213,14 +1628,18 @@ fn validate_cache_staging_path(
     let canonical_root = fs::canonicalize(repository_root).map_err(|error| error.to_string())?;
     let canonical = fs::canonicalize(staging).map_err(|error| error.to_string())?;
     if canonical.parent() != Some(canonical_root.as_path())
-        || !canonical
-            .file_name()
-            .and_then(OsStr::to_str)
-            .is_some_and(|name| name.starts_with(".source-"))
+        || !is_cache_staging_name(
+            canonical
+                .file_name()
+                .ok_or_else(|| "temporary repository cache has no name".to_owned())?,
+        )
     {
         return Err("temporary repository cache resolves outside daemon-owned root".into());
     }
-    Ok(metadata_identity(&metadata))
+    Ok(CacheStagingIdentity {
+        namespace,
+        staging: metadata_identity(&metadata),
+    })
 }
 
 fn remove_owned_cache_staging_path(
@@ -1228,8 +1647,9 @@ fn remove_owned_cache_staging_path(
     expected_root_identity: FsIdentity,
     repository_root: &Path,
     path: &Path,
-    expected_staging_identity: FsIdentity,
+    expected_identity: CacheStagingIdentity,
 ) -> Result<(), String> {
+    validate_root_identity(cache_root, expected_root_identity)?;
     match fs::symlink_metadata(path) {
         Ok(_) => {
             let current_identity = validate_cache_staging_path(
@@ -1238,10 +1658,16 @@ fn remove_owned_cache_staging_path(
                 repository_root,
                 path,
             )?;
-            if current_identity != expected_staging_identity {
+            if current_identity != expected_identity {
                 return Err("temporary repository cache identity changed".into());
             }
-            remove_owned_cache_path(repository_root, path)
+            remove_owned_cache_path(
+                cache_root,
+                expected_root_identity,
+                repository_root,
+                path,
+                expected_identity,
+            )
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.to_string()),
@@ -1552,7 +1978,7 @@ fn sanitize_git_environment(command: &mut Command) {
 
 fn git_host_config_overrides() -> Vec<(String, String)> {
     let mut overrides = Vec::new();
-    for scope in ["--global", "--system"] {
+    for scope in ["--system", "--global"] {
         let mut command = Command::new("git");
         sanitize_git_path_environment(&mut command);
         remove_git_config_environment(&mut command);
@@ -1647,6 +2073,9 @@ fn validate_git_spawn_scope(
     let canonical_current = fs::canonicalize(current_dir).map_err(|error| error.to_string())?;
     if canonical_current.strip_prefix(&canonical_root).is_err() {
         return Err("Git current directory resolves outside daemon-owned root".into());
+    }
+    if current_dir.file_name() == Some(OsStr::new("source.git")) {
+        validate_cache_path(root, expected_root_identity, current_dir)?;
     }
     if let Some(identity) = workspace_identity {
         validate_workspace_identity_at(current_dir, identity)?;
@@ -1762,6 +2191,232 @@ where
         return Err(detail);
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn is_cache_staging_name(name: &OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.starts_with(CACHE_STAGING_PREFIX))
+}
+
+fn is_cache_namespace_name(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(encoded) = name.strip_prefix("id-") else {
+        return false;
+    };
+    !encoded.is_empty()
+        && encoded.len().is_multiple_of(2)
+        && encoded.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn cleanup_abandoned_cache_staging_path(
+    cache_root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+    expected_namespace_identity: FsIdentity,
+    expected_staging_identity: FsIdentity,
+    path: &Path,
+) -> Result<(), String> {
+    validate_root_identity(cache_root, expected_root_identity)?;
+    let current_namespace_identity =
+        validate_cache_namespace(cache_root, expected_root_identity, repository_root)?;
+    if current_namespace_identity != expected_namespace_identity {
+        return Err("repository cache namespace identity changed".into());
+    }
+    let staging_identity = match fs::symlink_metadata(path) {
+        Ok(_) => {
+            validate_cache_staging_path(cache_root, expected_root_identity, repository_root, path)?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let expected_identity = CacheStagingIdentity {
+        namespace: expected_namespace_identity,
+        staging: expected_staging_identity,
+    };
+    if staging_identity != expected_identity {
+        return Err("temporary repository cache identity changed".into());
+    }
+    remove_owned_cache_staging_path(
+        cache_root,
+        expected_root_identity,
+        repository_root,
+        path,
+        expected_identity,
+    )
+}
+
+fn cleanup_stale_cache_staging(root: &Path, expected_root_identity: FsIdentity) -> CleanupReport {
+    let mut report = CleanupReport::default();
+    if let Err(reason) = validate_root_identity(root, expected_root_identity) {
+        report.failures.push(CleanupFailure {
+            path: root.to_owned(),
+            reason,
+        });
+        return report;
+    }
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.failures.push(CleanupFailure {
+                path: root.to_owned(),
+                reason: error.to_string(),
+            });
+            return report;
+        }
+    };
+    for entry in entries {
+        if let Err(reason) = validate_root_identity(root, expected_root_identity) {
+            report.failures.push(CleanupFailure {
+                path: root.to_owned(),
+                reason,
+            });
+            return report;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                report.failures.push(CleanupFailure {
+                    path: root.to_owned(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let namespace = entry.path();
+        let name = namespace.file_name();
+        if !name.is_some_and(is_cache_namespace_name) {
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(&namespace) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                report.failures.push(CleanupFailure {
+                    path: namespace,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            report.failures.push(CleanupFailure {
+                path: namespace,
+                reason: "repository cache namespace is not a real directory".into(),
+            });
+            continue;
+        }
+        let observed_namespace_identity = metadata_identity(&metadata);
+        let namespace_identity =
+            match validate_cache_namespace(root, expected_root_identity, &namespace) {
+                Ok(identity) if identity == observed_namespace_identity => identity,
+                Ok(_) => {
+                    report.failures.push(CleanupFailure {
+                        path: namespace,
+                        reason: "repository cache namespace identity changed".into(),
+                    });
+                    continue;
+                }
+                Err(reason) => {
+                    report.failures.push(CleanupFailure {
+                        path: namespace,
+                        reason,
+                    });
+                    continue;
+                }
+            };
+        visit_cache_namespace(
+            root,
+            expected_root_identity,
+            &namespace,
+            namespace_identity,
+            &mut report,
+        );
+    }
+    report
+}
+
+fn visit_cache_namespace(
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    namespace: &Path,
+    expected_namespace_identity: FsIdentity,
+    report: &mut CleanupReport,
+) {
+    match validate_cache_namespace(root, expected_root_identity, namespace) {
+        Ok(identity) if identity == expected_namespace_identity => {}
+        Ok(_) => {
+            report.failures.push(CleanupFailure {
+                path: namespace.to_owned(),
+                reason: "repository cache namespace identity changed".into(),
+            });
+            return;
+        }
+        Err(reason) => {
+            report.failures.push(CleanupFailure {
+                path: namespace.to_owned(),
+                reason,
+            });
+            return;
+        }
+    }
+    let entries = match fs::read_dir(namespace) {
+        Ok(entries) => entries,
+        Err(error) => {
+            report.failures.push(CleanupFailure {
+                path: namespace.to_owned(),
+                reason: error.to_string(),
+            });
+            return;
+        }
+    };
+    for entry in entries {
+        if let Err(reason) = validate_root_identity(root, expected_root_identity) {
+            report.failures.push(CleanupFailure {
+                path: root.to_owned(),
+                reason,
+            });
+            return;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                report.failures.push(CleanupFailure {
+                    path: namespace.to_owned(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let path = entry.path();
+        let Some(name) = path.file_name() else {
+            continue;
+        };
+        if !is_cache_staging_name(name) {
+            continue;
+        }
+        let staging_identity =
+            match validate_cache_staging_path(root, expected_root_identity, namespace, &path) {
+                Ok(identity) => identity,
+                Err(reason) => {
+                    report.failures.push(CleanupFailure { path, reason });
+                    continue;
+                }
+            };
+        match remove_owned_cache_staging_path(
+            root,
+            expected_root_identity,
+            namespace,
+            &path,
+            CacheStagingIdentity {
+                namespace: expected_namespace_identity,
+                staging: staging_identity.staging,
+            },
+        ) {
+            Ok(()) => report.removed.push(path),
+            Err(reason) => report.failures.push(CleanupFailure { path, reason }),
+        }
+    }
 }
 
 fn cleanup_stale_workspaces(root: &Path, expected_root_identity: FsIdentity) -> CleanupReport {
@@ -1920,14 +2575,78 @@ fn remove_owned_workspace_path(
     validate_root_identity(root, expected_root_identity)?;
     validate_workspace_path(root, expected_root_identity, path)?;
     validate_workspace_identity_at(path, expected_identity)?;
-    remove_owned_child_path(root, path, WORKSPACE_PREFIX)
+    remove_owned_child_path(
+        root,
+        path,
+        expected_root_identity,
+        expected_identity.workspace,
+        WORKSPACE_PREFIX,
+    )
 }
 
-fn remove_owned_cache_path(root: &Path, path: &Path) -> Result<(), String> {
-    remove_owned_child_path(root, path, ".source-")
+fn remove_owned_cache_path(
+    cache_root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+    path: &Path,
+    expected_identity: CacheStagingIdentity,
+) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    }
+    let current_identity =
+        validate_cache_staging_path(cache_root, expected_root_identity, repository_root, path)?;
+    if current_identity != expected_identity {
+        return Err("temporary repository cache identity changed".into());
+    }
+
+    // Rename into a fresh, still-recognized child first. This makes ownership
+    // transfer atomic; recursive deletion never targets caller-visible staging.
+    let quarantine = repository_root.join(format!(
+        "{CACHE_STAGING_PREFIX}cleanup-{}-{}",
+        std::process::id(),
+        next_cache_cleanup_sequence()
+    ));
+    ensure_path_absent(&quarantine)?;
+    fs::rename(path, &quarantine).map_err(|error| {
+        format!(
+            "move temporary repository cache {} into cleanup quarantine: {error}",
+            path.display()
+        )
+    })?;
+
+    let quarantined_identity = validate_cache_staging_path(
+        cache_root,
+        expected_root_identity,
+        repository_root,
+        &quarantine,
+    )?;
+    if quarantined_identity != expected_identity {
+        return Err(format!(
+            "temporary repository cache quarantine {} identity changed during cleanup",
+            quarantine.display()
+        ));
+    }
+    remove_owned_child_path(
+        repository_root,
+        &quarantine,
+        expected_identity.namespace,
+        expected_identity.staging,
+        CACHE_STAGING_PREFIX,
+    )
+    .map_err(|reason| format!("cleanup quarantine {}: {reason}", quarantine.display()))
 }
 
-fn remove_owned_child_path(root: &Path, path: &Path, prefix: &str) -> Result<(), String> {
+fn remove_owned_child_path(
+    root: &Path,
+    path: &Path,
+    expected_root_identity: FsIdentity,
+    expected_identity: FsIdentity,
+    prefix: &str,
+) -> Result<(), String> {
+    validate_root_identity(root, expected_root_identity)?;
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1941,8 +2660,11 @@ fn remove_owned_child_path(root: &Path, path: &Path, prefix: &str) -> Result<(),
     {
         return Err("refusing cleanup outside daemon-owned direct child".into());
     }
+    if metadata_identity(&metadata) != expected_identity {
+        return Err("owned cleanup child identity changed".into());
+    }
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return fs::remove_file(path).map_err(|error| error.to_string());
+        return Err("owned cleanup child is not a real directory".into());
     }
     let canonical_root = fs::canonicalize(root).map_err(|error| error.to_string())?;
     let canonical = fs::canonicalize(path).map_err(|error| error.to_string())?;
@@ -1960,6 +2682,23 @@ fn remove_owned_child_path(root: &Path, path: &Path, prefix: &str) -> Result<(),
         if mode & 0o200 == 0 {
             return Err("daemon-owned root is not writable for cleanup".into());
         }
+    }
+    validate_root_identity(root, expected_root_identity)?;
+    let final_metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    if final_metadata.file_type().is_symlink()
+        || !final_metadata.is_dir()
+        || metadata_identity(&final_metadata) != expected_identity
+    {
+        return Err("owned cleanup child identity changed before removal".into());
+    }
+    let final_root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let final_path = fs::canonicalize(path).map_err(|error| error.to_string())?;
+    if final_path.parent() != Some(final_root.as_path()) {
+        return Err("refusing cleanup outside daemon-owned root".into());
     }
     fs::remove_dir_all(path).map_err(|error| error.to_string())
 }
@@ -2083,6 +2822,10 @@ fn path_component(value: &str) -> String {
 
 fn next_workspace_sequence() -> u64 {
     WORKSPACE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn next_cache_cleanup_sequence() -> u64 {
+    CACHE_CLEANUP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
 }
 
 fn non_empty_reason(reason: String, fallback: &str) -> String {
@@ -2250,6 +2993,49 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(session_error.phase, InspectionPhase::Authorization);
+    }
+
+    #[test]
+    fn cache_cleanup_retains_replaced_identity() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap_or_else(|error| panic!("canonical temporary root: {error}"))
+            .join(format!(
+                "north-cache-identity-{}-{}",
+                std::process::id(),
+                next_cache_cleanup_sequence()
+            ));
+        let namespace = root.join(path_component("repo-1"));
+        let staging = namespace.join(".source-original");
+        fs::create_dir_all(&staging).unwrap();
+        let root_identity = directory_identity(&root).unwrap();
+        let expected =
+            validate_cache_staging_path(&root, root_identity, &namespace, &staging).unwrap();
+
+        let displaced_staging = namespace.join(".source-displaced");
+        fs::rename(&staging, &displaced_staging).unwrap();
+        fs::create_dir(&staging).unwrap();
+        let error =
+            remove_owned_cache_staging_path(&root, root_identity, &namespace, &staging, expected)
+                .expect_err("replaced staging must be retained");
+        assert!(error.contains("identity changed"));
+        assert!(staging.is_dir());
+        assert!(displaced_staging.is_dir());
+
+        fs::remove_dir_all(&staging).unwrap();
+        fs::rename(&displaced_staging, &staging).unwrap();
+        let displaced_namespace = root.join("namespace-displaced");
+        fs::rename(&namespace, &displaced_namespace).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        let error =
+            remove_owned_cache_staging_path(&root, root_identity, &namespace, &staging, expected)
+                .expect_err("replaced namespace must be retained");
+        assert!(error.contains("repository cache namespace") || error.contains("identity changed"));
+        assert!(staging.is_dir());
+        assert!(displaced_namespace.join(".source-original").is_dir());
+
+        fs::remove_dir_all(&namespace).unwrap();
+        fs::rename(displaced_namespace, namespace).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

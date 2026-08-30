@@ -78,8 +78,12 @@ struct LocalState {
 /// Placeholder until `introduce-agent-requirement-clarification` supplies
 /// North's production agent runtime adapter. Durable coordination is real, but
 /// executable commands currently produce a not-configured/unknown fact.
+///
+/// Repository inspection is initialized as a future adapter-injection seam; it
+/// is intentionally not invoked by this change's production dispatch path.
 struct LocalRuntime {
-    _repository_inspector: RepositoryInspector,
+    /// Used by the downstream clarification runtime, not by `dispatch` here.
+    _repository_inspection: RepositoryInspector,
 }
 
 impl RuntimeExecutor for LocalRuntime {
@@ -268,7 +272,7 @@ async fn start(args: &[String]) -> Result<(), CliError> {
     let coordinator = DaemonCoordinator::new(
         journal,
         LocalRuntime {
-            _repository_inspector: repository_inspector,
+            _repository_inspection: repository_inspector,
         },
     );
     let recovered = coordinator

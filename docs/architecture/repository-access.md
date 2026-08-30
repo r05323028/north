@@ -149,6 +149,20 @@ A dirty result is an invariant violation: report it and discard the checkout
 before reuse. This is process-level protection, not kernel or sandbox
 isolation. North does not claim OS-level read-only enforcement in 0.1.0.
 
+Mirror clone preparation uses a direct `.source-*` staging child inside each
+encoded repository cache namespace. Failed clones clean this staging immediately
+when identity and ownership checks succeed. Startup performs separate best-effort
+staging recovery with cache-root identity, direct-parent, canonical-path, and
+filesystem-identity checks; symlinked or redirected paths remain in place and
+produce cleanup failures. This pass never scans or deletes `source.git`,
+workspaces, or unrelated cache-root entries.
+
+The daemon binary initializes repository-inspection infrastructure as a future
+runtime-adapter seam. `LocalRuntime::dispatch` remains an explicit
+`runtime_adapter_not_configured` placeholder; downstream clarification owns
+invocation and agent execution. No inspection call, provider SDK behavior, or
+new protocol surface belongs here.
+
 Out of scope for configured-repositories: clone/fetch execution, push, PR
 creation, branch-selection UI, arbitrary sync, source inspection, and
 intentional source-repository mutation.

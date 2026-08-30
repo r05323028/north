@@ -23,8 +23,15 @@
 - [x] 4.1 Dispose workspaces on success, Git/inspection failure, cancellation, and runtime failure through one cleanup path; never reuse a cleanup-failed directory.
 - [x] 4.2 Add safe best-effort startup cleanup for stale disposable workspaces under the dedicated root; prove reusable caches are untouched.
 - [x] 4.3 Test cleanup failures, cancellation, orphan recovery, and dirty-checkout disposal.
+- [x] 4.4 Clean failed-clone and stale `.source-*` cache staging through a separate, identity- and boundary-checked recovery path; cover reusable-cache preservation, unrelated entries, symlink rejection, root replacement, and escape prevention.
 
-## 5. Validation
+## 5. Runtime boundary
 
-- [x] 5.1 Run focused repository-inspection/readiness integration tests and architecture checks.
-- [x] 5.2 Run Rust/web validation required by the eventual implementation and `openspec validate --all --strict`.
+- [x] 5.1 Name and document `LocalRuntime`'s initialized repository inspection
+  field as future adapter infrastructure; keep production dispatch on the
+  existing `runtime_adapter_not_configured` placeholder.
+
+## 6. Validation
+
+- [x] 6.1 Run focused repository-inspection/readiness integration tests and architecture checks.
+- [x] 6.2 Run Rust/web validation required by the eventual implementation and `openspec validate --all --strict`.

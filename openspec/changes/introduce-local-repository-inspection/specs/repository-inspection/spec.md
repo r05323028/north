@@ -1,3 +1,5 @@
+# Repository inspection
+
 ## Purpose
 
 Lets the daemon inspect enabled configured repositories through host Git while
@@ -61,6 +63,53 @@ for repository R SHALL NOT unnecessarily serialize unrelated repository IDs.
 
 - **WHEN** sessions prepare repositories R and S concurrently
 - **THEN** work for S is not blocked by a lock held only for R
+
+### Requirement: Abandoned cache staging is safely recoverable
+
+Mirror preparation SHALL use only explicitly recognized staging names such as
+`.source-*` beneath an encoded repository cache namespace. If mirror cloning
+fails after creating staging material, the daemon SHALL remove it immediately
+when cache-root ownership, direct-child boundaries, and filesystem identity can
+be proven. Startup recovery MAY remove stale staging left behind by an earlier
+process using the same checks. If ownership, identity, or path boundaries
+cannot be proven, the daemon SHALL retain the path and report cleanup failure.
+Staging cleanup SHALL be separate from disposable-workspace cleanup, SHALL never
+remove `source.git`, SHALL not follow symlinks, and SHALL never delete outside
+the daemon-owned cache root.
+
+#### Scenario: Failed mirror clone leaves staging material
+
+- **WHEN** a mirror clone fails after creating `<namespace>/.source-*`
+- **THEN** the daemon removes that staging directory when its identity and
+  cache-root ownership still validate, while returning the Git inspection
+  failure
+
+#### Scenario: Startup removes safe stale staging
+
+- **WHEN** startup finds a real stale `.source-*` direct child of an encoded
+  repository cache namespace
+- **THEN** it removes only that staging directory and reports it as removed
+
+#### Scenario: Reusable cache and unrelated entries survive
+
+- **WHEN** startup scans cache namespaces containing `source.git`, unrelated
+  cache-root entries, or names outside the recognized staging layout
+- **THEN** it leaves all of them untouched
+
+#### Scenario: Staging redirection is rejected
+
+- **WHEN** a recognized staging path or its repository namespace is a symlink,
+  redirects outside its expected parent, or changes filesystem identity during
+  cleanup
+- **THEN** the daemon retains the path, reports cleanup failure, and does not
+  follow or delete the redirected target
+
+#### Scenario: Cache-root replacement is rejected
+
+- **WHEN** the configured cache root no longer has its captured identity or
+  canonical path before staging cleanup
+- **THEN** the daemon reports cleanup failure and removes nothing from either
+  the replacement root or the displaced cache tree
 
 ### Requirement: Runtime is confined to an isolated disposable workspace
 

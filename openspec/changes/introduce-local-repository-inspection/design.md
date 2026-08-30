@@ -31,13 +31,19 @@ invalidating a valid in-flight citation.
 
 - Store one reusable Git source cache under the daemon configuration directory,
   keyed by durable `repository_id`. The cache is reusable source material,
-  never a runtime working directory.
+  never a runtime working directory. Mirror clones land first in a direct
+  `.source-*` staging child; safe immediate cleanup handles failed clones, while
+  startup recovery scans only recognized staging children in encoded cache
+  namespaces.
 - Hold a keyed per-repository synchronization lock across clone/fetch/update,
   exact revision resolution, and creation/verification of the disposable
   checkout. Sessions for different repositories proceed independently. Sessions
   for one repository wait for its cache operation, then run concurrently from
   different workspaces. North 0.1 assumes one daemon process owns its cache;
   that process must not allow two cache mutators for one repository ID.
+  Staging cleanup revalidates cache-root identity, namespace boundaries, and
+  staging identity; symlinks, path redirection, and uncertain ownership are
+  retained and reported rather than deleted.
 - Create a plain local clone/copy under a dedicated disposable-workspace root,
   scoped by session/task/repository identity. Do not use Git worktrees in 0.1.
 - Release the cache lock only after the workspace is independent and its pinned
@@ -59,6 +65,13 @@ and full SHA. `north-protocol` validates complete Git SHA-1/SHA-256 fields; the 
 produces the canonical full-SHA fact and server readiness validates identity/run
 binding.
 
+`LocalRuntime` owns the initialized `RepositoryInspector` only as an adapter
+injection seam. Its current durable dispatch path intentionally returns
+`runtime_adapter_not_configured`; this change does not invoke inspection from
+production agent dispatch. The downstream
+`introduce-agent-requirement-clarification` change owns the real runtime
+adapter and its invocation.
+
 ## Workspace protection and lifecycle
 
 The existing read-class Git allowlist and process-level dirty-tree guard remain
@@ -76,10 +89,11 @@ Every workspace is cleaned in a finally-style path:
 | Cancellation | Stop/await the runtime task, check/discard the workspace, then remove it; no unfinished result is published. |
 | Runtime failure | Preserve the runtime failure fact, apply the dirty guard, and remove the workspace. Contamination is reported separately. |
 | Cleanup failure | Never reuse the directory. Leave it under the disposable root for safe stale cleanup and surface the cleanup failure. |
-| Daemon restart | Scan only the dedicated disposable-workspace root and remove stale, clearly identified disposable directories on a best-effort basis. Never scan or delete reusable caches. |
+| Daemon restart | Workspace cleanup scans only the dedicated disposable-workspace root and removes stale, clearly identified disposable directories on a best-effort basis. A separate cache-staging pass scans only encoded cache namespaces and `.source-*` direct children. Neither pass deletes reusable `source.git`; unsafe paths remain and report failure. |
 
-Startup cleanup is not a new evidence/provenance mechanism. It is filesystem
-hygiene bounded to the daemon-owned disposable namespace.
+Startup cleanup is not a new evidence/provenance mechanism. Each pass is
+filesystem hygiene bounded to its own daemon-owned namespace; cache-staging and
+disposable-workspace cleanup remain separate.
 
 ## Dependency graph
 

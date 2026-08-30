@@ -11,7 +11,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Barrier, Condvar, Mutex,
+        mpsc, Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -334,6 +334,50 @@ fn run_credential_helper_child() {
 }
 
 #[cfg(unix)]
+fn run_failed_clone_child() {
+    let root = PathBuf::from(
+        std::env::var_os("NORTH_FAILED_CLONE_ROOT").unwrap_or_else(|| panic!("failed clone root")),
+    );
+    let wrapper = PathBuf::from(
+        std::env::var_os("NORTH_FAILED_CLONE_WRAPPER")
+            .unwrap_or_else(|| panic!("failed clone wrapper")),
+    );
+    let log = PathBuf::from(
+        std::env::var_os("NORTH_FAILED_CLONE_LOG").unwrap_or_else(|| panic!("failed clone log")),
+    );
+    let fixture = fixture(&root.join("source"));
+    let inspector = inspector(&root);
+    let source = RepositorySource::new("repo-1", fixture.remote.to_string_lossy());
+    let request = InspectionRequest::new("session-1", "task-1", source.clone());
+    let authorization = RunAuthorization::new("session-1", vec![source])
+        .unwrap_or_else(|_| panic!("failed clone authorization"));
+    let error = inspector
+        .prepare(&request, &authorization)
+        .expect_err("forced failed mirror clone");
+    assert_eq!(error.phase, InspectionPhase::Cache);
+    assert!(
+        !error.cleanup_failed(),
+        "safe staging cleanup failed: {error:?}"
+    );
+    let namespace = inspector.repository_cache_path("repo-1");
+    let staging_remains = fs::read_dir(&namespace)
+        .unwrap_or_else(|_| panic!("cache namespace"))
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(".source-"))
+        });
+    assert!(!staging_remains, "failed clone left staging material");
+    let invocation = fs::read_to_string(log).unwrap_or_else(|_| panic!("failed clone log"));
+    assert!(invocation.lines().any(|line| line == "clone"));
+    assert!(invocation.lines().any(|line| line == "--mirror"));
+    assert!(invocation.lines().any(|line| line.contains(".source-")));
+    assert!(wrapper.exists());
+}
+
+#[cfg(unix)]
 fn run_ssh_command_child() {
     let root = PathBuf::from(
         std::env::var_os("NORTH_SSH_COMMAND_ROOT").unwrap_or_else(|| panic!("SSH command root")),
@@ -379,6 +423,84 @@ fn authorization(repository_id: &str, remote: &Path) -> RunAuthorization {
         )],
     )
     .unwrap_or_else(|_| panic!("authorization"))
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_mirror_clone_cleans_owned_staging() {
+    if std::env::var("NORTH_FAILED_CLONE_CHILD").is_ok_and(|value| value == "1") {
+        run_failed_clone_child();
+        return;
+    }
+
+    let directory = test_directory();
+    let wrapper_dir = directory.0.join("git-wrapper-bin");
+    fs::create_dir_all(&wrapper_dir).unwrap_or_else(|_| panic!("failed clone wrapper directory"));
+    let wrapper = wrapper_dir.join("git");
+    let log = directory.0.join("failed-clone.log");
+    fs::write(
+        &wrapper,
+        r#"#!/bin/sh
+if [ "$1" = clone ] && [ "$2" = --mirror ]; then
+  "$NORTH_REAL_GIT" "$@"
+  status=$?
+  printf '%s\n' "$@" > "$NORTH_FAILED_CLONE_LOG"
+  if [ "$status" -ne 0 ]; then
+    exit "$status"
+  fi
+  exit 1
+fi
+exec "$NORTH_REAL_GIT" "$@"
+"#,
+    )
+    .unwrap_or_else(|_| panic!("failed clone wrapper"));
+    let mut permissions = fs::metadata(&wrapper)
+        .unwrap_or_else(|_| panic!("failed clone wrapper metadata"))
+        .permissions();
+    use std::os::unix::fs::PermissionsExt;
+    permissions.set_mode(0o700);
+    fs::set_permissions(&wrapper, permissions)
+        .unwrap_or_else(|_| panic!("failed clone wrapper permissions"));
+    let real_git = Command::new("which")
+        .arg("git")
+        .output()
+        .unwrap_or_else(|_| panic!("locate Git"));
+    assert!(real_git.status.success(), "locate Git failed");
+    let real_git = String::from_utf8(real_git.stdout)
+        .unwrap_or_else(|_| panic!("Git path"))
+        .trim()
+        .to_owned();
+    let mut path_entries = vec![wrapper
+        .parent()
+        .unwrap_or_else(|| panic!("wrapper directory"))
+        .to_owned()];
+    path_entries.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let child_path = std::env::join_paths(path_entries).unwrap_or_else(|_| panic!("child PATH"));
+    let output = Command::new(
+        std::env::current_exe().unwrap_or_else(|_| panic!("failed clone test binary")),
+    )
+    .args([
+        "--exact",
+        "failed_mirror_clone_cleans_owned_staging",
+        "--nocapture",
+    ])
+    .env("NORTH_FAILED_CLONE_CHILD", "1")
+    .env("NORTH_FAILED_CLONE_ROOT", &directory.0)
+    .env("NORTH_FAILED_CLONE_WRAPPER", &wrapper)
+    .env("NORTH_FAILED_CLONE_LOG", &log)
+    .env("NORTH_REAL_GIT", real_git)
+    .env("PATH", child_path)
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .output()
+    .unwrap_or_else(|_| panic!("run failed clone child"));
+    assert!(
+        output.status.success(),
+        "failed clone child failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[cfg(unix)]
@@ -601,6 +723,34 @@ fn moving_remote_does_not_change_prepared_revision() {
 }
 
 #[test]
+fn runtime_revision_change_is_rejected_before_success() {
+    let directory = test_directory();
+    let fixture = fixture(&directory.0);
+    fs::write(fixture.working.join("README.md"), "second\n")
+        .unwrap_or_else(|_| panic!("second file"));
+    git(Some(&fixture.working), ["add", "README.md"]);
+    git(Some(&fixture.working), ["commit", "-m", "second"]);
+    git(Some(&fixture.working), ["push", "origin", "main"]);
+
+    let inspector = inspector(&directory.0);
+    let error = inspector
+        .inspect(
+            &request("repo-1", "task-1", &fixture.remote),
+            &authorization("repo-1", &fixture.remote),
+            |workspace| {
+                git(
+                    Some(workspace),
+                    ["checkout", "--detach", fixture.first_commit.as_str()],
+                );
+                Ok(())
+            },
+        )
+        .expect_err("runtime revision change must fail");
+    assert_eq!(error.phase, InspectionPhase::Revision);
+    assert!(error.reason.contains("revision changed"));
+}
+
+#[test]
 fn cache_fetches_new_revision_for_next_run() {
     let directory = test_directory();
     let fixture = fixture(&directory.0);
@@ -685,7 +835,7 @@ fn replaced_workspace_is_not_read_or_deleted() {
         Ok(())
     });
     let error = result.expect_err("replacement must fail integrity checks");
-    assert_eq!(error.phase, InspectionPhase::DirtyTree);
+    assert_eq!(error.phase, InspectionPhase::Revision);
     assert!(error.cleanup_failure.is_some());
     assert!(replacement
         .unwrap_or_else(|| panic!("replacement path"))
@@ -697,14 +847,17 @@ fn concurrent_same_repository_inspections_have_independent_workspaces() {
     let directory = test_directory();
     let fixture = fixture(&directory.0);
     let inspector = Arc::new(inspector(&directory.0));
-    let barrier = Arc::new(Barrier::new(2));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let mut release_senders = Vec::new();
     let paths = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
     let mut handles = Vec::new();
 
     for (task, own_file, other_file) in [("task-a", "a.txt", "b.txt"), ("task-b", "b.txt", "a.txt")]
     {
         let inspector = Arc::clone(&inspector);
-        let barrier = Arc::clone(&barrier);
+        let entered_tx = entered_tx.clone();
+        let (release_tx, release_rx) = mpsc::channel();
+        release_senders.push(release_tx);
         let paths = Arc::clone(&paths);
         let remote = fixture.remote.clone();
         handles.push(thread::spawn(move || {
@@ -719,7 +872,12 @@ fn concurrent_same_repository_inspections_have_independent_workspaces() {
                         .push(workspace.to_owned());
                     fs::write(workspace.join(own_file), own_file)
                         .unwrap_or_else(|_| panic!("workspace mutation"));
-                    barrier.wait();
+                    entered_tx
+                        .send(())
+                        .unwrap_or_else(|_| panic!("entered notification"));
+                    release_rx
+                        .recv_timeout(Duration::from_secs(30))
+                        .unwrap_or_else(|_| panic!("release notification"));
                     assert!(!workspace.join(other_file).exists());
                     Ok(())
                 },
@@ -731,11 +889,27 @@ fn concurrent_same_repository_inspections_have_independent_workspaces() {
             ));
         }));
     }
-    for handle in handles {
-        handle
-            .join()
-            .unwrap_or_else(|_| panic!("inspection thread"));
+    let mut all_entered = true;
+    for _ in 0..2 {
+        if entered_rx.recv_timeout(Duration::from_secs(30)).is_err() {
+            all_entered = false;
+            break;
+        }
     }
+    for release_tx in release_senders {
+        let _ = release_tx.send(());
+    }
+    let mut thread_panicked = false;
+    for handle in handles {
+        if handle.join().is_err() {
+            thread_panicked = true;
+        }
+    }
+    assert!(
+        all_entered,
+        "both repository inspections must enter runtime"
+    );
+    assert!(!thread_panicked, "inspection thread");
 
     let paths = paths.lock().unwrap_or_else(|_| panic!("path lock"));
     assert_eq!(paths.len(), 2);
@@ -1007,19 +1181,21 @@ fn replaced_workspace_root_is_rejected() {
 }
 
 #[test]
-fn authorized_inflight_run_survives_active_catalog_disable() {
+fn authorized_run_uses_immutable_authorization_snapshot() {
     let directory = test_directory();
     let fixture = fixture(&directory.0);
     let inspector = inspector(&directory.0);
     let authorization = authorization("repo-1", &fixture.remote);
-    let active_after_disable = Arc::new(Mutex::new(vec!["repo-1".to_owned()]));
-    let active_after_disable_in_runtime = Arc::clone(&active_after_disable);
+    // Actual catalog disable and historical citation acceptance are covered by
+    // the north-server repository integration test; this checks snapshot lifetime.
+    let active_repository_ids = Arc::new(Mutex::new(vec!["repo-1".to_owned()]));
+    let active_repository_ids_in_runtime = Arc::clone(&active_repository_ids);
     let result = inspector
         .inspect(
             &request("repo-1", "task-1", &fixture.remote),
             &authorization,
             move |_| {
-                active_after_disable_in_runtime
+                active_repository_ids_in_runtime
                     .lock()
                     .unwrap_or_else(|_| panic!("active catalog lock"))
                     .clear();
@@ -1028,10 +1204,102 @@ fn authorized_inflight_run_survives_active_catalog_disable() {
         )
         .unwrap_or_else(|_| panic!("authorized in-flight inspection"));
     assert_eq!(result.repository_id, "repo-1");
-    assert!(active_after_disable
+    assert!(active_repository_ids
         .lock()
         .unwrap_or_else(|_| panic!("active catalog lock"))
         .is_empty());
+}
+
+#[test]
+fn startup_cleanup_removes_stale_cache_staging_but_not_source_or_unrelated() {
+    let directory = test_directory();
+    let fixture = fixture(&directory.0);
+    let inspector = inspector(&directory.0);
+    let prepared = inspector
+        .prepare(
+            &request("repo-1", "task-1", &fixture.remote),
+            &authorization("repo-1", &fixture.remote),
+        )
+        .unwrap_or_else(|_| panic!("prepare cache"));
+    inspector
+        .dispose(prepared)
+        .unwrap_or_else(|_| panic!("dispose cache workspace"));
+    let namespace = inspector.repository_cache_path("repo-1");
+    let staging = namespace.join(".source-stale-1");
+    fs::create_dir_all(&staging).unwrap_or_else(|_| panic!("stale staging"));
+    fs::write(staging.join("partial.pack"), "partial")
+        .unwrap_or_else(|_| panic!("staging material"));
+    let unrelated = inspector.cache_root().join("unrelated");
+    fs::create_dir_all(unrelated.join(".source-not-a-namespace"))
+        .unwrap_or_else(|_| panic!("unrelated cache directory"));
+    let unrelated_file = inspector.cache_root().join("unrelated.txt");
+    fs::write(&unrelated_file, "retain").unwrap_or_else(|_| panic!("unrelated cache file"));
+    let root_staging = inspector.cache_root().join(".source-at-root");
+    fs::create_dir(&root_staging).unwrap_or_else(|_| panic!("root staging"));
+
+    let source_cache = namespace.join("source.git");
+    let report = inspector.startup_cleanup();
+    assert!(report.is_clean(), "cleanup report: {report:?}");
+    assert!(report.removed.iter().any(|path| path == &staging));
+    assert!(!staging.exists());
+    assert!(source_cache.is_dir(), "source.git must remain reusable");
+    assert!(unrelated.join(".source-not-a-namespace").is_dir());
+    assert!(unrelated_file.is_file());
+    assert!(root_staging.is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn cache_staging_symlink_cannot_escape_cache_root() {
+    use std::os::unix::fs::symlink;
+
+    let directory = test_directory();
+    let inspector = inspector(&directory.0);
+    let namespace = inspector.repository_cache_path("repo-1");
+    fs::create_dir_all(&namespace).unwrap_or_else(|_| panic!("cache namespace"));
+    let outside = directory.0.join("outside");
+    fs::create_dir_all(&outside).unwrap_or_else(|_| panic!("outside directory"));
+    let marker = outside.join("must-survive");
+    fs::write(&marker, "outside").unwrap_or_else(|_| panic!("outside marker"));
+    let staging = namespace.join(".source-escape");
+    symlink(&outside, &staging).unwrap_or_else(|_| panic!("staging symlink"));
+
+    let report = inspector.startup_cleanup();
+    assert!(!report.is_clean(), "symlink cleanup must be rejected");
+    assert!(report
+        .failures
+        .iter()
+        .any(|failure| failure.path == staging));
+    assert!(staging.is_symlink());
+    assert!(marker.is_file());
+}
+
+#[test]
+fn replaced_cache_root_is_rejected_without_deleting_staging() {
+    let directory = test_directory();
+    let inspector = inspector(&directory.0);
+    let root = inspector.cache_root().to_owned();
+    let original = root.with_file_name("cache-original");
+    let namespace_name = inspector
+        .repository_cache_path("repo-1")
+        .file_name()
+        .unwrap_or_else(|| panic!("cache namespace name"))
+        .to_owned();
+    fs::rename(&root, &original).unwrap_or_else(|_| panic!("move cache root"));
+    let original_staging = original.join(&namespace_name).join(".source-original");
+    fs::create_dir_all(&original_staging).unwrap_or_else(|_| panic!("original staging"));
+    fs::create_dir(&root).unwrap_or_else(|_| panic!("replace cache root"));
+    let replacement_staging = root.join(&namespace_name).join(".source-replacement");
+    fs::create_dir_all(&replacement_staging).unwrap_or_else(|_| panic!("replacement staging"));
+
+    let report = inspector.startup_cleanup();
+    assert!(!report.is_clean(), "replaced cache root must be rejected");
+    assert!(report.failures.iter().any(|failure| failure.path == root));
+    assert!(original_staging.is_dir());
+    assert!(replacement_staging.is_dir());
+
+    fs::remove_dir_all(&root).unwrap_or_else(|_| panic!("remove replacement cache root"));
+    fs::rename(original, root).unwrap_or_else(|_| panic!("restore cache root"));
 }
 
 #[test]
@@ -1046,12 +1314,39 @@ fn startup_cleanup_removes_orphans_but_not_cache() {
         )
         .unwrap_or_else(|_| panic!("prepare orphan"));
     let orphan = prepared.path().to_owned();
+    drop(prepared);
     let cache = inspector.repository_cache_path("repo-1");
     let report = inspector.startup_cleanup();
     assert!(report.is_clean());
     assert!(report.removed.iter().any(|path| path == &orphan));
     assert!(!orphan.exists());
     assert!(cache.join("source.git").is_dir());
+}
+
+#[test]
+fn startup_cleanup_refuses_active_inspection() {
+    let directory = test_directory();
+    let fixture = fixture(&directory.0);
+    let inspector = inspector(&directory.0);
+    let prepared = inspector
+        .prepare(
+            &request("repo-1", "task-1", &fixture.remote),
+            &authorization("repo-1", &fixture.remote),
+        )
+        .unwrap_or_else(|_| panic!("prepare active checkout"));
+    let path = prepared.path().to_owned();
+
+    let report = inspector.startup_cleanup();
+    assert!(!report.is_clean());
+    assert!(report
+        .failures
+        .iter()
+        .any(|failure| { failure.reason.contains("repository inspection is active") }));
+    assert!(path.is_dir());
+
+    inspector
+        .dispose(prepared)
+        .unwrap_or_else(|_| panic!("dispose active checkout"));
 }
 
 #[test]
