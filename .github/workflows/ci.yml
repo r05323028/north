@@ -43,7 +43,7 @@ jobs:
 
   rust-coverage:
     name: Rust coverage
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -71,7 +71,7 @@ jobs:
 
   web-coverage:
     name: Web coverage
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -99,7 +99,7 @@ jobs:
 
   daemon-integration:
     name: Daemon runtime integration
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     services:
       postgres:
         image: postgres:16
