@@ -7,16 +7,16 @@ use axum::{
 };
 use north_persistence::{
     canonical_payload_digest, AuthStore, DaemonRegistration, DaemonSetupClaim, DaemonSetupState,
-    EventReceiptOutcome, EventReceiptRequest, PersistenceError,
+    EventReceiptOutcome, EventReceiptRequest, PersistenceError, RepositoryRecord,
 };
 use north_protocol::{
     Command, CommandEnvelope, DaemonFrame, EventAck, EventAckStatus, EventEnvelope, Heartbeat,
     ProtocolErrorFrame, ReconcileSnapshot, RepositoryContext, ServerFrame, SessionReconcileState,
-    Welcome, PROTOCOL_VERSION, SCHEMA_VERSION,
+    SessionStart, Welcome, PROTOCOL_VERSION, SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -785,12 +785,14 @@ impl DaemonRuntime {
         }
         let command = self.assemble_session_command(request.command).await?;
         let repository_ids = match &command {
-            Command::SessionStart(start) => start
-                .repositories
-                .iter()
-                .map(|repository| repository.repository_id.clone())
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
+            Command::SessionStart(start) => Some(
+                start
+                    .repositories
+                    .iter()
+                    .map(|repository| repository.repository_id.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
         };
         let envelope_command_id = command_id.clone();
         let envelope_session_id = session_id.clone();
@@ -806,7 +808,7 @@ impl DaemonRuntime {
                 &command_id,
                 required_capabilities,
                 requirement_id.as_deref(),
-                Some(&repository_ids),
+                repository_ids.as_deref(),
                 move |_daemon_id, server_command_seq| {
                     ServerFrame::Command(CommandEnvelope {
                         command_id: envelope_command_id.clone(),
@@ -848,7 +850,7 @@ impl DaemonRuntime {
         &self,
         command: Command,
     ) -> Result<Command, DaemonDispatchError> {
-        let Command::SessionStart(mut start) = command else {
+        let Command::SessionStart(start) = command else {
             return Ok(command);
         };
         let repositories = self
@@ -857,8 +859,38 @@ impl DaemonRuntime {
             .active_repositories()
             .await
             .map_err(|_| DaemonDispatchError::Internal)?;
+        Self::assemble_session_repositories(start, repositories)
+    }
+
+    fn assemble_session_repositories(
+        mut start: SessionStart,
+        repositories: Vec<RepositoryRecord>,
+    ) -> Result<Command, DaemonDispatchError> {
+        let requested_ids = start
+            .repositories
+            .iter()
+            .map(|repository| repository.repository_id.as_str())
+            .collect::<Vec<_>>();
+        let mut unique_ids = HashSet::with_capacity(requested_ids.len());
+        if requested_ids
+            .iter()
+            .any(|repository_id| !unique_ids.insert(*repository_id))
+            || requested_ids.iter().any(|repository_id| {
+                !repositories
+                    .iter()
+                    .any(|repository| repository.id == *repository_id)
+            })
+        {
+            return Err(DaemonDispatchError::InvalidCommand);
+        }
         start.repositories = repositories
             .into_iter()
+            .filter(|repository| {
+                requested_ids.is_empty()
+                    || requested_ids
+                        .iter()
+                        .any(|repository_id| repository.id == *repository_id)
+            })
             .map(|repository| RepositoryContext {
                 repository_id: repository.id,
                 name: repository.name,
@@ -1119,6 +1151,97 @@ fn server_time() -> String {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[test]
+    fn session_repository_selection_validates_and_filters_ids() {
+        let make_start = |repositories| SessionStart {
+            requirement: north_protocol::RequirementContext {
+                id: "requirement".into(),
+                revision: 1,
+                title: "Title".into(),
+                description: "Description".into(),
+                summary: "Summary".into(),
+                acceptance_criteria: vec![],
+                assumptions: vec![],
+                open_questions: vec![],
+            },
+            conversation: north_protocol::ConversationContext { excerpt: vec![] },
+            repositories,
+        };
+        let repository = |id: &str, name: &str| RepositoryRecord {
+            id: id.into(),
+            name: name.into(),
+            name_normalized: name.to_lowercase(),
+            url: format!("https://example.test/{id}.git"),
+            description: format!("{name} description"),
+            created_at: "created".into(),
+            updated_at: "updated".into(),
+            disabled_at: None,
+        };
+        let first = repository("repo-1", "First");
+        let second = repository("repo-2", "Second");
+
+        let command = DaemonRuntime::assemble_session_repositories(
+            make_start(vec![RepositoryContext {
+                repository_id: "repo-1".into(),
+                name: "stale name".into(),
+                url: "https://stale.example/repo.git".into(),
+                description: "stale description".into(),
+            }]),
+            vec![first.clone(), second.clone()],
+        )
+        .expect("known repository selection");
+        let Command::SessionStart(start) = command else {
+            panic!("expected session start");
+        };
+        assert_eq!(start.repositories.len(), 1);
+        assert_eq!(start.repositories[0].repository_id, "repo-1");
+        assert_eq!(start.repositories[0].name, "First");
+        assert_eq!(start.repositories[0].url, "https://example.test/repo-1.git");
+
+        let command = DaemonRuntime::assemble_session_repositories(
+            make_start(vec![]),
+            vec![first.clone(), second.clone()],
+        )
+        .expect("empty selection means all active repositories");
+        let Command::SessionStart(start) = command else {
+            panic!("expected session start");
+        };
+        assert_eq!(start.repositories.len(), 2);
+
+        assert!(matches!(
+            DaemonRuntime::assemble_session_repositories(
+                make_start(vec![
+                    RepositoryContext {
+                        repository_id: "repo-1".into(),
+                        name: "First".into(),
+                        url: "https://example.test/repo-1.git".into(),
+                        description: "First description".into(),
+                    },
+                    RepositoryContext {
+                        repository_id: "repo-1".into(),
+                        name: "First".into(),
+                        url: "https://example.test/repo-1.git".into(),
+                        description: "First description".into(),
+                    },
+                ]),
+                vec![first.clone(), second.clone()],
+            ),
+            Err(DaemonDispatchError::InvalidCommand)
+        ));
+        assert!(matches!(
+            DaemonRuntime::assemble_session_repositories(
+                make_start(vec![RepositoryContext {
+                    repository_id: "missing".into(),
+                    name: "Missing".into(),
+                    url: "https://example.test/missing.git".into(),
+                    description: "Missing description".into(),
+                }]),
+                vec![first, second],
+            ),
+            Err(DaemonDispatchError::InvalidCommand)
+        ));
+    }
 
     #[test]
     fn approval_content_negotiation_prefers_explicit_json() {

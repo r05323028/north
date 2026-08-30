@@ -10,8 +10,9 @@ use north_persistence::{
 };
 use north_protocol::{
     encode_daemon_frame, Command, CommandAck, DaemonFrame, Event, EventAckStatus, EventEnvelope,
-    Heartbeat, MessageSend, ProtocolErrorFrame, ReadinessVerdictWire, RequirementAssessed,
-    RequirementContext, ReviewedRepositoryWire, ServerFrame, SessionStart, SCHEMA_VERSION,
+    Heartbeat, MessageSend, ProtocolErrorFrame, ReadinessVerdictWire, RepositoryContext,
+    RequirementAssessed, RequirementContext, ReviewedRepositoryWire, ServerFrame, SessionStart,
+    SCHEMA_VERSION,
 };
 use north_server::{
     auth_router, build_app, AuthState, CommandRequest, DaemonResponse, LogCodeDelivery,
@@ -587,7 +588,12 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
                 open_questions: assessment_requirement.open_questions.clone(),
             },
             conversation: north_protocol::ConversationContext { excerpt: vec![] },
-            repositories: vec![],
+            repositories: vec![RepositoryContext {
+                repository_id: "00000000-0000-4000-8000-000000000001".into(),
+                name: "requested metadata is replaced".into(),
+                url: "https://example.test/north.git".into(),
+                description: "requested metadata is replaced".into(),
+            }],
         }),
     };
     runtime
@@ -597,10 +603,18 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         )
         .await
         .expect("bind assessment session");
-    assert!(matches!(
-        next_server_frame(&mut socket).await,
-        ServerFrame::Command(_)
-    ));
+    let ServerFrame::Command(envelope) = next_server_frame(&mut socket).await else {
+        panic!("expected assembled session start");
+    };
+    let Command::SessionStart(start) = envelope.command else {
+        panic!("expected session start command");
+    };
+    assert_eq!(start.repositories.len(), 1);
+    assert_eq!(
+        start.repositories[0].repository_id,
+        "00000000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(start.repositories[0].url, "https://example.test/north.git");
     assert_eq!(
         store
             .session_requirement(&assessment_session_id)
@@ -608,6 +622,41 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             .expect("assessment session binding"),
         Some(assessment_requirement_id.clone())
     );
+    let follow_up_command_id = format!("assessment-follow-up-{}", claimed.daemon_id);
+    let follow_up = CommandRequest {
+        command_id: follow_up_command_id.clone(),
+        session_id: assessment_session_id.clone(),
+        command: Command::MessageSend(MessageSend {
+            message_id: "assessment-follow-up-message".into(),
+            content: "repository binding remains stable".into(),
+        }),
+    };
+    runtime
+        .persist_and_dispatch_command(follow_up, std::slice::from_ref(&required_capability))
+        .await
+        .expect("dispatch follow-up without retargeting repository context");
+    let ServerFrame::Command(follow_up_envelope) = next_server_frame(&mut socket).await else {
+        panic!("expected follow-up command");
+    };
+    assert_eq!(follow_up_envelope.command_id, follow_up_command_id);
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&DaemonFrame::CommandAck(CommandAck {
+                command_id: follow_up_envelope.command_id,
+                session_id: follow_up_envelope.session_id,
+                server_command_seq: follow_up_envelope.server_command_seq,
+                schema_version: SCHEMA_VERSION,
+            }))
+            .expect("encode follow-up ACK")
+            .into(),
+        ))
+        .await
+        .expect("send follow-up ACK");
+
+    store
+        .disable_repository("00000000-0000-4000-8000-000000000001")
+        .await
+        .expect("disable in-flight repository");
 
     let assessment_event_id = format!("assessment-event-{}", claimed.daemon_id);
     let assessment_event = DaemonFrame::Event(EventEnvelope {
@@ -624,7 +673,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             assumptions: vec!["Daemon owns session".into()],
             repositories_reviewed: vec![ReviewedRepositoryWire {
                 repository_id: "00000000-0000-4000-8000-000000000001".into(),
-                commit_sha: "abc123".into(),
+                commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
             }],
         }),
     });
@@ -1217,6 +1266,11 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .execute(&pool)
         .await
         .expect("cleanup event tombstones");
+    sqlx::query("DELETE FROM server_message_command_map WHERE session_id = $1")
+        .bind(format!("assessment-session-{}", claimed.daemon_id))
+        .execute(&pool)
+        .await
+        .expect("cleanup message command map");
     sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(format!("assessment-session-{}", claimed.daemon_id))
         .execute(&pool)

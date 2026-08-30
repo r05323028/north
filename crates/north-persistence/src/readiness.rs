@@ -206,7 +206,7 @@ impl AuthStore {
         if assessment.requirement_revision == 0
             || assessment.repositories_reviewed.iter().any(|repository| {
                 repository.repository_id.trim().is_empty()
-                    || repository.commit_sha.trim().is_empty()
+                    || !complete_commit_sha(&repository.commit_sha)
             })
             || assessment
                 .blockers
@@ -632,6 +632,15 @@ struct EventCursorRow {
     event_ack_sparse: Vec<i64>,
 }
 
+// Git currently supports SHA-1 and SHA-256 object formats. Accept both
+// canonical widths; never require one fixed width for repository evidence.
+const GIT_OBJECT_ID_HEX_WIDTHS: &[usize] = &[20 * 2, 32 * 2];
+
+fn complete_commit_sha(value: &str) -> bool {
+    GIT_OBJECT_ID_HEX_WIDTHS.contains(&value.len())
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 async fn repository_citations_exist(
     transaction: &mut Transaction<'_, Postgres>,
     session_repository_ids: &[String],
@@ -790,7 +799,7 @@ impl AssessmentRow {
                 let commit_sha = value
                     .get("commit_sha")
                     .and_then(serde_json::Value::as_str)
-                    .filter(|value| !value.is_empty())
+                    .filter(|value| complete_commit_sha(value))
                     .ok_or(ReadinessError::InvalidEvidence)?
                     .to_owned();
                 Ok(ReviewedRepository {
@@ -911,6 +920,44 @@ fn mark_ready_reason(error: &MarkReadyError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_commit_sha_accepts_supported_object_widths() {
+        assert!(complete_commit_sha(&"a".repeat(40)));
+        assert!(complete_commit_sha(&"b".repeat(64)));
+        assert!(!complete_commit_sha("abc123"));
+        assert!(!complete_commit_sha(&format!("{} ", "a".repeat(40))));
+        assert!(!complete_commit_sha(&"g".repeat(40)));
+    }
+
+    #[test]
+    fn persisted_assessment_rejects_incomplete_repository_sha() {
+        let row = AssessmentRow {
+            id: "assessment".into(),
+            event_id: "event".into(),
+            session_id: "session".into(),
+            daemon_event_seq: 1,
+            event_requirement_id: "requirement".into(),
+            requirement_id: Some("requirement".into()),
+            requirement_revision: 1,
+            verdict: "ready".into(),
+            blockers: Vec::new(),
+            assumptions: Vec::new(),
+            repositories_reviewed: serde_json::json!([{
+                "repository_id": "repo",
+                "commit_sha": "abc123"
+            }]),
+            outcome: "accepted".into(),
+            accepted_state_version: Some(1),
+            rejection_reason: None,
+            assessed_at_ms: 1,
+            created_at: "now".into(),
+        };
+        assert!(matches!(
+            row.into_record(),
+            Err(ReadinessError::InvalidEvidence)
+        ));
+    }
 
     #[test]
     fn persisted_assessment_values_are_stable() {

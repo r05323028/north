@@ -371,7 +371,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
         assumptions: vec!["One account".into()],
         repositories_reviewed: vec![ReviewedRepositoryWire {
             repository_id: "00000000-0000-4000-8000-000000000001".into(),
-            commit_sha: "abc123".into(),
+            commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
         }],
     };
     let store = AuthStore::new(pool.clone());
@@ -420,7 +420,10 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
         packet["repositories_reviewed"][0]["repository_id"],
         "00000000-0000-4000-8000-000000000001"
     );
-    assert_eq!(packet["repositories_reviewed"][0]["commit_sha"], "abc123");
+    assert_eq!(
+        packet["repositories_reviewed"][0]["commit_sha"],
+        "abcdef0123456789abcdef0123456789abcdef01"
+    );
 
     let duplicate = process_requirement_assessed(
         &store,

@@ -1,10 +1,13 @@
 use north_daemon::{
     coordination::DaemonCoordinator,
     journal::{DispatchOutcome, Journal, RecoveryOutcome, RuntimeExecutor},
+    repository_inspection::RepositoryInspector,
     transport::{ConnectionConfig, ConnectionControl, ConnectionEvent, ConnectionSupervisor},
 };
 use north_protocol::{DaemonFrame, Heartbeat, Hello};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     env,
     error::Error,
@@ -16,6 +19,9 @@ use std::{
     process::Command,
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+static START_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
@@ -77,7 +83,13 @@ struct LocalState {
 /// Placeholder until `introduce-agent-requirement-clarification` supplies
 /// North's production agent runtime adapter. Durable coordination is real, but
 /// executable commands currently produce a not-configured/unknown fact.
-struct LocalRuntime;
+///
+/// Repository inspection is initialized as a future adapter-injection seam; it
+/// is intentionally not invoked by this change's production dispatch path.
+struct LocalRuntime {
+    /// Used by the downstream clarification runtime, not by `dispatch` here.
+    _repository_inspection: RepositoryInspector,
+}
 
 impl RuntimeExecutor for LocalRuntime {
     fn dispatch(
@@ -245,9 +257,29 @@ async fn start(args: &[String]) -> Result<(), CliError> {
     let journal_path = option(args, "--journal-file")
         .map(PathBuf::from)
         .unwrap_or_else(|| state_path.with_extension("journal.json"));
+    let cache_root = option(args, "--repository-cache-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_daemon_directory(&state_path, "repository-cache"));
+    let workspace_root = option(args, "--repository-workspace-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_daemon_directory(&state_path, "disposable-workspaces"));
+    let repository_inspector = RepositoryInspector::new(cache_root, workspace_root)
+        .map_err(|error| CliError(format!("initialize repository inspection: {error}")))?;
+    for failure in repository_inspector.startup_cleanup().failures {
+        eprintln!(
+            "north-daemon: startup cleanup failed for {}: {}",
+            failure.path.display(),
+            failure.reason
+        );
+    }
     let journal = Journal::open(&journal_path, daemon_id.clone())
         .map_err(|error| CliError(format!("open {}: {error}", journal_path.display())))?;
-    let coordinator = DaemonCoordinator::new(journal, LocalRuntime);
+    let coordinator = DaemonCoordinator::new(
+        journal,
+        LocalRuntime {
+            _repository_inspection: repository_inspector,
+        },
+    );
     let recovered = coordinator
         .recover()
         .map_err(|error| CliError(format!("recover daemon journal: {error}")))?;
@@ -437,6 +469,14 @@ fn websocket_url(server_url: &str) -> Result<String, CliError> {
     ))
 }
 
+fn default_daemon_directory(state_path: &Path, name: &str) -> PathBuf {
+    state_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(name)
+}
+
 fn default_state_path() -> PathBuf {
     env::var_os("HOME")
         .map(PathBuf::from)
@@ -454,9 +494,13 @@ fn required_option(args: &[String], name: &str) -> Result<String, CliError> {
     option(args, name).ok_or_else(|| CliError(format!("missing {name}")))
 }
 
+const SETUP_USAGE: &str =
+    "north-daemon setup --server-url HTTPS_URL [--label LABEL] [--state-file PATH]";
+const START_USAGE: &str = "north-daemon start [--state-file PATH] [--journal-file PATH] [--repository-cache-dir PATH] [--repository-workspace-dir PATH]";
+
 fn print_usage() {
-    println!("north-daemon setup --server-url HTTPS_URL [--label LABEL] [--state-file PATH]");
-    println!("north-daemon start [--state-file PATH] [--journal-file PATH]");
+    println!("{SETUP_USAGE}");
+    println!("{START_USAGE}");
 }
 
 #[cfg(test)]
@@ -557,6 +601,103 @@ mod tests {
         );
         assert!(websocket_url("http://127.0.0.1:8080").is_err());
         assert!(websocket_url("north.example").is_err());
+    }
+
+    #[test]
+    fn default_directories_follow_state_file_parent() {
+        assert_eq!(
+            default_daemon_directory(Path::new("/tmp/north/state.json"), "cache"),
+            PathBuf::from("/tmp/north/cache")
+        );
+        assert_eq!(
+            default_daemon_directory(Path::new("state.json"), "cache"),
+            PathBuf::from("./cache")
+        );
+    }
+
+    #[test]
+    fn usage_lists_repository_directory_options() {
+        assert!(START_USAGE.contains("--repository-cache-dir"));
+        assert!(START_USAGE.contains("--repository-workspace-dir"));
+        print_usage();
+    }
+
+    #[tokio::test]
+    async fn start_initializes_repository_roots_before_opening_journal() {
+        let root = env::temp_dir().join(format!(
+            "north-daemon-start-{}-{}",
+            std::process::id(),
+            START_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).expect("create startup test root");
+        let state_path = root.join("state.json");
+        write_state(
+            &state_path,
+            &LocalState {
+                server_url: "https://example.test".into(),
+                daemon_id: "daemon-1".into(),
+                credential: "secret".into(),
+                capabilities: vec!["agent".into()],
+            },
+        )
+        .expect("write startup state");
+        let journal_path = root.join("journal-directory");
+        fs::create_dir_all(&journal_path).expect("create invalid journal path");
+        let explicit_cache = root.join("explicit-cache");
+        let explicit_workspace = root.join("explicit-workspace");
+        let unsafe_staging = explicit_cache.join("id-7265706f/.source-unsafe");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let namespace = explicit_cache.join("id-7265706f");
+            fs::create_dir_all(&namespace).expect("create cleanup namespace");
+            let outside = root.join("outside");
+            fs::create_dir_all(&outside).expect("create cleanup target");
+            let outside_marker = outside.join("must-survive");
+            fs::write(&outside_marker, "outside").expect("create cleanup marker");
+            symlink(&outside, &unsafe_staging).expect("create cleanup symlink");
+        }
+
+        let explicit_args = vec![
+            "start".into(),
+            "--state-file".into(),
+            state_path.to_string_lossy().into_owned(),
+            "--journal-file".into(),
+            journal_path.to_string_lossy().into_owned(),
+            "--repository-cache-dir".into(),
+            explicit_cache.to_string_lossy().into_owned(),
+            "--repository-workspace-dir".into(),
+            explicit_workspace.to_string_lossy().into_owned(),
+        ];
+        let explicit_error = start(&explicit_args)
+            .await
+            .expect_err("journal path is a directory");
+        assert!(matches!(explicit_error, CliError(message) if message.starts_with("open ")));
+        assert!(explicit_cache.is_dir());
+        assert!(explicit_workspace.is_dir());
+        #[cfg(unix)]
+        {
+            assert!(unsafe_staging.is_symlink());
+            assert!(root.join("outside/must-survive").is_file());
+        }
+
+        let default_args = vec![
+            "start".into(),
+            "--state-file".into(),
+            state_path.to_string_lossy().into_owned(),
+            "--journal-file".into(),
+            journal_path.to_string_lossy().into_owned(),
+        ];
+        let default_error = start(&default_args)
+            .await
+            .expect_err("journal path is a directory");
+        assert!(matches!(default_error, CliError(message) if message.starts_with("open ")));
+        assert!(root.join("repository-cache").is_dir());
+        assert!(root.join("disposable-workspaces").is_dir());
+
+        fs::remove_dir_all(root).expect("remove startup test root");
     }
 
     #[cfg(unix)]

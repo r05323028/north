@@ -66,8 +66,7 @@ host-Git-valid username is a secret. These examples are invalid:
 ```text
 https://user:password@example.com/repo.git
 https://token@example.com/org/repo.git
-deploy@git.internal:repo.git
-ssh://source@git.internal/repo.git
+ssh://git:password@git.internal/repo.git
 ```
 
 Normal SSH identity syntax remains valid:
@@ -82,6 +81,15 @@ passwords, or credential-helper contents enter server persistence or protocol
 DTOs. The daemon uses the host's normal Git environment: system `git`, SSH
 config/agent, credential helpers, authenticated `gh`, and file permissions.
 URL shape validation does not test access; inspection owns host-Git errors.
+The repository-inspection integration fixture uses local bare Git repositories to
+prove cache, revision, isolation, and cleanup behavior. Its Unix tests use a
+temporary Git home, local HTTP challenge, and fake `core.sshCommand` to prove
+credential-helper and SSH-config handoff without operator credentials; they do
+not simulate an operator's SSH agent. Production Git processes inherit those host
+access mechanisms while removing Git config/path-override settings that could
+redirect a prepared checkout and restoring only host authentication settings. Server-assembled repository
+contexts remain the only production source of repository locations; local paths
+in tests exercise the same host-Git process without widening server URL policy.
 
 ## Historical identity
 
@@ -103,7 +111,7 @@ run; new inspection selection still requires enabled state.
 existence, and lifecycle. Readiness owns whether evidence is acceptable for a
 Requirement. `introduce-local-repository-inspection` owns source inspection and
 exact commit-SHA production. `north-protocol` carries `repository_id` and
-`commit_sha` as typed facts and validates only structurally non-empty values; it
+`commit_sha` as typed facts and validates complete Git SHA-1/SHA-256 object IDs; it
 never accesses repository persistence.
 
 A new inspection may select only an enabled row. If `session.start` supplied R
@@ -132,13 +140,28 @@ daemon repository cache (per repository, never runtime working tree)
 The cache is reusable source material. Each clarification execution receives a
 unique mutable checkout scoped by session/task and repository ID. A plain local
 copy/clone-from-cache is sufficient; North 0.1.0 does not require Git
-worktrees. Concurrent sessions inspecting one repository never share a mutable
+worktrees. Cache and disposable roots are daemon-owned mode-0700 namespaces;
+path checks are process-level protection, not a kernel sandbox. Concurrent sessions inspecting one repository never share a mutable
 directory, and runtime changes cannot contaminate the cache or another session.
 
 After every task, the daemon checks the checkout for unexpected dirty changes.
 A dirty result is an invariant violation: report it and discard the checkout
 before reuse. This is process-level protection, not kernel or sandbox
 isolation. North does not claim OS-level read-only enforcement in 0.1.0.
+
+Mirror clone preparation uses a direct `.source-*` staging child inside each
+encoded repository cache namespace. Failed clones clean this staging immediately
+when identity and ownership checks succeed. Startup performs separate best-effort
+staging recovery with cache-root identity, direct-parent, canonical-path, and
+filesystem-identity checks; symlinked or redirected paths remain in place and
+produce cleanup failures. This pass never scans or deletes `source.git`,
+workspaces, or unrelated cache-root entries.
+
+The daemon binary initializes repository-inspection infrastructure as a future
+runtime-adapter seam. `LocalRuntime::dispatch` remains an explicit
+`runtime_adapter_not_configured` placeholder; downstream clarification owns
+invocation and agent execution. No inspection call, provider SDK behavior, or
+new protocol surface belongs here.
 
 Out of scope for configured-repositories: clone/fetch execution, push, PR
 creation, branch-selection UI, arbitrary sync, source inspection, and

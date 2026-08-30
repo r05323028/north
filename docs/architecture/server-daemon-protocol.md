@@ -229,7 +229,7 @@ token. Later human Accept, Reject, or Request Changes uses `assessment_id`,
 `expected_state_version`, and the exact current Ready generation. The daemon
 never writes Requirement state directly. Repository citation existence and
 session/run provenance are checked by server readiness persistence; the wire
-layer only checks structurally non-empty `repository_id` and `commit_sha`.
+layer also rejects malformed or incomplete Git SHA-1/SHA-256 `commit_sha` values.
 
 ## Sequence and reconnect rules
 

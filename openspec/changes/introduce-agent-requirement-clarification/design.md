@@ -1,41 +1,324 @@
 # Design
 
-## Context
+## Existing implementation consumed
 
-One concrete agent SDK now; more later. Boundary lives between session
-orchestration and runtime invocation. Session ownership, durable command
-semantics, and server retry authority are canonical in
-`harden-distributed-system-architecture`.
+This change completes behavior around existing seams instead of redefining
+ them:
 
-## Decisions
+- `north-protocol` is the sole wire-type catalog and already validates the
+  typed command/event families and envelope identities.
+- `north-server::assemble_session_start` converts server snapshots into the
+  complete requirement/conversation/repository context.
+- `AuthStore::start_session_with_command_for_requirement_and_repositories`
+  selects/pins a daemon, validates active repository IDs, persists the complete
+  command envelope, and retains the run repository set.
+- `DaemonRuntime::persist_and_dispatch_command` dispatches the persisted
+  representation only through the pinned daemon.
+- `AuthStore::post_requester_message` commits requester history before it
+  returns a message identity.
+- `AuthStore::record_readiness_assessment_with_event_digest` owns assessment
+  identity/sequence checks, session binding, repository identity/run checks,
+  revision gates, immutable evidence, and the atomic Requirement promotion.
 
-- `north-server` owns sessions, `session.daemon_id`, command outbox rows,
-  execution state, and all Requirement/business effects; `north-daemon`
-  executes and reports facts.
-- Runtime trait inside daemon: `prepare(context) → run(session) → stream`
-  events. One impl initially; no plugin registry.
-- Context assembly is server-side and explicit: `session.start` carries a
-  transport `RequirementContext` with id, revision, title, description, summary,
-  acceptance criteria, assumptions, and open questions; a bounded/relevant
-  `ConversationContext` excerpt; and enabled `RepositoryContext` metadata
-  (repository id, name, URL, description). The runtime receives no credentials,
-  checkout paths, database handles, or domain types. The runtime receives a
-  session/task-specific disposable checkout only when inspection is needed.
-- The server selects an eligible daemon before `session.start`; all subsequent
-  commands retain command id/sequence on retry and all events retain event
-  id/sequence on replay. A different daemon cannot resume the session.
-- Assessment production ends with `requirement.assessed`; server deduplicates,
-  validates the event's revision through the domain, persists evidence and any
-  valid transition atomically, then acknowledges it. A stale/invalid fact gets
-  a durable rejection ACK without a Requirement transition.
-- A daemon crash or socket reconnect does not reset server attempt count. The
-  daemon reports local recoverability; only server policy sends `session.resume`
-  or declares execution failure.
+The current server deliberately durably rejects generic runtime events with
+`event_handler_not_implemented`. This change replaces that downstream handling
+for the clarification projections; it does not change the wire contract.
 
-## Risks / Trade-offs
+## Ownership matrix
 
-- **Runtime outcome is unknown after a crash** → command id is the runtime
-  operation id; reattach when possible and do not duplicate side-effecting
-  `message.send`.
-- **Repository inspection is not a sandbox** → dispose dirty checkouts and
-  report violations; keep the process-level limitation explicit.
+| Concern | Owner in this slice |
+| --- | --- |
+| Frame names, payloads, envelope IDs/sequences, ACK/reconciliation | `north-protocol` and existing delivery coordination |
+| Session selection/pinning and command outbox | `north-server`/`north-persistence` |
+| Requirement lifecycle, revision, state version, readiness gates | `north-domain` through server persistence |
+| Repository selection and run-bound inspection | server context + `introduce-local-repository-inspection` |
+| Agent SDK/runtime invocation | one internal `north-daemon` adapter |
+| Agent messages/activity/session projections and HTTP reads | `north-server`/`north-persistence` |
+| Base browser SSE endpoint and `requirement.changed` | `introduce-requirement-board` |
+| Clarification SSE categories and post-commit emission | `north-server` in this change, extending Board's `/events` |
+| Clarification HTTP mutations | `north-server`/`north-persistence` |
+| Browser rendering/refetch | board and conversation UI changes |
+| Retry budget, attempts, server backoff, final execution failure | later `introduce-runtime-retry-and-failure-state` |
+
+## Authenticated clarification mutations
+
+These are explicit authenticated application operations, not a generic command
+API. The existing conversation persistence boundary remains independent from
+runtime availability. All routes use the existing Requirement/conversation
+authorization rules.
+
+- `POST /requirements/{requirement_id}/conversation/messages` accepts
+  `{ "body": string }`, commits one requester message, and returns `201 Created`
+  with the persisted message and `message_id`. It never transitions the
+  Requirement, creates a run, selects a daemon, or creates `session.start` or
+  `message.send`. Runtime availability cannot prevent this history write.
+- `POST /requirements/{requirement_id}/clarification/start` accepts
+  `{ "message_id": string, "expected_state_version": u64 }`. It validates that
+  the persisted requester message belongs to this Requirement's conversation
+  and is eligible as the run's start message. A daemon-backed start returns
+  `202 Accepted` with the canonical Requirement and public run projection. A
+  valid start with no eligible daemon returns `503 Service Unavailable` with
+  error code `clarification_unavailable`, the canonical Requirement, and the
+  unassigned `status=unavailable` run projection. A stale state version returns
+  the canonical `409` conflict before any run/command mutation; the message
+  remains persisted.
+- `POST /requirements/{requirement_id}/clarification/messages/{message_id}/dispatch`
+  has no message body. It validates the persisted requester message, its
+  Requirement/conversation binding, ownership of the current assigned active
+  run, and that it is not the recorded start message. It returns `202 Accepted`
+  after creating or reusing exactly one durable `message.send` mapping. A pinned
+  offline daemon keeps that command durable and reports operational
+  unavailability; an unassigned/no-owner run returns
+  `503 clarification_unavailable` without creating a command. It never creates
+  another conversation message.
+- `POST /requirements/{requirement_id}/clarification/cancel` has no message
+  body and targets the latest run. It returns `202 Accepted` with the public
+  run projection after persisting `cancel_requested`. If the run is assigned,
+  the server also creates or reuses exactly one durable `session.cancel`
+  command for its pinned daemon. If the run is unassigned, cancellation is
+  server-owned run state only: no `session.cancel` command and no command
+  identity are created. Repeated calls return the persisted cancellation state.
+  No run returns `404 clarification_not_started`.
+
+Start and dispatch responses never expose daemon credentials, checkout paths,
+or unnecessary daemon details. Protocol replay uses the original message, run,
+and command identities; clients do not call a generic command endpoint.
+
+## Sequential clarification runs
+
+Each clarification run is a server-owned record with one immutable Requirement
+snapshot, one recorded `start_message_id`, and one immutable daemon pin after
+assignment. Its conceptual fields are:
+
+```text
+id, requirement_id, start_message_id
+ daemon_id: nullable until assignment
+ status: starting | running | completed | unavailable
+ cancel_requested: boolean
+ created_at, updated_at, last_activity_at
+```
+
+A valid `clarification/start` resolves the latest run before daemon selection.
+It reuses the latest run only when all of these are true: `daemon_id = null`, no
+`session.start` command was successfully created or dispatched, the run has not
+been cancelled or otherwise closed, the request is the same logical start
+attempt, and the incoming `message_id` equals its recorded `start_message_id`.
+For that reusable unavailable attempt, the server retries daemon selection
+without creating another run. In this slice, the same logical start attempt is
+identified by the recorded `start_message_id` and an unclosed run; a new
+persisted message is a new attempt.
+
+If the latest run is assigned and active (`starting` or `running`, including an
+assigned run that is operationally unavailable because its daemon disconnected),
+a different start message returns the canonical conflict; later requester
+messages use the explicit dispatch operation. If the latest run is completed,
+cancelled, or otherwise explicitly terminal/inapplicable for start reuse, a new
+persisted eligible start message creates a new run. A repeated request for the
+old terminal start message does not reactivate or retarget that run.
+
+A newly created run receives a new run/session identity, current Requirement
+snapshot/revision, start message, repository set, daemon pin when selected, and
+independent command/event sequence. The prior run remains immutable historical
+data. This is a logical run contract, not a prescribed new table. Existing
+`execution_sessions`/delivery storage may represent it while retaining current
+durable delivery invariants.
+
+The initial requester-message flow is two explicit HTTP calls:
+
+1. `POST /requirements/{requirement_id}/conversation/messages` durably commits
+   the requester message and returns its `message_id`. This call has no runtime
+   side effect.
+2. `POST /requirements/{requirement_id}/clarification/start` validates that
+   message ID and `expected_state_version` before any run or command mutation.
+   If the Requirement is Draft, it applies the canonical `begin_discussion`
+   operation; a stale token returns `409` and leaves the persisted message and
+   Requirement unchanged. It then resolves the latest run using the sequential
+   reuse/new-run rules above before daemon selection. If the latest run is a
+   terminal/inapplicable run and this is a new eligible start message, the server
+   creates a new run. If a reusable unassigned attempt is present, it reuses
+   that run. If a daemon is selected, the server
+   assembles `session.start` from the immutable Requirement snapshot, bounded
+   conversation context including the persisted start message, and enabled
+   repository metadata, then atomically persists the daemon pin, run context,
+   and complete command before dispatch. If no daemon is eligible, it retains
+   the run with `daemon_id = null`, `status=unavailable`, and no
+   `session.start`, returning `503 clarification_unavailable` with that run
+   projection.
+
+The start message is already present in `session.start` context and SHALL NOT
+also create `message.send`. A repeated start with the same recorded
+`start_message_id` reuses the same reusable unassigned run and, after assignment,
+returns the same run/command identities. A different message conflicts while a
+reusable unassigned attempt or assigned active run exists. Once the latest run
+is completed, cancelled, or otherwise explicitly terminal/inapplicable, a new
+persisted eligible message starts a new sequential run instead of retargeting
+the prior run.
+
+For a later requester message, the UI first calls
+`POST /requirements/{requirement_id}/conversation/messages` and retains the
+returned `message_id`, then calls
+`POST /requirements/{requirement_id}/clarification/messages/{message_id}/dispatch`.
+The server verifies that the message and current run belong to the Requirement
+and caller's authorized conversation/run context. It creates or reuses one
+durable `message.send` command containing that identity and content, then
+dispatches/replays it through existing outbox, daemon journal, ACK, sequence,
+and reconciliation semantics. Repeated calls reuse the message-to-command
+mapping; duplicate delivery cannot submit one logical requester message twice.
+No dispatch call creates another conversation message.
+
+If no assigned run can receive the command, the message remains canonical and
+the operation/read model reports operational unavailability. A pinned owner is
+not replaced by another daemon. A message intended to start a run must use the
+explicit start operation; clients do not classify it from transcript contents.
+
+## Runtime boundary
+
+The existing durable command journal remains outside the runtime adapter and
+continues to pass `runtime_operation_id = command_id` into its narrow seam.
+Behind that seam, define one daemon-private North-facing runtime interface:
+
+- input: stable operation/session identity, server-assembled North-neutral
+  requirement/conversation/repository context, cancellation handle, and
+  session/task checkout handles supplied by local inspection when needed;
+- output: North-neutral facts for agent message, coarse activity, readiness
+  assessment, completion, or failure; and
+- control: one explicit cancellation operation and local recovery/reattachment
+  mechanics only.
+
+The interface must not mirror a provider SDK's callback graph, expose provider
+objects, or return raw tool/chain-of-thought records. One concrete adapter is
+implemented first. SDK dependencies remain in `north-daemon`; no SDK type
+crosses into `north-server`, `north-domain`, or `north-protocol`.
+
+## Event projection and ordering
+
+The server retains existing delivery identity/sequence validation and commits
+an event projection before its terminal ACK:
+
+| Event | Canonical effect | Requirement effect |
+| --- | --- | --- |
+| `session.started` | Set coarse session status to `running`; retain runtime fact. | None. |
+| `agent.message` | Insert one `agent` conversation message using the event message ID. | None. |
+| `agent.activity` | Append one intentionally coarse activity record. | None. |
+| `requirement.assessed` | Run existing readiness transaction; retain accepted/rejected immutable evidence and current pointer/read result. | Only the existing server/domain `Discussing → Ready` gate may promote. |
+| `session.completed` | Set coarse session status to `completed` and retain safe summary. | None; completion does not imply Ready. |
+| `session.failed` | Set coarse status to `unavailable` and retain a safe operational fact. | None; `recoverable` does not authorize retry or Requirement failure. |
+
+The normal successful order is assessment then completion, but completion without
+an accepted assessment is still a valid delivered fact: it leaves the
+Requirement Draft/Discussing (or otherwise unchanged), exposes no synthetic
+assessment, and reports that no current assessment was accepted. A later
+assessment event is handled by its own sequence, session, revision, and domain
+gates. A failure before assessment has the same no-Requirement-mutation rule.
+
+A duplicate event with matching identity/payload returns its known ACK and does
+not repeat a message insert, activity entry, session transition, or readiness
+promotion. An identity/payload conflict remains a protocol error. A stale or
+invalid assessment is a durable rejected result and receives
+`event_ack(status=rejected)` only after rejection persistence; it is not a
+runtime retry request.
+
+## Minimal session read model
+
+This slice exposes a coarse projection, not the later retry state machine:
+
+```text
+status: starting | running | completed | unavailable
+cancel_requested: boolean
+session_id, requirement_id, updated_at, last_activity_at
+```
+
+`unavailable` covers no eligible daemon and runtime failure facts. It is
+operational status, not Requirement `Failed`. No attempt count, retry budget,
+backoff, `Idle`/`Retrying`/final `Failed` policy, or automatic `session.resume`
+is introduced here. Existing delivery/session rows may be reused for ownership
+and watermarks without making those later policy values authoritative.
+
+## Canonical HTTP read models
+
+The server owns these reads; the browser never reconstructs them from a daemon
+socket or an SSE stream:
+
+| Read | Endpoint | Contract |
+| --- | --- | --- |
+| Requirement | existing `GET /requirements/{id}` | Complete structured Requirement, including `status`, `revision`, and `state_version`. |
+| Conversation | existing `GET /requirements/{id}/conversation?offset=&limit=` | Persisted requester/agent/system messages in deterministic order; `next_offset` remains the pagination signal. |
+| Latest readiness | new `GET /requirements/{id}/readiness` | Latest immutable assessment record, its outcome/rejection reason, repository IDs/full SHAs, and `current`; `current` is true only for an accepted assessment matching current revision, Ready state, and accepted state generation. Empty history returns no assessment, not a fabricated result. |
+| Coarse activity | new `GET /requirements/{id}/activity?offset=&limit=` | Persisted product-visible summaries with stable ordering and bounded pages; never raw tool output or chain-of-thought. |
+| Session/runtime | new `GET /requirements/{id}/session` | Latest clarification run for this Requirement, ordered by creation time; return `{ "session": null }` only when no run has ever existed. An attempted start with no eligible daemon returns that unassigned run with `status=unavailable`. An assigned/offline run keeps its pinned daemon internally and returns the same run with `status=unavailable`; completed or cancelled runs remain readable until a newer run exists. After a new sequential run is created, it is the latest result while prior runs remain server-side history. The public projection exposes status, cancellation intent, and timestamps, not `daemon_id` or daemon details. |
+
+The existing Ready-only `review-packet` remains the human-review projection and
+is not replaced by the latest-readiness endpoint.
+
+## Clarification notification extension
+
+`introduce-requirement-board` owns the authenticated `GET /events` SSE endpoint
+and the base `requirement.changed` category. This change extends that same
+producer after clarification canonical transactions with
+`conversation.changed`, `readiness.changed`, `activity.changed`, and
+`session.changed`. Each event contains only its category, Requirement identity,
+and optional non-authoritative metadata. It is not a durable browser event log,
+replay source, WebSocket, or second state store. `Last-Event-ID` is not required
+for correctness. Missed, repeated, delayed, out-of-order, or reconnect-delivered
+hints cause canonical HTTP refetch; they never patch state from event payloads.
+No second SSE endpoint, event bus, or browser event store is introduced.
+
+## Availability and cancellation
+
+A valid explicit start resolves the latest run before daemon selection. An
+unassigned run is reusable only when `daemon_id = null`, no `session.start` was
+successfully created or dispatched, it has not been cancelled or closed, the
+request is the same logical start attempt, and the incoming message is its
+recorded `start_message_id`. A different message while that attempt remains
+reusable returns the canonical conflict. A latest assigned active run (including
+an assigned run temporarily unavailable because its daemon disconnected) also
+rejects a different start message, preventing competing runs.
+
+If the latest run is completed, cancelled, or otherwise explicitly
+terminal/inapplicable, a new persisted eligible requester message and explicit
+start create a new run. The new run receives a new identity, current Requirement
+snapshot/revision, start message, repository set, and eventual daemon pin; the
+prior run is immutable history. Requirement edits between runs therefore affect
+only the new run's snapshot. No daemon means the newly selected run remains
+`daemon_id = null`, `status=unavailable`, has no `session.start` command, and
+returns `503 clarification_unavailable`; no runtime event, Requirement failure,
+attempt consumption, or implicit later daemon selection is fabricated.
+
+Once `daemon_id != null`, the run remains pinned to that daemon. If it
+disconnects, the server does not clear or migrate the owner; durable commands
+remain replayable and the public read reports `status=unavailable` until
+existing reconnect/delivery recovery resumes. No retry budget, attempt
+accounting, server backoff, automatic `session.resume`, or final execution
+failure policy is added here.
+
+Cancellation targets the latest run. Every cancellation persists
+`cancel_requested` without changing Requirement lifecycle, content, revision, or
+state_version. For an assigned run, the server also creates or reuses exactly
+one durable `session.cancel` command for its pinned daemon; repeated requests
+reuse that command/result and runtime cancellation occurs at most once. For an
+unassigned run, cancellation is server-owned run state only: it creates no
+`session.cancel` command, no command identity, and no fabricated daemon owner.
+Repeated cancellation returns the persisted cancellation state. The cancelled
+run remains historical and ineligible for reuse; a later new eligible message
+may start a new sequential run. No retry or final-failure policy is added.
+
+## Dependency graph
+
+```text
+introduce-requirement-board
+  -> base authenticated GET /events + requirement.changed
+
+introduce-local-repository-inspection
+  -> clarification orchestration
+introduce-requirement-board
+  -> clarification SSE-category extension
+
+introduce-requirement-board + introduce-agent-requirement-clarification
+  -> conversation/detail HTTP/SSE consumer
+
+introduce-runtime-retry-and-failure-state
+  -> later optional status/read-model extension
+```
+
+Board does not depend on local inspection or clarification. Clarification
+extends, but does not recreate, Board's shared `/events` infrastructure.

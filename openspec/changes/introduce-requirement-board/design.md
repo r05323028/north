@@ -1,17 +1,62 @@
 # Design
 
-## Decisions
+## Backend contract consumed
 
-- Data fetching via server API routes proxying north-server (no direct DB).
-- Live refresh uses an SSE subscription per board/list view. Events are
-  notification hints; EventSource reconnect and optional `Last-Event-ID` may
-  suppress redundant hints, but every reconnect/refocus can refetch canonical
-  server state. No durable browser event log or WebSocket.
-- shadcn/ui primitives: Card, Badge, Table, DropdownMenu, Dialog, Input,
-  Select. Status → column mapping from the lifecycle enum's stable strings.
-- Frontend tests start here minimally: vitest + one render test for the board
-  grouping logic, establishing the pattern docs/development/testing.md points to.
+Use the existing authenticated Requirement API rather than adding a board-only
+read layer:
 
-## Open Questions
+```text
+GET  /requirements
+     ?search=<text>&status=<draft|discussing|ready|accepted|rejected>
+     &created_by=<user-id>&sort=updated|updated_asc
+POST /requirements       { title, description }
+GET  /requirements/{id}
+```
 
-None.
+`GET /requirements` returns the current single-instance collection as one JSON
+array. Its server-side search covers structured Requirement fields, status and
+creator filters are server-side, and updated sorting has a deterministic ID
+tiebreak. The UI must not assume a cursor, `limit`, `offset`, total count, or
+page-size invariant that the API does not define.
+
+## Views
+
+- Board maps the stable server status strings Draft, Discussing, Ready,
+  Accepted, and Rejected to fixed columns. A card renders title, status,
+  requester, and updated timestamp and links to `/requirements/[id]`.
+- List preserves server order, renders search/filter/sort controls, and sends
+  each control as query parameters. It does not fetch the full collection and
+  filter it in the browser.
+- Create sends only title and description, uses the returned Requirement as
+  canonical, and navigates to its detail route. No wizard or optimistic
+  lifecycle prediction is needed.
+
+## Shared browser notification path
+
+This change owns one authenticated `GET /events` SSE producer/endpoint and its
+initial `requirement.changed` category. It emits only a lightweight hint after
+the canonical Requirement transaction commits. Board/list fetches
+`GET /requirements` on initial load, focus/refocus, and EventSource reconnect.
+On any notification, they may refetch once or coalesce nearby hints, but never
+patch a card from SSE data. `Last-Event-ID` is not a correctness contract; no
+browser stream replay is required. Producer failures do not roll back canonical
+server mutations.
+
+`introduce-agent-requirement-clarification` extends this same endpoint with
+`conversation.changed`, `readiness.changed`, `activity.changed`, and
+`session.changed` after its corresponding canonical transactions. It does not
+create another endpoint, event bus, browser event store, or WebSocket path.
+
+## Explicit boundary
+
+Board/list owns browser rendering, query state, subscription, base `/events`
+transport, and refetch. Clarification owns its canonical runtime read models
+and extends the shared notification categories. No browser WebSocket, daemon
+connection, durable browser event store, or second SSE producer is added.
+
+## Test foundation
+
+Use the existing web test/lint stack. Start with a pure grouping test for mixed
+Requirement statuses and an interaction test proving query controls map to
+server parameters. Add an end-to-end fixture that drops and duplicates hints,
+then verifies HTTP refetch restores the current collection.

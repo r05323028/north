@@ -124,8 +124,8 @@ after commit SHALL it send `event_ack(status=accepted)` for a valid effect or
 `event_ack(status=rejected)` for a durable rejection. A stale/invalid event SHALL
 not change Requirement revision, state_version, or status; a duplicate of a
 committed event SHALL not repeat its effect or version increment. The
-`north-protocol` wire layer validates only structural non-empty repository
-identity/SHA fields; repository existence and session/run acceptability belong
+`north-protocol` wire layer validates repository identity and complete Git
+SHA-1/SHA-256 fields; repository existence and session/run acceptability belong
 to server readiness persistence.
 
 #### Scenario: Event ACK follows durable assessment handling

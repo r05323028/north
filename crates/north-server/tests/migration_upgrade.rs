@@ -507,7 +507,7 @@ async fn historical_main_head_upgrades_to_current_head() {
     .bind(
         serde_json::json!([{
             "repository_id": citation_repository_id,
-            "commit_sha": "abcdef0123456789",
+            "commit_sha": "abcdef0123456789abcdef0123456789abcdef01",
         }])
         .to_string(),
     )
@@ -702,7 +702,7 @@ async fn historical_main_head_upgrades_to_current_head() {
     .await
     .expect("read retained repository citation");
     assert_eq!(citation_repository, citation_repository_id);
-    assert_eq!(citation_sha, "abcdef0123456789");
+    assert_eq!(citation_sha, "abcdef0123456789abcdef0123456789abcdef01");
 
     let legacy_watermark: i64 =
         sqlx::query_scalar("SELECT command_ack_through_seq FROM execution_sessions WHERE id = $1")
