@@ -57,34 +57,37 @@ authorization rules.
   the persisted requester message belongs to this Requirement's conversation
   and is eligible as the run's start message. A daemon-backed start returns
   `202 Accepted` with the canonical Requirement and public run projection,
-  including `run_id`. A valid start with no eligible daemon returns `503 Service
-  Unavailable` with error code `clarification_unavailable`, the canonical
-  Requirement, and the unassigned `status=unavailable` run projection. A stale
+  including `run_id` and `start_message_id`. A valid start with no eligible
+  daemon returns `503 Service Unavailable` with error code
+  `clarification_unavailable`, the canonical Requirement, and the unassigned
+  `phase=awaiting_assignment`, `status=unavailable` run projection. A stale
   state version returns the canonical `409` conflict before any run/command
   mutation; the message remains persisted.
 - `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`
   has no message body. It validates that `run_id` exists, belongs to the
-  Requirement in the URL, is assigned and active (`starting` or `running`,
-  including pinned operational unavailability), and that the persisted requester
-  message belongs to this Requirement's canonical conversation, is eligible for
-  that run, and is not the recorded start message. It returns `202 Accepted`
-  after creating or reusing exactly one durable `message.send` mapping. A pinned
-  offline daemon keeps that command durable and reports operational
-  unavailability; an unassigned run returns `503 clarification_unavailable`
-  without creating a command. It never creates another conversation message or
+  Requirement in the URL, is `phase=active` with an assigned, non-terminal run
+  (including a pinned daemon that is operationally unavailable), and that the
+  persisted requester message belongs to this Requirement's canonical
+  conversation, is eligible for that run, and is not the recorded start message.
+  It returns `202 Accepted` after creating or reusing exactly one durable
+  `message.send` mapping. An `awaiting_assignment` or terminal run cannot receive
+  dispatch. A pinned offline daemon keeps the command durable and reports
+  operational unavailability. It never creates another conversation message or
   resolves a newer latest run.
 - `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel` has no
   message body. It validates that `run_id` exists, belongs to the Requirement in
   the URL, and is an unassigned not-yet-started run or an assigned active run
-  (`starting` or `running`, including pinned operational unavailability);
-  repeated cancellation of the same run remains idempotent. It returns
+  (`phase=active`, including a pinned daemon that is operationally unavailable).
+  Repeated cancellation of the same run remains idempotent. It returns
   `202 Accepted` with the public run projection after persisting
-  `cancel_requested`. If the run is assigned, the server also creates or reuses
-  exactly one durable `session.cancel` command for its pinned daemon. If the run
-  is unassigned, cancellation is server-owned run state only: no
-  `session.cancel` command and no command identity are created. Repeated calls
-  return that run's persisted cancellation state. No run returns HTTP `404` with
-  the `clarification_not_started` contract.
+  `cancel_requested`. An unassigned run with no `session.start` becomes
+  `phase=terminal` immediately and creates no `session.cancel` or other daemon
+  command identity. An assigned run creates or reuses exactly one durable
+  `session.cancel` for its pinned daemon but remains `phase=active` until a
+  terminal runtime fact is projected. A `command_ack` only means the daemon
+  durably recorded `session.cancel`; it is not cancellation completion. An unknown or Requirement-mismatched run returns HTTP `404` with generic
+  error code `not_found` after normal authorization checks; it never falls back
+  to a latest-run lookup.
 
 `clarification/start` is the only identity-creating exception: it may resolve
 the latest run to apply sequential create/reuse rules before returning `run_id`.
@@ -92,10 +95,13 @@ the latest run to apply sequential create/reuse rules before returning `run_id`.
 convenience, but latest-run reads may guide UI presentation and MUST NOT
 identify a dispatch or cancellation mutation. After `run_id` is known, every
 such mutation includes it explicitly; a stale run ID is evaluated only against
-that run and is never retargeted to a newer run. Public application/read
-projections use `run_id`; existing protocol `session_id` carries the same stable
-identity (`session_id = run_id`). Protocol replay uses original message, run,
-and command identities; clients do not call a generic command endpoint.
+that run and is never retargeted to a newer run. Unknown or Requirement-mismatched
+run IDs on explicit run-scoped routes return HTTP `404` with generic error code
+`not_found` after normal authorization checks; they never reveal cross-Requirement
+run existence. Public application/read projections use `run_id`; existing
+protocol `session_id` carries the same stable identity (`session_id = run_id`).
+Protocol replay uses original message, run, and command identities; clients do
+not call a generic command endpoint.
 
 ## Sequential clarification runs
 
@@ -107,38 +113,65 @@ fields are:
 
 ```text
 run_id, requirement_id, start_message_id
- daemon_id: nullable until assignment
+ phase: awaiting_assignment | active | terminal
  status: starting | running | completed | unavailable
  cancel_requested: boolean
  created_at, updated_at, last_activity_at
 ```
 
+`daemon_id` is internal and never part of the public projection. `phase` answers
+whether this run still occupies the sequential clarification slot; `status`
+describes coarse operational health/result; `cancel_requested` records user
+intent. These fields are independent. `phase=active` remains active even when
+`status=unavailable` because a pinned daemon is disconnected or cancellation is
+awaiting a terminal runtime fact.
+
 A valid `clarification/start` may resolve the latest run before daemon selection
 because it is the identity-creating operation. It reuses the latest run only
-when all of these are true: `daemon_id = null`, no `session.start` command was
-successfully created or dispatched, the run has not been cancelled or otherwise
-closed, the request is the same logical start attempt, and the incoming
-`message_id` equals its recorded `start_message_id`. For that reusable
-unavailable attempt, the server retries daemon selection without creating
-another run. In this slice, the same logical start attempt is identified by the
-recorded `start_message_id` and an unclosed run; a new persisted message is a
-new attempt. The response always returns the selected/reused public `run_id`.
+when all of these are true: `phase=awaiting_assignment`, `daemon_id = null`, no
+`session.start` command was successfully created or dispatched, the run has not
+been cancelled or otherwise closed, the request is the same logical start
+attempt, and the incoming `message_id` equals its recorded `start_message_id`.
+For that reusable unavailable attempt, the server retries daemon selection
+without creating another run. In this slice, the same logical start attempt is
+identified by the recorded `start_message_id` and an unclosed run; a new
+persisted message is a new attempt. The response always returns the selected or
+reused public run projection, including `run_id` and `start_message_id`.
 
-If the latest run is assigned and active (`starting` or `running`, including an
-assigned run that is operationally unavailable because its daemon disconnected),
-a different start message returns the canonical conflict; later requester
-messages use the explicit run-scoped dispatch operation. If the latest run is
-completed, cancelled, or otherwise explicitly terminal/inapplicable for start
-reuse, a new persisted eligible start message creates a new run. A repeated
-request for the old terminal start message does not reactivate or retarget that
-run.
+A latest `phase=active` run is assigned and non-terminal, including an assigned
+run whose pinned daemon is disconnected or whose cancellation was requested. A
+different start message returns the canonical conflict and cannot release the
+competing slot. Later requester messages use explicit run-scoped dispatch. A
+latest `phase=terminal` run is no longer competing; a new persisted eligible
+start message creates a new run. A repeated request for an old terminal start
+message does not reactivate or retarget that run.
 
 A newly created run receives a new `run_id`, current Requirement snapshot/revision,
-start message, repository set, daemon pin when selected, and independent
+`start_message_id`, repository set, daemon pin when selected, and independent
 command/event sequence. The prior run remains immutable historical data. This
 is a logical run contract, not a prescribed new table. Existing
 `execution_sessions`/delivery storage may represent it while retaining current
 durable delivery invariants.
+
+Cancellation intent is not cancellation completion. For an unassigned run with
+`daemon_id = null`, no `session.start`, and no runtime execution, cancellation
+persists `cancel_requested=true`, immediately sets `phase=terminal`, creates no
+command or command identity, and makes the run ineligible for reuse. For an
+assigned `phase=active` run, cancellation persists the same intent, creates or
+reuses exactly one durable `session.cancel`, and leaves the run `phase=active`
+and in the competing slot until a terminal runtime fact is durably projected.
+A `command_ack` for `session.cancel` only confirms durable daemon recording; it
+never closes the run or permits a competing start.
+
+The existing terminal runtime facts that close an assigned run are
+`session.completed` and `session.failed`, after normal session binding, identity,
+and sequence validation and durable projection. `PiClarificationAdapter` maps a
+confirmed successful runtime cancellation/termination to existing
+`session.completed` with no readiness assessment; if runtime termination fails
+or reports a terminal operational failure, it maps to existing `session.failed`.
+No `session.cancelled` frame is introduced. The resulting terminal phase and
+coarse status are projected through the same North event path, and
+`cancel_requested` remains true.
 
 The initial requester-message flow is two explicit HTTP calls:
 
@@ -158,23 +191,24 @@ The initial requester-message flow is two explicit HTTP calls:
    persisted start message, and enabled repository metadata, then atomically
    persists the daemon pin, immutable run context, and complete command before
    dispatch. If no daemon is eligible, it retains the run with
-   `daemon_id = null`, `status=unavailable`, and no `session.start`, returning
-   `503 clarification_unavailable` with that run projection. The response
-   includes the public `run_id`.
+   `daemon_id = null`, `phase=awaiting_assignment`, `status=unavailable`, and no
+   `session.start`, returning HTTP `503` with
+   `clarification_unavailable` and that public run projection. The response
+   includes `run_id` and `start_message_id`.
 
 The start message is already present in `session.start` context and SHALL NOT
 also create `message.send`. A repeated start with the same recorded
 `start_message_id` reuses the same reusable unassigned run and, after assignment,
 returns the same `run_id` and command identities. A different message conflicts
-while a reusable unassigned attempt or assigned active run exists. Once the
-latest run is completed, cancelled, or otherwise explicitly
-terminal/inapplicable, a new persisted eligible message starts a new sequential
-run instead of retargeting the prior run.
+while a reusable unassigned attempt or latest `phase=active` run exists. Once
+the latest run is `phase=terminal`, a new persisted eligible message starts a
+new sequential run instead of retargeting the prior run.
 
 For a later requester message, the UI first calls
 `POST /requirements/{requirement_id}/conversation/messages` and retains the
-returned `message_id`. It then uses the known `run_id` from the start response
-or the canonical latest-session read to call
+returned `message_id`. It then places the explicit public `run_id` already
+known from the start response or a read projection into the mutation URL; the
+server never resolves latest-run identity while handling the request:
 `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`.
 The server verifies that this explicit run belongs to the Requirement and is
 eligible to receive the message, and that the message belongs to the
@@ -195,9 +229,11 @@ explicit start operation; clients do not classify it from transcript contents.
 
 North selects each run's conversation context from canonical persisted
 conversation history. Persisted conversation order is authoritative. The
-configured bound and size accounting are North-owned and deterministic; the
-bound may be a fixed message count, byte/token budget, or another deterministic
-configuration detail and is not fixed by this change.
+configured bound and size accounting are North-owned and deterministic. For
+North 0.1, size accounting uses a fixed message count and/or UTF-8 byte size;
+token-based accounting is deferred unless a later change defines a canonical
+provider-independent tokenizer and tokenizer version as part of the selection
+configuration. No Pi tokenizer or tokenizer abstraction is introduced here.
 
 North selects the newest messages that fit the bound, always retains the
 `start_message_id`, removes the oldest retained non-start messages first when
@@ -318,8 +354,8 @@ an event projection before its terminal ACK:
 | `agent.message` | Insert one `agent` conversation message using the event message ID. | None. |
 | `agent.activity` | Append one intentionally coarse activity record. | None. |
 | `requirement.assessed` | Run existing readiness transaction; retain accepted/rejected immutable evidence and current pointer/read result. | Only the existing server/domain `Discussing → Ready` gate may promote. |
-| `session.completed` | Set coarse session status to `completed` and retain safe summary. | None; completion does not imply Ready. |
-| `session.failed` | Set coarse status to `unavailable` and retain a safe operational fact. | None; `recoverable` does not authorize retry or Requirement failure. |
+| `session.completed` | Set `phase=terminal`, coarse session status to `completed`, and retain safe summary. | None; completion does not imply Ready. |
+| `session.failed` | Set `phase=terminal`, coarse status to `unavailable`, and retain a safe operational fact. | None; `recoverable` does not authorize retry or Requirement failure. |
 
 The normal successful order is assessment then completion, but completion without
 an accepted assessment is still a valid delivered fact: it leaves the
@@ -337,19 +373,32 @@ runtime retry request.
 
 ## Minimal session read model
 
-This slice exposes a coarse projection, not the later retry state machine:
+This slice exposes a small sequential projection, not the later retry state
+machine:
 
 ```text
+run_id, requirement_id, start_message_id
+phase: awaiting_assignment | active | terminal
 status: starting | running | completed | unavailable
 cancel_requested: boolean
-run_id, requirement_id, updated_at, last_activity_at
+created_at, updated_at, last_activity_at
 ```
 
-`unavailable` covers no eligible daemon and runtime failure facts. It is
-operational status, not Requirement `Failed`. No attempt count, retry budget,
-backoff, `Idle`/`Retrying`/final `Failed` policy, or automatic `session.resume`
-is introduced here. Existing delivery/session rows may be reused for ownership
-and watermarks without making those later policy values authoritative.
+`phase` determines whether the run occupies the sequential clarification slot:
+`awaiting_assignment` is an unassigned run with no runtime execution;
+`active` is an assigned non-terminal run, including a pinned disconnected daemon
+or cancellation intent awaiting terminal runtime projection; and `terminal` is
+an unassigned cancellation or a durably projected `session.completed`/
+`session.failed` fact. `status` describes coarse operational health/result and
+may be `unavailable` in any phase. `cancel_requested` describes user intent and
+does not itself change phase for an assigned run. `start_message_id` is safe
+application identity needed to retry the identity-creating start after reload.
+
+No `daemon_id`, credentials, checkout paths, provider details, attempt count,
+retry budget, backoff, `Idle`/`Retrying`/final `Failed` policy, or automatic
+`session.resume` is public or introduced here. Existing delivery/session rows
+may be reused for internal ownership and watermarks without making later policy
+values authoritative.
 
 ## Canonical HTTP read models
 
@@ -362,7 +411,7 @@ socket or an SSE stream:
 | Conversation | existing `GET /requirements/{id}/conversation?offset=&limit=` | Persisted requester/agent/system messages in deterministic order; `next_offset` remains the pagination signal. |
 | Latest readiness | new `GET /requirements/{id}/readiness` | Latest immutable assessment record, its outcome/rejection reason, repository IDs/full SHAs, and `current`; `current` is true only for an accepted assessment matching current revision, Ready state, and accepted state generation. Empty history returns no assessment, not a fabricated result. |
 | Coarse activity | new `GET /requirements/{id}/activity?offset=&limit=` | Persisted product-visible summaries with stable ordering and bounded pages; never raw tool output or chain-of-thought. |
-| Session/runtime | new `GET /requirements/{id}/session` | Latest clarification run for this Requirement, ordered by creation time; return `{ "session": null }` only when no run has ever existed. An attempted start with no eligible daemon returns that unassigned run with `status=unavailable`. An assigned/offline run keeps its pinned daemon internally and returns the same run with `status=unavailable`; completed or cancelled runs remain readable until a newer run exists. After a new sequential run is created, it is the latest result while prior runs remain server-side history. The public projection exposes `run_id`, status, cancellation intent, and timestamps, not `daemon_id` or daemon details. This latest-run read is a UI convenience and never supplies implicit mutation identity. |
+| Session/runtime | new `GET /requirements/{id}/session` | Latest clarification run for this Requirement, ordered by creation time; return `{ "session": null }` only when no run has ever existed. The public projection includes `run_id`, `requirement_id`, `start_message_id`, `phase`, `status`, `cancel_requested`, `created_at`, `updated_at`, and `last_activity_at`. `phase=awaiting_assignment` with `status=unavailable` identifies an unassigned run with no `session.start`; `phase=active` identifies an assigned non-terminal run even when its pinned daemon is disconnected or cancellation is requested; `phase=terminal` identifies an unassigned cancellation or durably projected `session.completed`/`session.failed` fact. `status` remains coarse operational health/result. No `daemon_id`, daemon credentials/details, checkout paths, or provider internals are exposed. This latest-run read is a UI convenience and never supplies implicit mutation identity. |
 
 The existing Ready-only `review-packet` remains the human-review projection and
 is not replaced by the latest-readiness endpoint.
@@ -384,46 +433,64 @@ No second SSE endpoint, event bus, or browser event store is introduced.
 
 A valid explicit start may resolve the latest run before daemon selection only
 to apply the sequential create/reuse rules. An unassigned run is reusable only
-when `daemon_id = null`, no `session.start` was successfully created or
-dispatched, it has not been cancelled or closed, the request is the same logical
-start attempt, and the incoming message is its recorded `start_message_id`. A
-different message while that attempt remains reusable returns the canonical
-conflict. A latest assigned active run (including an assigned run temporarily
-unavailable because its daemon disconnected) also rejects a different start
-message, preventing competing runs. Start returns the public `run_id` of the
-created or reused run.
+when `phase=awaiting_assignment`, `daemon_id = null`, no `session.start` was
+created or dispatched, it has not been cancelled or closed, the request is the
+same logical start attempt, and the incoming message is its recorded
+`start_message_id`. A different message while that attempt remains reusable
+returns the canonical conflict. A latest `phase=active` run is assigned and
+non-terminal, including an assigned run temporarily unavailable because its
+daemon disconnected or awaiting completion after cancellation; it rejects a
+different start message and retains the competing slot. Start returns the public
+run projection, including `run_id` and `start_message_id`.
 
-If the latest run is completed, cancelled, or otherwise explicitly
-terminal/inapplicable, a new persisted eligible requester message and explicit
-start create a new run. The new run receives a new `run_id`, current Requirement
-snapshot/revision, start message, repository set, and eventual daemon pin; the
-prior run is immutable history. Requirement edits between runs therefore affect
-only the new run's snapshot. No daemon means the newly selected run remains
-`daemon_id = null`, `status=unavailable`, has no `session.start` command, and
-returns `503 clarification_unavailable`; no runtime event, Requirement failure,
-attempt consumption, or implicit later daemon selection is fabricated.
+If the latest run is `phase=terminal`, a new persisted eligible requester
+message and explicit start create a new run. The new run receives a new `run_id`,
+current Requirement snapshot/revision, `start_message_id`, repository set, and
+eventual daemon pin; the prior run is immutable history. Requirement edits
+between runs therefore affect only the new run's snapshot. No eligible daemon
+means the newly selected run remains `daemon_id = null`, `phase=awaiting_assignment`,
+`status=unavailable`, has no `session.start` command, and returns HTTP `503`
+with `clarification_unavailable`; no runtime event, Requirement failure, attempt
+consumption, or implicit later daemon selection is fabricated.
 
 Once `daemon_id != null`, the run remains pinned to that daemon. If it
-disconnects, the server does not clear or migrate the pin; durable commands
-remain replayable and the public read reports `status=unavailable` until
-existing reconnect/delivery recovery resumes. No retry budget, attempt
-accounting, server backoff, automatic `session.resume`, or final execution
-failure policy is added here.
+disconnects, the server does not clear or migrate the pin; the run remains
+`phase=active`, durable commands remain replayable, and the public read reports
+`status=unavailable` until existing reconnect/delivery recovery resumes. No retry
+budget, attempt accounting, server backoff, automatic `session.resume`, or final
+execution failure policy is added here.
 
-Dispatch and cancellation require explicit `run_id`. The server validates that
-the run exists, belongs to the Requirement in the URL, and is eligible for the
-requested operation before creating or reusing a command. Cancellation persists
-`cancel_requested` without changing Requirement lifecycle, content, revision, or
-state_version. For an assigned eligible run, the server creates or reuses
-exactly one durable `session.cancel` command for its pinned daemon; repeated
-requests reuse that command/result and runtime cancellation occurs at most once.
-For an unassigned eligible run, cancellation is server-owned run state only: it
-creates no `session.cancel` command, no command identity, and no fabricated
-daemon pin. An ineligible terminal run returns its run-scoped canonical result
-(or existing cancellation state) without creating a command. A stale mutation
-for run A therefore cannot resolve or affect newer run B. The cancelled run
-remains historical and ineligible for start reuse; a later new eligible message
-may start a new sequential run. No retry or final-failure policy is added.
+Dispatch and cancellation require explicit `run_id`. The server first performs
+normal Requirement authorization, then looks up the run constrained by that
+Requirement. An unknown or Requirement-mismatched run returns HTTP `404` with
+generic error code `not_found`; it never leaks cross-Requirement run existence.
+Dispatch is eligible only for an assigned `phase=active` run; an
+`awaiting_assignment` or `terminal` run receives its run-scoped canonical
+conflict/unavailability result without a command. An active pinned daemon may be
+temporarily unavailable, but its durable `message.send` remains bound to that
+run for recovery and replay.
+
+Cancellation intent is separate from cancellation completion. For an unassigned
+run with `daemon_id = null`, no `session.start`, and no runtime execution,
+cancellation persists `cancel_requested=true`, immediately sets
+`phase=terminal`, creates no `session.cancel` or other daemon command identity,
+and makes the run ineligible for reuse. A later eligible persisted message may
+start a new sequential run.
+
+For an assigned `phase=active` run, cancellation persists
+`cancel_requested=true`, creates or reuses exactly one durable `session.cancel`
+for its pinned daemon, and leaves the run `phase=active` in the competing slot.
+A repeated request is idempotent. `command_ack` only means the daemon durably
+recorded `session.cancel`; it is not runtime cancellation completion and does
+not permit a new run. A later valid `session.completed` or `session.failed`
+event, after normal binding/identity/sequence validation and durable projection,
+sets `phase=terminal`; `session.completed` yields coarse `status=completed`, and
+`session.failed` yields `status=unavailable`. If cancellation succeeds, the
+Pi adapter maps confirmed runtime termination to `session.completed`; if
+termination fails, it maps the existing terminal operational failure to
+`session.failed`. No `session.cancelled` frame is introduced. The prior run
+then remains immutable history and a later eligible start may create a new run.
+No retry or final-failure policy is added.
 
 ## Dependency graph
 

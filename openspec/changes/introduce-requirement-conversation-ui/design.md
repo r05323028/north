@@ -28,25 +28,28 @@ are server projections, not transport caches. The existing Ready-only
   `POST /requirements/{requirement_id}/conversation/messages` persists one
   requester message only and returns its `message_id`; it never invokes the
   runtime. The identity-creating `start` operation may run before a client has
-  a `run_id`; it creates/reuses the sequential run and returns that ID.
+  a `run_id`; it creates/reuses the sequential run and returns the public
+  `run_id` and `start_message_id`.
   After persistence, use canonical
-  `GET /requirements/{requirement_id}/session` only to guide presentation. If
-  it exposes a `run_id`, the UI may retain that explicit ID for a later mutation
-  URL; latestness itself never selects the mutation target:
+  `GET /requirements/{requirement_id}/session` only to guide presentation. Its
+  explicit projection supplies `run_id`, `start_message_id`, `phase`, `status`,
+  `cancel_requested`, and safe timestamps; latestness itself never selects a
+  mutation target:
   - no run (`session: null`) → call
     `POST /requirements/{requirement_id}/clarification/start` with this ID and
-    current `expected_state_version`, then retain returned `run_id`;
-  - reusable unassigned unavailable run → call the identity-creating `start`
-    retry only with its recorded `start_message_id`, then retain returned
-    `run_id`;
-  - assigned active run (`starting`/`running`, including pinned operational
-    unavailability) → call
-    `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`
-    using the known `run_id` from the session read or prior start response;
-  - terminal/inapplicable latest run → call `start` with the new persisted
-    message to create a sequential run, then retain its returned `run_id`.
-  Dispatch and cancel controls SHALL not run without a known `run_id`. The
-  cancel control calls
+    current `expected_state_version`, then retain returned run identity;
+  - `phase=awaiting_assignment` → allow only same-start retry using the
+    canonical `start_message_id`, or cancellation of that explicit `run_id`;
+    do not dispatch a later message or create a competing start;
+  - `phase=active` → dispatch later persisted messages to the explicit `run_id`
+    and target cancellation at that ID; do not start a competing run, including
+    when `status=unavailable` because the pinned daemon is disconnected or
+    cancellation is still pending;
+  - `phase=terminal` → call `start` with a new persisted eligible message to
+    create a sequential run and retain its returned `run_id`.
+  `status` is for display (`starting`, `running`, `completed`, or
+  `unavailable`), not sole mutation-legality. Dispatch and cancel controls SHALL
+  not run without a known `run_id`; cancellation calls
   `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel`.
   If a newer run becomes latest after the UI learned run A, the UI keeps A in
   the mutation URL; the server evaluates A and never retargets the request to B.
@@ -93,7 +96,7 @@ refocus, or page reload, refetch:
 2. conversation page(s);
 3. latest/current readiness assessment;
 4. coarse activity; and
-5. minimal session/runtime status.
+5. public session phase/status/cancellation projection.
 
 The page can coalesce refetches. It must not use `Last-Event-ID` or stream
 history as a correctness dependency and must never open a WebSocket. It does
