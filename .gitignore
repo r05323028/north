@@ -17,5 +17,7 @@ graphify-out
 # coverage
 coverage/
 apps/web/coverage/
+apps/web/playwright-report/
+apps/web/test-results/
 rust-lcov.info
 lcov.info

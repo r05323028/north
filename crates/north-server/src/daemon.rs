@@ -311,6 +311,7 @@ pub struct DaemonRuntime {
 
 struct DaemonRuntimeInner {
     store: AuthStore,
+    events: crate::events::BrowserEventHub,
     transport: DaemonTransportState,
     receiver: Mutex<Option<mpsc::Receiver<DaemonConnection>>>,
     live: tokio::sync::Mutex<HashMap<String, LiveConnection>>,
@@ -375,10 +376,18 @@ fn map_assessment_event_error(error: crate::assessment::AssessmentError) -> Even
 
 impl DaemonRuntime {
     pub fn new(store: AuthStore) -> Self {
+        Self::new_with_events(store, crate::events::BrowserEventHub::new())
+    }
+
+    pub(crate) fn new_with_events(
+        store: AuthStore,
+        events: crate::events::BrowserEventHub,
+    ) -> Self {
         let (transport, receiver) = DaemonTransportState::channel();
         Self {
             inner: Arc::new(DaemonRuntimeInner {
                 store,
+                events,
                 transport,
                 receiver: Mutex::new(Some(receiver)),
                 live: tokio::sync::Mutex::new(HashMap::new()),
@@ -688,9 +697,13 @@ impl DaemonRuntime {
 
     async fn handle_event(&self, event: &EventEnvelope) -> Result<EventAck, EventHandleError> {
         if matches!(event.event, north_protocol::Event::RequirementAssessed(_)) {
-            return crate::assessment::handle_requirement_assessed(&self.inner.store, event)
-                .await
-                .map_err(map_assessment_event_error);
+            return crate::assessment::handle_requirement_assessed_with_events(
+                &self.inner.store,
+                event,
+                &self.inner.events,
+            )
+            .await
+            .map_err(map_assessment_event_error);
         }
 
         let value = serde_json::to_value(event)
@@ -942,10 +955,11 @@ impl DaemonRuntime {
 
     async fn mark_live_ready(&self, daemon_id: &str, connection_id: &str) {
         let mut live = self.inner.live.lock().await;
-        if let Some(connection) = live.get_mut(daemon_id) {
-            if connection.connection_id == connection_id {
+        match live.get_mut(daemon_id) {
+            Some(connection) if connection.connection_id == connection_id => {
                 connection.ready = true;
             }
+            _ => {}
         }
     }
 

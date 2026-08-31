@@ -50,14 +50,20 @@ pub struct AuthState {
     store: AuthStore,
     delivery: Arc<dyn CodeDelivery>,
     daemon_runtime: crate::daemon::DaemonRuntime,
+    events: crate::events::BrowserEventHub,
 }
 
 impl AuthState {
     pub fn new(store: AuthStore, delivery: Arc<dyn CodeDelivery>) -> Self {
+        let events = crate::events::BrowserEventHub::new();
         Self {
-            daemon_runtime: crate::daemon::DaemonRuntime::new(store.clone()),
+            daemon_runtime: crate::daemon::DaemonRuntime::new_with_events(
+                store.clone(),
+                events.clone(),
+            ),
             store,
             delivery,
+            events,
         }
     }
 
@@ -71,6 +77,10 @@ impl AuthState {
 
     pub fn daemon_runtime(&self) -> &crate::daemon::DaemonRuntime {
         &self.daemon_runtime
+    }
+
+    pub fn events(&self) -> &crate::events::BrowserEventHub {
+        &self.events
     }
 }
 
@@ -183,6 +193,7 @@ pub fn router(state: AuthState) -> Router {
         .route("/auth/logout", post(logout))
         .merge(crate::roles::router())
         .merge(crate::requirements::router())
+        .merge(crate::events::router())
         .merge(crate::repositories::router())
         .merge(crate::daemon::protected_router())
         .route_layer(middleware::from_fn_with_state(

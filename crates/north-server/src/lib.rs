@@ -9,6 +9,7 @@ pub mod auth;
 pub mod context;
 pub mod conversations;
 pub mod daemon;
+pub mod events;
 pub mod repositories;
 pub mod requirements;
 pub mod roles;

@@ -66,8 +66,8 @@ member so `cargo test --workspace` executes it.
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
 | Unit (Web) | Implemented — Vitest via `npm test` in `apps/web` |
-| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, and durable coordination coverage; execute with `NORTH_TEST_DATABASE_URL` |
-| E2E | Not implemented — browser approval UI is covered at HTTP integration; Playwright workflow remains pending |
+| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, durable coordination, and post-commit browser notification coverage; execute with `NORTH_TEST_DATABASE_URL` |
+| E2E | Partial — Playwright web-boundary coverage exists for Board/List/create/detail and SSE invalidation; full server-backed assembled workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
 PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it.
@@ -84,7 +84,7 @@ PostgreSQL integration also exercises legacy readiness schema upgrades and migra
 | server retry authority and restart-persistent attempts | Integration | runtime-retry-and-failure-state |
 | concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
 | soft-disable history, disabled-name recovery, and disabled-repo citation rules | Integration | configured-repositories |
-| SSE disconnect/missed hint/duplicate hint refetch | E2E | requirement-board + requirement-conversation-ui |
+| Full server-backed SSE disconnect/missed hint/duplicate/delayed hint refetch | E2E | requirement-board + requirement-conversation-ui |
 
 Documentation, OpenSpec checkboxes, and architecture tests do not prove these
 runtime guarantees. Do not mark their implementation tasks complete until the
@@ -100,15 +100,17 @@ runnable test exists and passes.
 ./scripts/validate.sh unit        # Rust + Web unit tests + architecture
 ./scripts/validate.sh ci          # complete local merge-gate mirror; requires NORTH_TEST_DATABASE_URL
 ./scripts/validate.sh integration # PostgreSQL-backed suites; requires NORTH_TEST_DATABASE_URL
-./scripts/validate.sh e2e | smoke # explicit 'not yet' until real
+./scripts/validate.sh e2e         # Playwright browser workflows
+./scripts/validate.sh smoke        # explicit 'not yet' until real
 ```
 
 ## Web (apps/web)
 
 Components come from shadcn/ui (`npx shadcn@latest add <component>`); do not
 fork them casually. Frontend unit tests use Vitest (`npm test`) and run through
-`./scripts/validate.sh unit` and `ci`. Coverage generation/upload remains
-CI-specific (`npm run test:coverage`).
+`./scripts/validate.sh unit` and `ci`. Browser workflows use Playwright
+(`npm run test:e2e`); install its browser with `npx playwright install chromium`.
+Coverage generation/upload remains CI-specific (`npm run test:coverage`).
 
 ## Specs
 
@@ -134,7 +136,8 @@ WebSocket ban. The real transport integration test is
 `tests/transport/tests/websocket.rs` and runs with
 `cargo test -p north-transport-integration --test websocket`. The PostgreSQL-backed daemon lifecycle, repository lifecycle/citation, and
 durable protocol delivery tests run locally with `NORTH_TEST_DATABASE_URL` and
-are required in CI job `daemon-integration`. Browser SSE behavior remains an
-E2E obligation; server outbox redelivery/ACK processing, daemon journal replay,
+are required in CI job `daemon-integration`. Browser-boundary SSE behavior is
+covered by the requirement-board Playwright suite; full server-backed assembly
+remains an E2E obligation. Server outbox redelivery/ACK processing, daemon journal replay,
 identity conflict handling, durable reconciliation restore, and exact
 persistence-before-dispatch are covered by the protocol delivery suites.
