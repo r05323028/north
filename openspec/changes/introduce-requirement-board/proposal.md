@@ -14,10 +14,13 @@ needs:
 - `GET /requirements/{id}` retrieves a complete Requirement;
 - `GET /requirements` supports server-side `search`, `status`, `created_by`,
   and updated-time sorting; and
-- responses include canonical lifecycle status, `revision`, and
+- responses include canonical lowercase lifecycle status identifiers
+  (`draft`, `discussing`, `ready`, `accepted`, `rejected`), `revision`, and
   `state_version`.
 
-This change does not reimplement, paginate, or redesign those APIs.
+The frontend keeps those identifiers as its wire/domain values and maps them to
+human-readable title-case labels only for presentation. This change does not
+reimplement, paginate, or redesign those APIs.
 
 ## What Changes
 

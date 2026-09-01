@@ -13,7 +13,7 @@ const canonical: Requirement = {
   acceptance_criteria: ["A valid account can sign in."],
   assumptions: ["Email is unique."],
   open_questions: ["Which provider is used?"],
-  status: "Ready",
+  status: "ready",
   revision: 3,
   state_version: 4,
   created_by: "user-1",
@@ -36,21 +36,30 @@ describe("Requirement presentation", () => {
     const html = renderToStaticMarkup(
       <RequirementBoardView
         {...state([
-          { ...canonical, id: "draft", status: "Draft" },
+          { ...canonical, id: "draft", status: "draft" },
           canonical,
-          { ...canonical, id: "accepted", status: "Accepted" },
+          { ...canonical, id: "accepted", status: "accepted" },
         ])}
       />,
     );
 
     for (const status of [
+      "draft",
+      "discussing",
+      "ready",
+      "accepted",
+      "rejected",
+    ]) {
+      expect(html).toContain(`data-status="${status}"`);
+    }
+    for (const label of [
       "Draft",
       "Discussing",
       "Ready",
       "Accepted",
       "Rejected",
     ]) {
-      expect(html).toContain(`data-status="${status}"`);
+      expect(html).toContain(label);
     }
     expect(html).toContain("Account login");
     expect(html).toContain("/requirements/r-1");

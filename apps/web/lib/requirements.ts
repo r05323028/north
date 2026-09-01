@@ -1,12 +1,21 @@
 export const requirementStatuses = [
-  "Draft",
-  "Discussing",
-  "Ready",
-  "Accepted",
-  "Rejected",
+  "draft",
+  "discussing",
+  "ready",
+  "accepted",
+  "rejected",
 ] as const;
 
 export type RequirementStatus = (typeof requirementStatuses)[number];
+
+export const requirementStatusLabels = {
+  draft: "Draft",
+  discussing: "Discussing",
+  ready: "Ready",
+  accepted: "Accepted",
+  rejected: "Rejected",
+} satisfies Record<RequirementStatus, string>;
+
 export type RequirementSort = "updated" | "updated_asc";
 
 export type Requirement = {
@@ -37,13 +46,86 @@ export type CreateRequirementInput = {
   description: string;
 };
 
+export function isRequirementStatus(
+  value: unknown,
+): value is RequirementStatus {
+  return (
+    typeof value === "string" &&
+    (requirementStatuses as readonly string[]).includes(value)
+  );
+}
+
+function invalidRequirementField(field: string): never {
+  throw new Error(`Server returned invalid Requirement field: ${field}`);
+}
+
+function requiredString(value: Record<string, unknown>, field: string): string {
+  const fieldValue = value[field];
+  return typeof fieldValue === "string"
+    ? fieldValue
+    : invalidRequirementField(field);
+}
+
+function requiredStringArray(
+  value: Record<string, unknown>,
+  field: string,
+): string[] {
+  const fieldValue = value[field];
+  return Array.isArray(fieldValue) &&
+    fieldValue.every((item) => typeof item === "string")
+    ? fieldValue
+    : invalidRequirementField(field);
+}
+
+function requiredNumber(value: Record<string, unknown>, field: string): number {
+  const fieldValue = value[field];
+  return typeof fieldValue === "number" && Number.isFinite(fieldValue)
+    ? fieldValue
+    : invalidRequirementField(field);
+}
+
+export function parseRequirement(value: unknown): Requirement {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Server returned invalid Requirement");
+  }
+  const record = value as Record<string, unknown>;
+  const status = record.status;
+  if (!isRequirementStatus(status)) {
+    throw new Error(
+      `Server returned invalid Requirement status: ${String(status)}`,
+    );
+  }
+  return {
+    id: requiredString(record, "id"),
+    title: requiredString(record, "title"),
+    description: requiredString(record, "description"),
+    summary: requiredString(record, "summary"),
+    acceptance_criteria: requiredStringArray(record, "acceptance_criteria"),
+    assumptions: requiredStringArray(record, "assumptions"),
+    open_questions: requiredStringArray(record, "open_questions"),
+    status,
+    revision: requiredNumber(record, "revision"),
+    state_version: requiredNumber(record, "state_version"),
+    created_by: requiredString(record, "created_by"),
+    created_at: requiredString(record, "created_at"),
+    updated_at: requiredString(record, "updated_at"),
+  };
+}
+
+function parseRequirementList(value: unknown): Requirement[] {
+  if (!Array.isArray(value)) {
+    throw new Error("Server returned invalid Requirement collection");
+  }
+  return value.map(parseRequirement);
+}
+
 export function requirementsUrl(query: RequirementQuery = {}): string {
   const params = new URLSearchParams();
   const search = query.search?.trim();
   const creator = query.created_by?.trim();
 
   if (search) params.set("search", search);
-  if (query.status) params.set("status", query.status.toLowerCase());
+  if (query.status) params.set("status", query.status);
   if (creator) params.set("created_by", creator);
   if (query.sort) params.set("sort", query.sort);
 
@@ -92,26 +174,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
-export function listRequirements(query: RequirementQuery = {}) {
-  return request<Requirement[]>(requirementsUrl(query));
+export async function listRequirements(
+  query: RequirementQuery = {},
+): Promise<Requirement[]> {
+  return parseRequirementList(await request<unknown>(requirementsUrl(query)));
 }
 
-export function listRequirementsAtPath(path: string) {
-  return request<Requirement[]>(path);
+export async function listRequirementsAtPath(
+  path: string,
+): Promise<Requirement[]> {
+  return parseRequirementList(await request<unknown>(path));
 }
 
-export function getRequirement(id: string) {
-  return request<Requirement>(`/requirements/${encodeURIComponent(id)}`);
+export async function getRequirement(id: string): Promise<Requirement> {
+  return parseRequirement(
+    await request<unknown>(`/requirements/${encodeURIComponent(id)}`),
+  );
 }
 
-export function createRequirement(input: CreateRequirementInput) {
-  return request<Requirement>("/requirements", {
-    method: "POST",
-    body: JSON.stringify({
-      title: input.title,
-      description: input.description,
+export async function createRequirement(
+  input: CreateRequirementInput,
+): Promise<Requirement> {
+  return parseRequirement(
+    await request<unknown>("/requirements", {
+      method: "POST",
+      body: JSON.stringify({
+        title: input.title,
+        description: input.description,
+      }),
     }),
-  });
+  );
 }
 
 export type RequirementGroups = {
@@ -121,12 +213,22 @@ export type RequirementGroups = {
 export function groupRequirements(
   requirements: Requirement[],
 ): RequirementGroups {
-  const groups = Object.fromEntries(
-    requirementStatuses.map((status) => [status, [] as Requirement[]]),
-  ) as RequirementGroups;
+  const groups: RequirementGroups = {
+    draft: [],
+    discussing: [],
+    ready: [],
+    accepted: [],
+    rejected: [],
+  };
 
   for (const requirement of requirements) {
-    groups[requirement.status].push(requirement);
+    const status: unknown = requirement.status;
+    if (!isRequirementStatus(status)) {
+      throw new Error(
+        `Cannot group Requirement ${requirement.id}: invalid status ${String(status)}`,
+      );
+    }
+    groups[status].push(requirement);
   }
 
   return groups;

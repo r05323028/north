@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useRequirementCollection } from "@/lib/use-requirement-collection";
-import type { Requirement } from "@/lib/requirements";
+import type { Requirement, RequirementQuery } from "@/lib/requirements";
 
 type EventListener = (event: Event) => void;
 
@@ -47,14 +47,14 @@ const first: Requirement = {
   acceptance_criteria: [],
   assumptions: [],
   open_questions: [],
-  status: "Draft",
+  status: "draft",
   revision: 1,
   state_version: 1,
   created_by: "user-1",
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
 };
-const second: Requirement = { ...first, title: "Second", status: "Ready" };
+const second: Requirement = { ...first, title: "Second", status: "ready" };
 
 function response(value: Requirement[]) {
   return {
@@ -72,8 +72,8 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function Probe() {
-  const { requirements, loading } = useRequirementCollection();
+function Probe({ query }: { query?: RequirementQuery }) {
+  const { requirements, loading } = useRequirementCollection(query);
   return (
     <output>
       {loading
@@ -109,7 +109,7 @@ describe("useRequirementCollection invalidation", () => {
       root.render(<Probe />);
       await settle();
     });
-    expect(container.textContent).toBe("r-1:Draft");
+    expect(container.textContent).toBe("r-1:draft");
 
     const source = FakeEventSource.instances[0];
     await act(async () => {
@@ -117,7 +117,7 @@ describe("useRequirementCollection invalidation", () => {
       source.open();
       await settle();
     });
-    expect(container.textContent).toBe("r-1:Ready");
+    expect(container.textContent).toBe("r-1:ready");
 
     await act(async () => {
       source.emit(
@@ -136,15 +136,60 @@ describe("useRequirementCollection invalidation", () => {
       );
       await settle();
     });
-    expect(container.textContent).toBe("r-1:Ready");
-    expect((container.textContent ?? "").match(/r-1:Ready/g)).toHaveLength(1);
+    expect(container.textContent).toBe("r-1:ready");
+    expect((container.textContent ?? "").match(/r-1:ready/g)).toHaveLength(1);
 
     await act(async () => {
       window.dispatchEvent(new Event("focus"));
       await settle();
     });
-    expect(container.textContent).toBe("r-1:Ready");
+    expect(container.textContent).toBe("r-1:ready");
     expect(fetchMock).toHaveBeenCalledTimes(5);
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("keeps one EventSource when query changes", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response([first]));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<Probe query={{ search: "first" }} />);
+      await settle();
+    });
+    fetchMock.mockResolvedValue(response([second]));
+
+    await act(async () => {
+      root.render(<Probe query={{ search: "second" }} />);
+      await settle();
+    });
+
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
+      "/requirements?search=first",
+      "/requirements?search=second",
+    ]);
+
+    await act(async () => {
+      FakeEventSource.instances[0].emit(
+        "requirement.changed",
+        JSON.stringify({
+          category: "requirement.changed",
+          requirement_id: "r-1",
+        }),
+      );
+      await settle();
+    });
+    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+      "/requirements?search=second",
+    );
 
     await act(async () => {
       root.unmount();
@@ -172,7 +217,7 @@ describe("useRequirementCollection invalidation", () => {
       initial.resolve(response([first]));
       await settle();
     });
-    expect(container.textContent).toBe("r-1:Draft");
+    expect(container.textContent).toBe("r-1:draft");
 
     const source = FakeEventSource.instances[0];
     await act(async () => {
@@ -198,13 +243,13 @@ describe("useRequirementCollection invalidation", () => {
       newer.resolve(response([second]));
       await settle();
     });
-    expect(container.textContent).toBe("r-1:Ready");
+    expect(container.textContent).toBe("r-1:ready");
 
     await act(async () => {
       older.resolve(response([first]));
       await settle();
     });
-    expect(container.textContent).toBe("r-1:Ready");
+    expect(container.textContent).toBe("r-1:ready");
 
     await act(async () => {
       root.unmount();

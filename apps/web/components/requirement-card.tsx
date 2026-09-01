@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
-import type { Requirement } from "@/lib/requirements";
+import { requirementStatusLabels, type Requirement } from "@/lib/requirements";
 
 export function RequirementCard({ requirement }: { requirement: Requirement }) {
   return (
@@ -12,7 +12,7 @@ export function RequirementCard({ requirement }: { requirement: Requirement }) {
     >
       <div className="flex items-start justify-between gap-3">
         <h3 className="font-medium leading-snug">{requirement.title}</h3>
-        <Badge>{requirement.status}</Badge>
+        <Badge>{requirementStatusLabels[requirement.status]}</Badge>
       </div>
       <dl className="mt-4 grid gap-1 text-xs text-muted-foreground">
         <div className="flex justify-between gap-3">

@@ -5,7 +5,11 @@ import Link from "next/link";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { getRequirement, type Requirement } from "@/lib/requirements";
+import {
+  requirementStatusLabels,
+  getRequirement,
+  type Requirement,
+} from "@/lib/requirements";
 
 export function RequirementDetail({ id }: { id: string }) {
   const [requirement, setRequirement] = useState<Requirement | null>(null);
@@ -83,7 +87,7 @@ export function RequirementDetailView({
             {requirement.title}
           </h1>
         </div>
-        <Badge>{requirement.status}</Badge>
+        <Badge>{requirementStatusLabels[requirement.status]}</Badge>
       </div>
       <Card>
         <CardHeader>

@@ -5,6 +5,7 @@ import {
   getRequirement,
   groupRequirements,
   listRequirements,
+  parseRequirement,
   requirementsUrl,
   type Requirement,
 } from "@/lib/requirements";
@@ -43,11 +44,11 @@ function jsonResponse(value: unknown, status = 200) {
 describe("Requirement collection helpers", () => {
   it("places each mixed-status Requirement in exactly one fixed group", () => {
     const requirements = [
-      requirement("draft", "Draft"),
-      requirement("discussing", "Discussing"),
-      requirement("ready", "Ready"),
-      requirement("accepted", "Accepted"),
-      requirement("rejected", "Rejected"),
+      requirement("draft", "draft"),
+      requirement("discussing", "discussing"),
+      requirement("ready", "ready"),
+      requirement("accepted", "accepted"),
+      requirement("rejected", "rejected"),
     ];
 
     const groups = groupRequirements(requirements);
@@ -57,15 +58,15 @@ describe("Requirement collection helpers", () => {
     expect(new Set(grouped.map(({ id }) => id))).toEqual(
       new Set(requirements.map(({ id }) => id)),
     );
-    expect(groups.Ready.map(({ id }) => id)).toEqual(["ready"]);
-    expect(groups.Rejected.map(({ id }) => id)).toEqual(["rejected"]);
+    expect(groups.ready.map(({ id }) => id)).toEqual(["ready"]);
+    expect(groups.rejected.map(({ id }) => id)).toEqual(["rejected"]);
   });
 
   it("maps supported list controls to server query names", () => {
     expect(
       requirementsUrl({
         search: "login flow",
-        status: "Ready",
+        status: "ready",
         created_by: "user-1",
         sort: "updated_asc",
       }),
@@ -81,12 +82,22 @@ describe("Requirement API", () => {
     vi.unstubAllGlobals();
   });
 
+  it("groups a canonical server draft response for the Draft column", async () => {
+    const serverResponse = requirement("draft", "draft");
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse([serverResponse]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await listRequirements();
+
+    expect(groupRequirements(result).draft).toEqual([serverResponse]);
+  });
+
   it("sends list filters to the canonical collection endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse([]));
     vi.stubGlobal("fetch", fetchMock);
 
     await listRequirements({
-      status: "Ready",
+      status: "ready",
       created_by: "user-1",
       sort: "updated",
     });
@@ -97,8 +108,16 @@ describe("Requirement API", () => {
     );
   });
 
+  it("rejects non-canonical server status values", () => {
+    const malformed = { ...requirement("bad", "draft"), status: "Draft" };
+
+    expect(() => parseRequirement(malformed)).toThrow(
+      "Server returned invalid Requirement status: Draft",
+    );
+  });
+
   it("posts only title and description and returns canonical response", async () => {
-    const canonical = requirement("created", "Draft", {
+    const canonical = requirement("created", "draft", {
       revision: 1,
       state_version: 1,
     });
@@ -125,7 +144,7 @@ describe("Requirement API", () => {
   });
 
   it("loads detail through the encoded canonical route", async () => {
-    const canonical = requirement("r/1", "Ready");
+    const canonical = requirement("r/1", "ready");
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(canonical));
     vi.stubGlobal("fetch", fetchMock);
 

@@ -28,47 +28,47 @@ export function useRequirementCollection(
   query: RequirementQuery = {},
 ): RequirementCollectionState {
   const path = requirementsUrl(query);
+  const pathRef = useRef(path);
+  pathRef.current = path;
   const requestNumber = useRef(0);
   const [state, setState] = useState<RequirementCollectionState>(initialState);
 
-  const fetchCollection = useCallback(
-    async (clear: boolean) => {
-      const currentRequest = ++requestNumber.current;
-      setState((current) => ({
-        requirements: clear ? [] : current.requirements,
-        loading: clear || current.requirements.length === 0,
-        refreshing: !clear && current.requirements.length > 0,
-        error: null,
-      }));
+  const fetchCollection = useCallback(async (clear: boolean) => {
+    const currentRequest = ++requestNumber.current;
+    const currentPath = pathRef.current;
+    setState((current) => ({
+      requirements: clear ? [] : current.requirements,
+      loading: clear || current.requirements.length === 0,
+      refreshing: !clear && current.requirements.length > 0,
+      error: null,
+    }));
 
-      try {
-        const requirements = await listRequirementsAtPath(path);
-        if (currentRequest !== requestNumber.current) return;
-        setState({
-          requirements,
-          loading: false,
-          refreshing: false,
-          error: null,
-        });
-      } catch (cause) {
-        if (currentRequest !== requestNumber.current) return;
-        setState((current) => ({
-          ...current,
-          loading: false,
-          refreshing: false,
-          error:
-            cause instanceof Error
-              ? cause.message
-              : "Unable to load requirements",
-        }));
-      }
-    },
-    [path],
-  );
+    try {
+      const requirements = await listRequirementsAtPath(currentPath);
+      if (currentRequest !== requestNumber.current) return;
+      setState({
+        requirements,
+        loading: false,
+        refreshing: false,
+        error: null,
+      });
+    } catch (cause) {
+      if (currentRequest !== requestNumber.current) return;
+      setState((current) => ({
+        ...current,
+        loading: false,
+        refreshing: false,
+        error:
+          cause instanceof Error
+            ? cause.message
+            : "Unable to load requirements",
+      }));
+    }
+  }, []);
 
   useEffect(() => {
     void fetchCollection(true);
-  }, [fetchCollection]);
+  }, [fetchCollection, path]);
 
   useEffect(() => {
     const refresh = () => {

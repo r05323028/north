@@ -50,16 +50,18 @@ readiness interaction, or editing.
 
 ### Requirement: Board groups by lifecycle state
 
-The board SHALL render one fixed column for each Requirement lifecycle state:
-Draft, Discussing, Ready, Accepted, and Rejected. Cards SHALL be placed using
-the server-reported status and SHALL show at least title, status, creator
-(`created_by`), and updated time. A create action and navigation to the
-Board-owned Requirement detail route SHALL be available.
+The board SHALL render one fixed column for each canonical server status
+identifier: `draft`, `discussing`, `ready`, `accepted`, and `rejected`. The
+corresponding display labels SHALL be Draft, Discussing, Ready, Accepted, and
+Rejected. Cards SHALL be placed using the server-reported identifier and SHALL
+show at least title, its presentation status label, creator (`created_by`), and
+updated time. A create action and navigation to the Board-owned Requirement
+detail route SHALL be available.
 
 #### Scenario: Column placement matches server state
 
 - **WHEN** the collection contains Requirements with mixed lifecycle statuses
-- **THEN** every returned Requirement appears in exactly the column matching its server status
+- **THEN** every returned Requirement appears in exactly one column keyed by its canonical server status identifier and displays that identifier's presentation label
 
 ### Requirement: List supports server search, filters, and sorting
 

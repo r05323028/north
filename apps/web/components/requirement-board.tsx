@@ -5,8 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   groupRequirements,
+  requirementStatusLabels,
   requirementStatuses,
-  type Requirement,
 } from "@/lib/requirements";
 import { useRequirementCollection } from "@/lib/use-requirement-collection";
 import type { RequirementCollectionState } from "@/lib/use-requirement-collection";
@@ -75,7 +75,7 @@ export function RequirementBoardView({
                     className="font-semibold"
                     id={`requirement-column-${status}`}
                   >
-                    {status}
+                    {requirementStatusLabels[status]}
                   </h2>
                   <Badge>{items.length}</Badge>
                 </div>

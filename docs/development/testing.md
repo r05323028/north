@@ -108,8 +108,10 @@ runnable test exists and passes.
 
 Components come from shadcn/ui (`npx shadcn@latest add <component>`); do not
 fork them casually. Frontend unit tests use Vitest (`npm test`) and run through
-`./scripts/validate.sh unit` and `ci`. Browser workflows use Playwright
-(`npm run test:e2e`); install its browser with `npx playwright install chromium`.
+`./scripts/validate.sh unit` and `ci`. Browser-boundary Board workflows use
+Playwright (`npm run test:e2e`) and run in merge-gate job `web-e2e` on
+`ubuntu-latest`; this mocked-route suite does not prove assembled server/browser
+behavior. Install its browser locally with `npx playwright install chromium`.
 Coverage generation/upload remains CI-specific (`npm run test:coverage`).
 
 ## Specs

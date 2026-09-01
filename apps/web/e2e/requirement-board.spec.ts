@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-type Status = "Draft" | "Discussing" | "Ready" | "Accepted" | "Rejected";
+type Status = "draft" | "discussing" | "ready" | "accepted" | "rejected";
 
 type Requirement = {
   id: string;
@@ -59,7 +59,7 @@ function isApiFetch(request: {
 test("Board repairs missed updates on reconnect, duplicate delayed hints, and refocus", async ({
   page,
 }) => {
-  let current = [requirement("r-1", "Draft")];
+  let current = [requirement("r-1", "draft")];
   let collectionRequests = 0;
   let eventConnections = 0;
   await page.route("**/requirements**", async (route) => {
@@ -98,7 +98,7 @@ test("Board repairs missed updates on reconnect, duplicate delayed hints, and re
   await page.goto("/");
   await expect(page.getByTestId("requirement-card-r-1")).toContainText("Draft");
 
-  current = [requirement("r-1", "Ready")];
+  current = [requirement("r-1", "ready")];
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect.poll(() => collectionRequests).toBeGreaterThan(1);
   await expect(page.getByTestId("requirement-card-r-1")).toContainText("Ready");
@@ -119,7 +119,7 @@ test("List sends search, status, creator, and updated sort to server", async ({
     }
     requests.push(request.url());
     await route.fulfill({
-      body: JSON.stringify([requirement("r-1", "Ready")]),
+      body: JSON.stringify([requirement("r-1", "ready")]),
       headers: jsonHeaders(),
     });
   });
@@ -155,7 +155,7 @@ test("List sends search, status, creator, and updated sort to server", async ({
 test("create uses canonical response and opens read-only detail", async ({
   page,
 }) => {
-  const created = requirement("created-1", "Draft", "Created requirement");
+  const created = requirement("created-1", "draft", "Created requirement");
   let createBody: unknown;
   await page.route("**/requirements**", async (route) => {
     const request = route.request();

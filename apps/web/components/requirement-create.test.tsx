@@ -23,7 +23,7 @@ function response() {
           acceptance_criteria: [],
           assumptions: [],
           open_questions: [],
-          status: "Draft",
+          status: "draft",
           revision: 1,
           state_version: 1,
           created_by: "user-1",

@@ -12,9 +12,10 @@ checks, never replacements.
 | `rust-coverage` | Rust workspace LCOV coverage upload |
 | `daemon-integration` | PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository, and durable protocol integration tests |
 | `web` | lint · typecheck · production build (`apps/web`) |
+| `web-e2e` | Playwright Board/List/create/detail and SSE browser-boundary workflows on `ubuntu-latest` |
 | `web-coverage` | Frontend Vitest LCOV coverage upload |
 | `openspec` | `openspec validate --all --strict` |
-| `gate` | succeeds only when all required jobs, including coverage jobs, succeed |
+| `gate` | succeeds only when all required jobs, including web E2E and coverage jobs, succeed |
 
 Branch protection should require exactly one check: **`gate`** — internal job
 structure may evolve without touching rulesets.

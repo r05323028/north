@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select } from "@/components/ui/select";
 import {
+    requirementStatusLabels,
     requirementStatuses,
     type RequirementQuery,
     type RequirementSort,
@@ -112,13 +113,12 @@ export function RequirementListView({
                         <label htmlFor="requirement-status">Status</label>
                         <Select
                             id="requirement-status"
-                            value={status.toLowerCase()}
+                            value={status}
                             onChange={(event) => {
                                 const value = event.target.value;
                                 onStatusChange(
                                     requirementStatuses.find(
-                                        (candidate) =>
-                                            candidate.toLowerCase() === value,
+                                        (candidate) => candidate === value,
                                     ) ?? "",
                                 );
                             }}
@@ -127,9 +127,9 @@ export function RequirementListView({
                             {requirementStatuses.map((candidate) => (
                                 <option
                                     key={candidate}
-                                    value={candidate.toLowerCase()}
+                                    value={candidate}
                                 >
-                                    {candidate}
+                                    {requirementStatusLabels[candidate]}
                                 </option>
                             ))}
                         </Select>
@@ -210,7 +210,13 @@ export function RequirementListView({
                                             </Link>
                                         </td>
                                         <td className="px-4 py-3">
-                                            <Badge>{requirement.status}</Badge>
+                                            <Badge>
+                                                {
+                                                    requirementStatusLabels[
+                                                        requirement.status
+                                                    ]
+                                                }
+                                            </Badge>
                                         </td>
                                         <td className="px-4 py-3">
                                             {requirement.created_by}

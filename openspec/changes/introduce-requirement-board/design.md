@@ -13,6 +13,11 @@ POST /requirements       { title, description }
 GET  /requirements/{id}
 ```
 
+Requirement `status` values on the wire and in the frontend domain are the
+lowercase identifiers `draft`, `discussing`, `ready`, `accepted`, and
+`rejected`. The corresponding presentation labels are `Draft`, `Discussing`,
+`Ready`, `Accepted`, and `Rejected`.
+
 `GET /requirements` returns the current single-instance collection as one JSON
 array. Its server-side search covers structured Requirement fields, status and
 creator filters are server-side, and updated sorting has a deterministic ID
@@ -21,9 +26,10 @@ page-size invariant that the API does not define.
 
 ## Views
 
-- Board maps the stable server status strings Draft, Discussing, Ready,
-  Accepted, and Rejected to fixed columns. A card renders title, status,
-  creator (`created_by`), and updated timestamp and links to
+- Board maps canonical server status identifiers (`draft`, `discussing`,
+  `ready`, `accepted`, `rejected`) to fixed columns labeled Draft, Discussing,
+  Ready, Accepted, and Rejected. A card renders title, the presentation status
+  label, creator (`created_by`), and updated timestamp and links to
   `/requirements/[id]`.
 - List preserves server order, renders search/filter/sort controls, and sends
   each control as query parameters. Its creator filter uses the existing
