@@ -65,8 +65,9 @@ authorization rules.
   mutation; the message remains persisted.
 - `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`
   has no message body. It validates that `run_id` exists, belongs to the
-  Requirement in the URL, is `phase=active` with an assigned, non-terminal run
-  (including a pinned daemon that is operationally unavailable), and that the
+  Requirement in the URL, is `phase=active` with `cancel_requested=false` and an assigned,
+  non-terminal run (including a pinned daemon that is operationally unavailable),
+  and that the
   persisted requester message belongs to this Requirement's canonical
   conversation, is eligible for that run, and is not the recorded start message.
   It returns `202 Accepted` after creating or reusing exactly one durable
@@ -124,7 +125,13 @@ whether this run still occupies the sequential clarification slot; `status`
 describes coarse operational health/result; `cancel_requested` records user
 intent. These fields are independent. `phase=active` remains active even when
 `status=unavailable` because a pinned daemon is disconnected or cancellation is
-awaiting a terminal runtime fact.
+awaiting a terminal runtime fact. A new run with no eligible daemon remains
+`phase=awaiting_assignment`, `status=unavailable`; when North selects daemon D,
+it atomically persists D's pin, the Requirement/run binding, immutable context,
+and complete `session.start`, the run becomes `phase=active`,
+`status=starting`, and acquires the competing slot before dispatch.
+`session.started` retains `phase=active` and changes only coarse status to
+`running`.
 
 A valid `clarification/start` may resolve the latest run before daemon selection
 because it is the identity-creating operation. It reuses the latest run only
@@ -350,7 +357,7 @@ an event projection before its terminal ACK:
 
 | Event | Canonical effect | Requirement effect |
 | --- | --- | --- |
-| `session.started` | Set coarse session status to `running`; retain runtime fact. | None. |
+| `session.started` | Retain `phase=active`, set coarse session status to `running`, and retain the runtime fact. | None. |
 | `agent.message` | Insert one `agent` conversation message using the event message ID. | None. |
 | `agent.activity` | Append one intentionally coarse activity record. | None. |
 | `requirement.assessed` | Run existing readiness transaction; retain accepted/rejected immutable evidence and current pointer/read result. | Only the existing server/domain `Discussing → Ready` gate may promote. |
@@ -464,11 +471,16 @@ Dispatch and cancellation require explicit `run_id`. The server first performs
 normal Requirement authorization, then looks up the run constrained by that
 Requirement. An unknown or Requirement-mismatched run returns HTTP `404` with
 generic error code `not_found`; it never leaks cross-Requirement run existence.
-Dispatch is eligible only for an assigned `phase=active` run; an
-`awaiting_assignment` or `terminal` run receives its run-scoped canonical
-conflict/unavailability result without a command. An active pinned daemon may be
-temporarily unavailable, but its durable `message.send` remains bound to that
-run for recovery and replay.
+Dispatch is eligible only for an assigned `phase=active` run with
+`cancel_requested=false`; an `awaiting_assignment`, cancellation-pending, or
+`terminal` run receives its run-scoped canonical conflict/unavailability
+result without a command. An active pinned daemon may be temporarily
+unavailable, but its durable `message.send` remains bound to that run for
+recovery and replay. A cancellation-pending run remains active and competing,
+but later message dispatch MUST fail/conflict. If requester message persistence
+commits before cancellation wins a race, that message remains canonical; a
+subsequent dispatch MUST fail/conflict and MUST NOT create `message.send` or
+roll back the persisted message.
 
 Cancellation intent is separate from cancellation completion. For an unassigned
 run with `daemon_id = null`, no `session.start`, and no runtime execution,
@@ -480,7 +492,8 @@ start a new sequential run.
 For an assigned `phase=active` run, cancellation persists
 `cancel_requested=true`, creates or reuses exactly one durable `session.cancel`
 for its pinned daemon, and leaves the run `phase=active` in the competing slot.
-A repeated request is idempotent. `command_ack` only means the daemon durably
+A repeated request is idempotent; later message dispatch is not legal while
+`cancel_requested=true`. `command_ack` only means the daemon durably
 recorded `session.cancel`; it is not runtime cancellation completion and does
 not permit a new run. A later valid `session.completed` or `session.failed`
 event, after normal binding/identity/sequence validation and durable projection,

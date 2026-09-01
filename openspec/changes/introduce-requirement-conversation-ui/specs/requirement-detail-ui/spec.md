@@ -51,9 +51,11 @@ implicitly determine mutation identity. The UI SHALL use `phase`, not coarse
 - `phase=awaiting_assignment` allows same-start retry only with the canonical
   public `start_message_id`, or cancellation of that explicit `run_id`; it does
   not dispatch later messages or create a competing start;
-- `phase=active` allows later-message dispatch and cancellation to the explicit
-  `run_id`, but never a competing start, even when `status=unavailable` because
-  the pinned daemon is disconnected or cancellation is pending; and
+- `phase=active` with `cancel_requested=false` allows later-message dispatch
+  and cancellation to the explicit `run_id`, but never a competing start, even
+  when `status=unavailable` because the pinned daemon is disconnected;
+- `phase=active` with `cancel_requested=true` keeps the run competing and
+  permits only idempotent cancellation; later-message dispatch is rejected; and
 - `phase=terminal` allows a new persisted eligible message to use `start`.
 
 Except for identity-creating `start`, the UI SHALL never perform dispatch or
@@ -78,6 +80,18 @@ not add another logical message or runtime submission.
 
 - **WHEN** the UI persists later message M and calls `/requirements/{requirement_id}/clarification/runs/A/messages/M/dispatch` with known run A
 - **THEN** the server creates/reuses exactly one durable `message.send` mapping for M and does not create another conversation message or retarget the request to a newer run
+
+#### Scenario: Cancellation-pending run rejects later dispatch
+
+- **GIVEN** run A is `phase=active` with `cancel_requested=true`
+- **WHEN** the UI attempts to dispatch later message M to A
+- **THEN** dispatch fails/conflicts, creates no `message.send`, A remains active and competing, and repeated cancellation remains idempotent
+
+#### Scenario: Persisted message survives cancellation/dispatch race
+
+- **GIVEN** requester message M is persisted for assigned active run A
+- **WHEN** cancellation commits `cancel_requested=true` before the UI dispatches M
+- **THEN** M remains canonical conversation history, dispatch fails/conflicts without creating `message.send`, and the UI does not delete or roll back M
 
 #### Scenario: Agent reply survives transport loss
 
@@ -130,7 +144,7 @@ not add another logical message or runtime submission.
 
 - **GIVEN** run A has `phase=active` and `cancel_requested=true`
 - **WHEN** the UI receives a successful `session.cancel` `command_ack` but no terminal runtime event
-- **THEN** the UI keeps A active, does not offer a competing start, and continues targeting dispatch/cancel actions at A's explicit `run_id`
+- **THEN** the UI keeps A active and competing, does not offer a competing start, rejects later-message dispatch, permits repeated idempotent cancellation, and continues targeting cancellation at A's explicit `run_id`
 
 #### Scenario: Unassigned cancellation releases slot immediately
 
@@ -199,7 +213,9 @@ health/result (`starting`, `running`, `completed`, or `unavailable`). The UI
 shall not infer action legality from `status=unavailable` alone. `phase=active`
 continues to occupy the competing slot when a pinned daemon is disconnected or
 cancellation is pending. `cancel_requested` is user intent and does not itself
-make an assigned run terminal. A newer sequential run replaces an older run as
+make an assigned run terminal. Later-message dispatch is legal only when
+`cancel_requested=false`; cancellation remains legal and idempotent while the
+assigned run stays active. A newer sequential run replaces an older run as
 the rendered latest projection; older runs remain server-owned history and need
 not be exposed as a full run-history UI. The UI SHALL not require or define the
 later retry state machine, attempt count, retry budget, server backoff, or
@@ -208,7 +224,9 @@ terminal execution failure semantics.
 #### Scenario: Phase disambiguates unavailable status
 
 - **WHEN** the session read reports `status=unavailable`
-- **THEN** the UI uses `phase=awaiting_assignment` to offer only same-start retry/cancel, `phase=active` to keep the run competing without a new start, and `phase=terminal` to allow a new eligible start, while retaining canonical Requirement lifecycle/status
+- **THEN** the UI uses `phase=awaiting_assignment` to offer only same-start retry/cancel, `phase=active` to keep the run competing without a new start and reject later
+dispatch when cancellation is pending, and `phase=terminal` to allow a new
+eligible start, while retaining canonical Requirement lifecycle/status
 
 ### Requirement: Reconnect and refocus refetch all canonical detail state
 

@@ -16,8 +16,10 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
   Explicit run-scoped dispatch/cancellation use known `run_id`. The public
   `phase` projection determines legal intent: no session starts a run,
   `awaiting_assignment` permits only same-start retry or cancellation,
-  `active` permits later dispatch or cancellation but blocks a competing start,
-  and `terminal` permits a new start. `status` remains display-only coarse
+  `active` with `cancel_requested=false` permits later dispatch or
+  cancellation, while active `cancel_requested=true` permits only idempotent
+  cancellation and remains competing, and `terminal` permits a new start.
+  `status` remains display-only coarse
   health/result. Latest-session reads may guide presentation, but never supply
   an implicit mutation target; SSE only hints that a refetch may be useful and
   transcript contents never select the operation.
@@ -44,9 +46,11 @@ and run-scoped cancellation mutations, plus its canonical readiness, activity,
 and latest-run reads. The public session projection includes `run_id`,
 `start_message_id`, `phase`, `status`, `cancel_requested`, and safe timestamps,
 so reload can retry an `awaiting_assignment` run using its persisted start
-message. The UI uses `phase`, not coarse `status` alone, for legal intent; the
-URL's explicit `run_id`, not latest-read recency, determines every later
-mutation target. Latest-run reads may guide presentation but MUST NOT supply an
+message. The UI uses `phase` and `cancel_requested`, not coarse `status` alone,
+for legal intent; later dispatch is allowed only for active runs with
+`cancel_requested=false`, while an active cancellation-pending run keeps its
+slot and rejects dispatch. The URL's explicit `run_id`, not latest-read
+recency, determines every later mutation target. Latest-run reads may guide presentation but MUST NOT supply an
 implicit target, and the UI never performs dispatch or cancellation without a
 known `run_id`. Existing protocol `session_id` carries the same identity
 (`session_id = run_id`). It consumes the Board-owned shared `GET /events`

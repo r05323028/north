@@ -134,7 +134,9 @@ restart recovery, unknown-outcome reporting, bounded gap buffering, replay,
 and compaction tombstones.
 Architecture tests mechanically confirm pure-crate allowlists, both hosts'
 `north-protocol` dependency, server/daemon separation, and the browser
-WebSocket ban. The real transport integration test is
+WebSocket ban. The server SSE unit suite also proves a subscriber that overruns
+the broadcast buffer terminates rather than silently skipping notification
+continuity. The real transport integration test is
 `tests/transport/tests/websocket.rs` and runs with
 `cargo test -p north-transport-integration --test websocket`. The PostgreSQL-backed daemon lifecycle, repository lifecycle/citation, and
 durable protocol delivery tests run locally with `NORTH_TEST_DATABASE_URL` and

@@ -48,7 +48,10 @@ identity rather than retargeting the prior run.
 When a daemon is selected for a new or reused run, the server SHALL persist the
 run's immutable `daemon_id`, bind it to one Requirement, persist the run
 repository IDs, and atomically persist the complete `session.start` command
-before dispatch. A new run SHALL receive the current Requirement snapshot and
+before dispatch. That same authoritative operation SHALL set the run to
+`phase=active`, `status=starting`, and acquire the competing active-run
+slot; `session.started` is not required to acquire that slot. A new run SHALL
+receive the current Requirement snapshot and
 revision, its own `run_id`/`session_id` identity, `start_message_id`, repository
 set, and command/event sequence. `session.start` SHALL contain the immutable
 Requirement snapshot, a deterministic bounded excerpt selected by North from
@@ -71,6 +74,13 @@ content snapshot token, not the write precondition.
 
 - **WHEN** the server dispatches `session.start`
 - **THEN** the daemon receives the server-selected Requirement, deterministic conversation excerpt, and repository context, with no credential or persistence access
+
+#### Scenario: Assignment acquires the active slot before runtime startup
+
+- **GIVEN** run A is `phase=awaiting_assignment`, `status=unavailable`, and has no daemon pin
+- **WHEN** North atomically selects daemon D, persists D's pin, the Requirement/run binding, immutable run context, and complete `session.start` command
+- **THEN** A becomes `phase=active`, `status=starting`, and occupies the competing slot before dispatch
+- **AND** another clarification start conflicts even though `session.started` has not arrived; that event only retains `phase=active` and changes status to `running`
 
 #### Scenario: Start message is always retained
 
@@ -134,8 +144,9 @@ introducing a generic command API:
   preserving the already-persisted message.
 - `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`
   has no message body. It SHALL verify that `run_id` exists, belongs to the
-  Requirement in the URL, is `phase=active` with an assigned non-terminal run
-  (including a pinned daemon that is operationally unavailable), and that the
+  Requirement in the URL, is `phase=active` with `cancel_requested=false` and
+  an assigned non-terminal run (including a pinned daemon that is operationally
+  unavailable), and that the
   persisted requester message belongs to this Requirement's canonical
   conversation, is eligible for that run, and is not the recorded start message.
   It then creates or reuses exactly one durable `message.send` command for that
@@ -190,6 +201,18 @@ idempotent result without creating a command for another run.
 
 - **WHEN** a persisted later message M is dispatched more than once to explicit run A
 - **THEN** all requests use `/clarification/runs/A/messages/M/dispatch`, reuse one message-to-command mapping, and the runtime receives at most one logical `message.send`; dispatching the recorded start message is rejected and cannot create a second command
+
+#### Scenario: Cancellation-pending active run rejects later dispatch
+
+- **GIVEN** assigned run A is `phase=active` with `cancel_requested=true`
+- **WHEN** a later persisted message is dispatched to A
+- **THEN** dispatch fails/conflicts, creates no `message.send` command, and A remains active and competing; repeated cancellation remains idempotent
+
+#### Scenario: Persisted message survives cancellation/dispatch race
+
+- **GIVEN** requester message M is durably persisted for assigned active run A
+- **WHEN** cancellation for A commits `cancel_requested=true` before dispatch of M
+- **THEN** M remains canonical conversation history, dispatch fails/conflicts, no `message.send` command is created, and North does not delete or roll back M
 
 #### Scenario: Reuse unavailable start attempt
 
@@ -379,7 +402,7 @@ For well-formed, session-bound runtime events, the server SHALL retain the
 existing event identity/sequence checks, apply one idempotent projection, and
 send the terminal event ACK only after that projection commits:
 
-- `session.started` sets `phase=active` and coarse session status to `running`;
+- `session.started` retains `phase=active` and sets coarse session status to `running`;
 - `agent.message` appends one persisted `agent` conversation message;
 - `agent.activity` appends one coarse product-visible activity record;
 - `session.completed` sets `phase=terminal` and coarse status to `completed`
@@ -472,9 +495,14 @@ recorded `start_message_id`. A different message while that attempt remains
 reusable SHALL return the canonical conflict. The start response SHALL include
 the public run projection with `run_id` and `start_message_id`.
 
-A run is `phase=active` when it has been assigned and has not reached a terminal
-runtime fact. This includes `starting`, `running`, a pinned daemon that is
-operationally unavailable, and an assigned run with `cancel_requested=true`.
+A run becomes `phase=active` when the server assigns a daemon and atomically
+persists the Requirement/run binding, immutable context, and complete
+`session.start` command; this assignment operation also sets `status=starting`
+and acquires the competing slot. `session.started` retains `phase=active` and
+sets `status=running`; it does not acquire the slot. An active run remains
+active until a terminal runtime fact. This includes `starting`, `running`, a
+pinned daemon that is operationally unavailable, and an assigned run with
+`cancel_requested=true`.
 An active run SHALL reject a different start message and SHALL create no second
 run or `session.start` command. A run is `phase=terminal` after an unassigned
 pre-start cancellation or a durably projected `session.completed` or
@@ -522,7 +550,10 @@ terminal operational failure. No `session.cancelled` frame is introduced.
 
 All dispatch and cancellation operations are run-scoped and require their
 explicit `run_id`; they SHALL not resolve the latest run. Dispatch is legal only
-for assigned `phase=active` runs. This change SHALL expose only the small
+for assigned `phase=active` runs with `cancel_requested=false`. An active
+run with `cancel_requested=true` remains competing, but later message dispatch
+is prohibited; repeated cancellation remains idempotent. This change SHALL expose
+only the small
 `awaiting_assignment`/`active`/`terminal` phase and coarse
 `starting`/`running`/`completed`/`unavailable` status plus cancellation intent.
 It SHALL NOT add `Idle`/`Retrying`/final `Failed` retry policy, attempt

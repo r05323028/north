@@ -15,7 +15,9 @@ The board and list SHALL consume the current authenticated
 `created_by`, and `sort` query parameters. North 0.1.0 defines no cursor,
 `limit`, `offset`, total-count, page-size, or virtualization contract for this
 surface. Cursor pagination and virtualization SHALL remain out of scope unless
-a separate change first defines them.
+a separate change first defines them. The HTTP representation of `revision` and
+`state_version` remains numeric; the browser boundary SHALL accept only positive
+JavaScript safe integers (`Number.isSafeInteger(value) && value >= 1`).
 
 #### Scenario: Query controls stay server-backed
 
@@ -94,7 +96,9 @@ Board and list SHALL use HTTP for canonical reads/mutations and this change's
 single authenticated `GET /events` SSE endpoint for lightweight invalidation
 hints. The base producer SHALL emit `requirement.changed` only after the
 canonical Requirement transaction commits. `Last-Event-ID` SHALL not be
-required for correctness. `introduce-agent-requirement-clarification` may
+required for correctness. If the server detects that an SSE subscriber missed
+broadcast notifications, it SHALL close that stream so native EventSource
+reconnect/refetch can restore canonical state. `introduce-agent-requirement-clarification` may
 extend this same producer with clarification categories, but SHALL not create
 another endpoint or producer. The frontend SHALL never open a WebSocket.
 
@@ -123,12 +127,19 @@ SSE SHALL not be a durable browser event log, a Requirement state store, a
 WebSocket transport, or a required replay mechanism. After initial load,
 refocus, disconnect, or EventSource reconnect, board/list SHALL refetch
 `GET /requirements`. Missed, duplicated, delayed, or out-of-order hints SHALL
-never duplicate a Requirement row or lifecycle transition.
+never duplicate a Requirement row or lifecycle transition. If the server detects
+that a subscriber lagged beyond the broadcast buffer, it closes the stream so
+EventSource reconnect/refetch restores canonical state.
 
 #### Scenario: Missed update is repaired
 
 - **WHEN** the browser misses a notification while offline
 - **THEN** reconnect/refocus HTTP refetch returns the current server collection without replaying stream history
+
+#### Scenario: Lagged subscriber reconnects
+
+- **WHEN** the server detects that an SSE subscriber has missed broadcast notifications
+- **THEN** the server terminates that stream, native EventSource reconnects, and the browser refetches canonical HTTP state without requiring replay
 
 #### Scenario: Duplicate hint does not duplicate state
 

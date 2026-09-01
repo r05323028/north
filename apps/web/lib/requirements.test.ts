@@ -116,6 +116,38 @@ describe("Requirement API", () => {
     );
   });
 
+  it("accepts positive safe integer version tokens", () => {
+    const maxSafeInteger = Number.MAX_SAFE_INTEGER;
+    const parsed = parseRequirement(
+      requirement("safe", "draft", {
+        revision: maxSafeInteger,
+        state_version: maxSafeInteger,
+      }),
+    );
+
+    expect(parsed.revision).toBe(maxSafeInteger);
+    expect(parsed.state_version).toBe(maxSafeInteger);
+  });
+
+  it.each([
+    ["zero", 0],
+    ["negative", -1],
+    ["fractional", 1.5],
+    ["NaN", Number.NaN],
+    ["infinite", Number.POSITIVE_INFINITY],
+    ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+  ])("rejects %s version tokens", (_label, value) => {
+    for (const field of ["revision", "state_version"] as const) {
+      const malformed = {
+        ...requirement("bad-" + field, "draft"),
+        [field]: value,
+      };
+      expect(() => parseRequirement(malformed)).toThrow(
+        "Server returned invalid Requirement field: " + field,
+      );
+    }
+  });
+
   it("posts only title and description and returns canonical response", async () => {
     const canonical = requirement("created", "draft", {
       revision: 1,

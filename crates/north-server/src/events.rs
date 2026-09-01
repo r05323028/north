@@ -10,6 +10,7 @@ use std::convert::Infallible;
 use tokio::sync::broadcast;
 
 pub const REQUIREMENT_CHANGED: &str = "requirement.changed";
+const BROWSER_EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BrowserNotification {
@@ -33,7 +34,7 @@ pub struct BrowserEventHub {
 
 impl BrowserEventHub {
     pub fn new() -> Self {
-        let (sender, _) = broadcast::channel(256);
+        let (sender, _) = broadcast::channel(BROWSER_EVENT_CAPACITY);
         Self { sender }
     }
 
@@ -57,16 +58,17 @@ impl Default for BrowserEventHub {
 }
 
 /// Protected browser notification stream. It is intentionally in-memory and
-/// non-durable; HTTP remains the source of canonical Requirement state.
+/// non-durable; HTTP remains the source of canonical Requirement state. If a
+/// subscriber misses broadcast notifications, this stream terminates so native
+/// EventSource reconnect/refetch can restore canonical state.
 pub fn router() -> Router<crate::auth::AuthState> {
     Router::new().route("/events", get(events))
 }
 
-async fn events(
-    State(state): State<crate::auth::AuthState>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let receiver = state.events().subscribe();
-    let stream = stream::unfold(receiver, |mut receiver| async move {
+fn notification_stream(
+    receiver: broadcast::Receiver<BrowserNotification>,
+) -> impl Stream<Item = Result<SseEvent, Infallible>> {
+    stream::unfold(receiver, |mut receiver| async move {
         loop {
             match receiver.recv().await {
                 Ok(notification) => {
@@ -78,18 +80,25 @@ async fn events(
                     };
                     return Some((Ok(event), receiver));
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => return None,
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
-    });
-    Sse::new(stream).keep_alive(KeepAlive::new())
+    })
+}
+
+async fn events(
+    State(state): State<crate::auth::AuthState>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    Sse::new(notification_stream(state.events().subscribe())).keep_alive(KeepAlive::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
     use serde_json::json;
+    use tokio::time::{timeout, Duration};
 
     #[tokio::test]
     async fn publishes_identity_only_requirement_notifications() {
@@ -104,6 +113,25 @@ mod tests {
                 "category": "requirement.changed",
                 "requirement_id": "requirement-1"
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn lagged_subscriber_terminates_stream_for_reconnect() {
+        let hub = BrowserEventHub::new();
+        let receiver = hub.subscribe();
+
+        for index in 0..=BROWSER_EVENT_CAPACITY {
+            hub.requirement_changed(format!("requirement-{index}"));
+        }
+
+        let mut stream = Box::pin(notification_stream(receiver));
+        let item = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("lagged stream should terminate promptly");
+        assert!(
+            item.is_none(),
+            "lagged stream must terminate, not skip and continue"
         );
     }
 

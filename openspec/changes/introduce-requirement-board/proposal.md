@@ -16,7 +16,10 @@ needs:
   and updated-time sorting; and
 - responses include canonical lowercase lifecycle status identifiers
   (`draft`, `discussing`, `ready`, `accepted`, `rejected`), `revision`, and
-  `state_version`.
+  `state_version`. At the browser boundary, `revision` and `state_version`
+  remain JSON numbers and are valid only as positive JavaScript safe integers
+  (`Number.isSafeInteger(value) && value >= 1`); no string wire redesign is
+  introduced.
 
 The frontend keeps those identifiers as its wire/domain values and maps them to
 human-readable title-case labels only for presentation. This change does not
@@ -64,7 +67,9 @@ north-server canonical commit
 The endpoint is notification-only, non-authoritative, non-durable, and not a
 WebSocket or replay log. `Last-Event-ID` is not required for correctness;
 missed, duplicate, delayed, or out-of-order hints are harmless because HTTP
-refetch wins. `introduce-agent-requirement-clarification` extends this same
+refetch wins. If the server detects that an SSE subscriber missed broadcast
+notifications, it closes that stream so native EventSource reconnect/refetch
+restores canonical state. `introduce-agent-requirement-clarification` extends this same
 producer with clarification categories after its canonical transactions. It
 does not create another endpoint or event store.
 

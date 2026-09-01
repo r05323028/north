@@ -77,9 +77,14 @@ function requiredStringArray(
     : invalidRequirementField(field);
 }
 
-function requiredNumber(value: Record<string, unknown>, field: string): number {
+function requiredVersionNumber(
+  value: Record<string, unknown>,
+  field: string,
+): number {
   const fieldValue = value[field];
-  return typeof fieldValue === "number" && Number.isFinite(fieldValue)
+  return typeof fieldValue === "number" &&
+    Number.isSafeInteger(fieldValue) &&
+    fieldValue >= 1
     ? fieldValue
     : invalidRequirementField(field);
 }
@@ -104,8 +109,8 @@ export function parseRequirement(value: unknown): Requirement {
     assumptions: requiredStringArray(record, "assumptions"),
     open_questions: requiredStringArray(record, "open_questions"),
     status,
-    revision: requiredNumber(record, "revision"),
-    state_version: requiredNumber(record, "state_version"),
+    revision: requiredVersionNumber(record, "revision"),
+    state_version: requiredVersionNumber(record, "state_version"),
     created_by: requiredString(record, "created_by"),
     created_at: requiredString(record, "created_at"),
     updated_at: requiredString(record, "updated_at"),

@@ -41,10 +41,12 @@ are server projections, not transport caches. The existing Ready-only
   - `phase=awaiting_assignment` → allow only same-start retry using the
     canonical `start_message_id`, or cancellation of that explicit `run_id`;
     do not dispatch a later message or create a competing start;
-  - `phase=active` → dispatch later persisted messages to the explicit `run_id`
-    and target cancellation at that ID; do not start a competing run, including
-    when `status=unavailable` because the pinned daemon is disconnected or
-    cancellation is still pending;
+  - `phase=active` with `cancel_requested=false` → dispatch later persisted
+    messages to the explicit `run_id` and target cancellation at that ID; do
+    not start a competing run, including when `status=unavailable` because
+    the pinned daemon is disconnected;
+  - `phase=active` with `cancel_requested=true` → keep the run competing,
+    allow only idempotent cancellation, and reject later-message dispatch;
   - `phase=terminal` → call `start` with a new persisted eligible message to
     create a sequential run and retain its returned `run_id`.
   `status` is for display (`starting`, `running`, `completed`, or
@@ -82,7 +84,9 @@ message, refetches Requirement, conversation, readiness, activity, and latest
 session state, and never retries with a newer state version or creates a local
 second run. Dispatch and cancellation conflicts remain bound to their explicit
 `run_id`; refetching a newer latest session never rewrites an in-flight mutation
-from run A to run B.
+from run A to run B. If cancellation wins after message persistence but before
+dispatch, the message remains canonical and dispatch creates no `message.send`
+command.
 
 ## Reconnect and notification behavior
 

@@ -16,7 +16,10 @@ GET  /requirements/{id}
 Requirement `status` values on the wire and in the frontend domain are the
 lowercase identifiers `draft`, `discussing`, `ready`, `accepted`, and
 `rejected`. The corresponding presentation labels are `Draft`, `Discussing`,
-`Ready`, `Accepted`, and `Rejected`.
+`Ready`, `Accepted`, and `Rejected`. The HTTP wire format keeps
+`revision` and `state_version` as JSON numbers; the browser boundary accepts
+only positive JavaScript safe integers (`Number.isSafeInteger(value) && value >= 1`).
+No string-token redesign is part of North 0.1.
 
 `GET /requirements` returns the current single-instance collection as one JSON
 array. Its server-side search covers structured Requirement fields, status and
@@ -53,8 +56,10 @@ the canonical Requirement transaction commits. Board/list fetches
 `GET /requirements` on initial load, focus/refocus, and EventSource reconnect.
 On any notification, they may refetch once or coalesce nearby hints, but never
 patch a card from SSE data. `Last-Event-ID` is not a correctness contract; no
-browser stream replay is required. Producer failures do not roll back canonical
-server mutations.
+browser stream replay is required. If the server detects that an SSE subscriber
+missed broadcast notifications, it closes that stream so native EventSource
+reconnect/refetch restores canonical state. Producer failures do not roll back
+canonical server mutations.
 
 `introduce-agent-requirement-clarification` extends this same endpoint with
 `conversation.changed`, `readiness.changed`, `activity.changed`, and

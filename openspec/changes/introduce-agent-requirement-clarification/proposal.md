@@ -66,12 +66,18 @@ These are architectural invariants, not implementation suggestions:
 - Server orchestration for sequential clarification runs: select and durably
   pin an eligible daemon, assemble each run's immutable Requirement snapshot,
   deterministic bounded persisted conversation excerpt, and enabled repository
-  metadata, then persist and dispatch `session.start` through the existing
-  delivery path. North selects the excerpt in canonical persisted order and
-  always retains `start_message_id`; at most one non-terminal `phase=active` run may
-  compete for a Requirement; terminal runs remain historical. User-driven Draft → Discussing
-  starts honor `expected_state_version`; `revision` remains content identity,
-  not the write precondition.
+  metadata, then atomically persist the daemon pin, Requirement/run binding,
+  immutable context, and complete `session.start` before dispatch through the
+  existing delivery path. That authoritative operation changes a run from
+  `phase=awaiting_assignment`, `status=unavailable` to
+  `phase=active`, `status=starting` and acquires the competing slot. North
+  selects the excerpt in canonical persisted order and always retains
+  `start_message_id`; at most one non-terminal `phase=active` run may compete
+  for a Requirement; terminal runs remain historical. `session.started` only
+  confirms runtime startup, retaining `phase=active` while changing status to
+  `running`. User-driven Draft → Discussing starts honor
+  `expected_state_version`; `revision` remains content identity, not the
+  write precondition.
 - Durable requester-message ordering: persist the canonical message first,
   then create a stable `message.send` command using its persisted identity;
   initial-run messages belong in `session.start` context instead of being sent
@@ -141,13 +147,20 @@ recorded start message. Cancellation persists state for that run:
   reuse;
 - an assigned active run gets one durable `session.cancel`, remains
   `phase=active` and holds the competing-run slot until `session.completed` or
-  `session.failed` is durably projected; and
+  `session.failed` is durably projected; while `cancel_requested=true`, later
+  message dispatch is rejected; and
 - `command_ack` for `session.cancel` means only that the daemon durably recorded
   the command, not that runtime cancellation completed.
 
 A stale client targeting run A after run B becomes latest is evaluated only
 against run A and cannot mutate, cancel, or create a command for run B. No
-dispatch or cancel request silently resolves the latest run.
+dispatch or cancel request silently resolves the latest run. Later message
+dispatch is legal only for an assigned `phase=active` run with
+`cancel_requested=false`; cancellation remains idempotent for an active
+`cancel_requested=true` run, which keeps the slot but rejects new dispatch. If
+a requester message is persisted before cancellation wins a race, the message
+remains canonical, while dispatch fails/conflicts without creating
+`message.send` and without deleting or rolling back the message.
 
 `GET /requirements/{requirement_id}/session` remains a latest-run read convenience
 and returns `{ "session": null }` only before any run exists. Its public run
@@ -180,7 +193,13 @@ create/reuse rules; dispatch and cancellation never use latest-run lookup and
 require explicit `run_id`. This does **not** introduce the later execution retry
 state machine, attempt accounting, retry budget, server backoff policy, or
 terminal execution `Failed` decision. `session.resume` remains an existing
-execution-recovery command; this change does not decide when to issue it.
+execution-recovery command; this change does not decide when to issue it. The
+phase/status sequence is explicit: no daemon leaves a new run at
+`phase=awaiting_assignment`, `status=unavailable`; atomic daemon assignment
+plus durable `session.start` persistence sets `phase=active`,
+`status=starting` and acquires the slot; `session.started` retains active and
+sets `status=running`; and only `session.completed` or `session.failed`
+sets `phase=terminal`.
 For assigned cancellation, the adapter emits existing `session.completed` only
 after confirmed runtime termination, or existing `session.failed` for terminal
 cancellation failure; `command_ack` is never cancellation completion and no
