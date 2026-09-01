@@ -27,7 +27,8 @@ second wire schema, alternate ACK names, daemon-event cursors in
 ### Requirement: Server assembles and pins each run context
 
 A valid `clarification/start` MAY resolve the latest run only for its sequential
-create/reuse decision because the operation creates or returns the run identity.
+create/reuse/idempotency decision because the operation creates or returns
+the run identity.
 The latest run MAY be reused only when all of these are true:
 `phase=awaiting_assignment`, `daemon_id = null`, no `session.start` was
 successfully created or dispatched, it has not been cancelled or closed; the
@@ -35,7 +36,13 @@ request is the same logical start attempt; and the incoming `message_id` equals
 its recorded `start_message_id`. In this case the
 server SHALL reuse the run identity and attempt daemon selection again. A
 different message while that unassigned attempt is reusable SHALL return the
-canonical conflict.
+canonical conflict. If a matching `start_message_id` already has a committed run identity for an
+unclosed start attempt, concurrent or retried same-message starts SHALL resolve
+to that run and its existing command identities: one serialized request may complete
+conditional assignment for an awaiting run, but no request creates a second run
+or performs a second assignment, lifecycle transition, or `session.start`. The
+state-version precondition gates a new start mutation; it does not turn a
+matching idempotent retry into a second mutation.
 
 If the latest run is `phase=active` (assigned and non-terminal, including a
 pinned daemon that is operationally unavailable or a run with cancellation
@@ -45,12 +52,15 @@ use the explicit run-scoped dispatch operation. If the latest run is
 `phase=terminal`, a new persisted eligible start message SHALL create a new run
 identity rather than retargeting the prior run.
 
-When a daemon is selected for a new or reused run, the server SHALL persist the
-run's immutable `daemon_id`, bind it to one Requirement, persist the run
-repository IDs, and atomically persist the complete `session.start` command
-before dispatch. That same authoritative operation SHALL set the run to
-`phase=active`, `status=starting`, and acquire the competing active-run
-slot; `session.started` is not required to acquire that slot. A new run SHALL
+When a daemon is selected for a new or reused run, assignment is valid only
+while the run remains the authoritative non-terminal `phase=awaiting_assignment`
+occupant and has not been cancelled or closed. The server SHALL atomically verify
+that eligibility while persisting the run's immutable `daemon_id`, Requirement
+binding, repository IDs, complete `session.start` command, `phase=active`, and
+`status=starting`; if eligibility is lost before commit, assignment SHALL fail
+without persisting a daemon pin, binding, context, or command and SHALL not
+reactivate the run. The operation occupies the sequential clarification slot;
+`session.started` is not required to acquire the sequential clarification slot. A new run SHALL
 receive the current Requirement snapshot and
 revision, its own `run_id`/`session_id` identity, `start_message_id`, repository
 set, and command/event sequence. `session.start` SHALL contain the immutable
@@ -75,12 +85,61 @@ content snapshot token, not the write precondition.
 - **WHEN** the server dispatches `session.start`
 - **THEN** the daemon receives the server-selected Requirement, deterministic conversation excerpt, and repository context, with no credential or persistence access
 
-#### Scenario: Assignment acquires the active slot before runtime startup
+#### Scenario: Assignment acquires the sequential clarification slot before runtime startup
 
 - **GIVEN** run A is `phase=awaiting_assignment`, `status=unavailable`, and has no daemon pin
 - **WHEN** North atomically selects daemon D, persists D's pin, the Requirement/run binding, immutable run context, and complete `session.start` command
-- **THEN** A becomes `phase=active`, `status=starting`, and occupies the competing slot before dispatch
+- **THEN** A becomes `phase=active`, `status=starting`, and occupies the sequential clarification slot before dispatch
 - **AND** another clarification start conflicts even though `session.started` has not arrived; that event only retains `phase=active` and changes status to `running`
+
+#### Scenario: Concurrent same-message starts are idempotent
+
+- **GIVEN** Requirement R has no non-terminal clarification run and persisted requester message M is eligible to start clarification
+- **WHEN** two `/clarification/start` requests for R and M execute concurrently
+- **THEN** server/persistence arbitration creates exactly one run identity and both requests resolve to that same `run_id` under the canonical idempotent/reuse contract, even if their response timing or status differs
+- **AND** at most one daemon assignment and one durable `session.start` command identity is committed; if no daemon is available, one `phase=awaiting_assignment` run is returned, otherwise one `phase=active`, `status=starting` run exists
+- **AND** no second non-terminal run occupies the sequential clarification slot
+
+#### Scenario: Concurrent different-message starts have one winner
+
+- **GIVEN** Requirement R has no non-terminal clarification run and persisted requester messages M1 and M2 are each individually eligible
+- **WHEN** `/clarification/start(M1)` and `/clarification/start(M2)` execute concurrently
+- **THEN** exactly one request establishes the sequential run and the other observes the occupied slot and receives the existing different-message conflict; the winner is not required to be deterministic
+- **AND** exactly one non-terminal run exists and at most one durable `session.start` command identity is committed
+- **AND** both M1 and M2 remain canonical conversation history; the losing message is not deleted, rolled back, automatically dispatched, or converted into another run
+
+#### Scenario: Concurrent retries reuse one awaiting run
+
+- **GIVEN** run A is `phase=awaiting_assignment` with `start_message_id=M1`, no daemon pin, and no `session.start`
+- **WHEN** two `/clarification/start(M1)` retries execute concurrently
+- **THEN** both requests reuse A, daemon selection is serialized, and at most one daemon assignment and one durable `session.start` command identity is committed
+- **AND** no second awaiting or active run is created
+
+#### Scenario: Different message cannot replace a concurrently retried awaiting run
+
+- **GIVEN** run A is `phase=awaiting_assignment` with `start_message_id=M1` and persisted eligible message M2 is different
+- **WHEN** `/clarification/start(M1)` retries concurrently with `/clarification/start(M2)`
+- **THEN** A remains the sequential clarification slot occupant, M1 may reuse or assign A, and M2 receives the existing different-message conflict rather than replacing A
+- **AND** M2 remains canonical conversation history and no second run or `session.start` command is created
+
+#### Scenario: Assignment rechecks awaiting eligibility before commit
+
+- **GIVEN** run A is the authoritative `phase=awaiting_assignment` occupant with no daemon pin or `session.start`
+- **WHEN** A becomes terminal or otherwise ineligible before daemon assignment commits
+- **THEN** assignment fails without persisting a daemon pin, Requirement/run binding, immutable context, or `session.start`, and it does not reactivate A or create a command
+
+#### Scenario: Cancellation wins awaiting-assignment race
+
+- **GIVEN** run A is `phase=awaiting_assignment` with no daemon pin or `session.start`
+- **WHEN** a start retry for A's `start_message_id` races cancellation and cancellation commits first
+- **THEN** A has `cancel_requested=true`, `phase=terminal`, `daemon_id=null`, no `session.start`, and no `session.cancel`; the retry observes terminal/ineligible A and cannot assign or reactivate it
+
+#### Scenario: Assignment wins awaiting-assignment race
+
+- **GIVEN** run A is `phase=awaiting_assignment` with no daemon pin or `session.start`
+- **WHEN** assignment commits first while a cancellation request races it
+- **THEN** the assignment atomically commits the daemon pin, Requirement/run binding, immutable context, durable `session.start`, `phase=active`, and `status=starting`; cancellation then observes assigned active A, persists `cancel_requested=true`, creates or reuses exactly one durable `session.cancel`, and leaves A active in the sequential clarification slot until `session.completed` or `session.failed`
+- **AND** no hybrid terminal-and-assigned result is exposed
 
 #### Scenario: Start message is always retained
 
@@ -127,7 +186,7 @@ introducing a generic command API:
   `{ "message_id": string, "expected_state_version": u64 }`. It SHALL verify
   that the message belongs to this Requirement's conversation and is eligible
   as the start message, apply the canonical Draft → Discussing operation when
-  required, and resolve the latest run only for sequential create/reuse. A
+  required, and resolve the latest run only for sequential create/reuse/idempotency. A
   reusable unassigned attempt requires `daemon_id = null`, no successfully
   created or dispatched `session.start`, no cancellation/closure, the same
   logical start attempt, and the recorded `start_message_id`; that request
@@ -165,7 +224,7 @@ introducing a generic command API:
   command identity, and makes the run ineligible for reuse. If the run is
   assigned, it creates or reuses exactly one durable `session.cancel` for the
   pinned daemon but remains `phase=active` and continues to occupy the
-  competing slot until `session.completed` or `session.failed` is durably
+  sequential clarification slot until `session.completed` or `session.failed` is durably
   projected. A `command_ack` only means the daemon recorded the command; it is
   not cancellation completion. Cancellation SHALL not mutate Requirement
   lifecycle, content, revision, or state_version.
@@ -206,7 +265,7 @@ idempotent result without creating a command for another run.
 
 - **GIVEN** assigned run A is `phase=active` with `cancel_requested=true`
 - **WHEN** a later persisted message is dispatched to A
-- **THEN** dispatch fails/conflicts, creates no `message.send` command, and A remains active and competing; repeated cancellation remains idempotent
+- **THEN** dispatch fails/conflicts, creates no `message.send` command, and A remains active in the sequential clarification slot; repeated cancellation remains idempotent
 
 #### Scenario: Persisted message survives cancellation/dispatch race
 
@@ -217,7 +276,7 @@ idempotent result without creating a command for another run.
 #### Scenario: Reuse unavailable start attempt
 
 - **WHEN** run A is `phase=awaiting_assignment`, has never created or dispatched `session.start`, is not cancelled, and `/clarification/start` is retried with A's public `start_message_id`
-- **THEN** the server reuses A's run identity and attempts daemon selection again without creating a competing run
+- **THEN** the server reuses A's run identity and attempts daemon selection again without creating a second non-terminal run
 
 #### Scenario: Different message cannot replace reusable attempt
 
@@ -227,7 +286,7 @@ idempotent result without creating a command for another run.
 #### Scenario: Active phase rejects concurrent start
 
 - **WHEN** run A is `phase=active` and a requester attempts `/clarification/start` with another persisted message, including after `session.cancel` receives `command_ack`
-- **THEN** the server returns the canonical conflict, creates no second run or `session.start` command, and keeps A in the competing slot until terminal runtime projection
+- **THEN** the server returns the canonical conflict, creates no second run or `session.start` command, and keeps A in the sequential clarification slot until terminal runtime projection
 
 #### Scenario: New run after completion
 
@@ -484,44 +543,66 @@ events SHALL not repeat projections.
 - **WHEN** an assessment and completion are replayed with their original event identities
 - **THEN** the assessment transaction and completion projection each apply at most once, with their existing ACK outcomes returned for duplicates
 
-### Requirement: Clarification runs are sequential and never competing
+### Requirement: Clarification runs occupy one sequential clarification slot
 
 A valid explicit clarification start MAY resolve the latest run only for its
-sequential create/reuse decision. The latest run MAY be reused only when
+sequential create/reuse/idempotency decision. The latest run MAY be reused only when
 `phase=awaiting_assignment`, `daemon_id = null`, no `session.start` was
 successfully created or dispatched, it has not been cancelled or closed, the
 request is the same logical start attempt, and the incoming message is its
 recorded `start_message_id`. A different message while that attempt remains
 reusable SHALL return the canonical conflict. The start response SHALL include
-the public run projection with `run_id` and `start_message_id`.
+the public run projection with `run_id` and `start_message_id`. If assignment
+commits before a concurrent same-message retry completes, that retry returns
+that same assigned run and existing command identities; it creates no second
+run, assignment, lifecycle transition, or `session.start`. A stale
+`expected_state_version` does not turn this matching idempotent retry into a
+second mutation.
 
-A run becomes `phase=active` when the server assigns a daemon and atomically
-persists the Requirement/run binding, immutable context, and complete
-`session.start` command; this assignment operation also sets `status=starting`
-and acquires the competing slot. `session.started` retains `phase=active` and
-sets `status=running`; it does not acquire the slot. An active run remains
-active until a terminal runtime fact. This includes `starting`, `running`, a
-pinned daemon that is operationally unavailable, and an assigned run with
-`cancel_requested=true`.
+For each Requirement, the server/persistence authority SHALL enforce one derived
+sequential clarification slot. At most one non-terminal clarification run may
+occupy it: `phase=awaiting_assignment` occupies it without a daemon or runtime
+execution, `phase=active` occupies it with an assigned non-terminal run, and
+only `phase=terminal` releases it. This lifecycle invariant is derived from the
+existing phases and does not add another persisted state machine.
+
+A run becomes `phase=active` only when it is still the authoritative
+non-terminal `phase=awaiting_assignment` occupant and the server assigns a
+daemon. The assignment operation SHALL atomically verify that the run remains
+eligible and persist the daemon pin, Requirement/run binding, immutable context,
+complete `session.start` command, `phase=active`, and `status=starting`. If the
+run became terminal or otherwise ineligible before that commit, assignment fails
+without persisting a daemon pin, binding, context, or command and does not
+reactivate the run. `session.started` retains `phase=active` and sets
+`status=running`; it does not acquire the sequential clarification slot. An
+active run remains active until a terminal runtime fact, including when its
+pinned daemon is operationally unavailable or cancellation was requested.
+
 An active run SHALL reject a different start message and SHALL create no second
 run or `session.start` command. A run is `phase=terminal` after an unassigned
 pre-start cancellation or a durably projected `session.completed` or
-`session.failed` fact. A terminal run no longer owns the competing slot; a new
-eligible persisted start message MAY create a new sequential run with a new
-`run_id`, the current Requirement snapshot/revision, its own
+`session.failed` fact. A terminal run releases the sequential clarification
+slot; a new eligible persisted start message MAY create a new sequential run
+with a new `run_id`, the current Requirement snapshot/revision, its own
 `start_message_id`, repository set, eventual daemon pin, and independent
 command/event sequence. The existing protocol `session_id` is that same run
 identity (`session_id = run_id`). The prior run remains immutable historical
-data. Transport unavailability alone SHALL not permit migration or a competing
-run.
+data. Transport unavailability alone SHALL not permit migration or a second
+non-terminal run.
+
+Concurrent identity-creating `clarification/start` requests for one Requirement
+SHALL be serialized by server/persistence authority for their create, reuse,
+conflict, and assignment decision. Each result SHALL be equivalent to one
+serialized ordering; browser timing MUST NOT create two non-terminal runs. The
+specific persistence primitive remains an implementation decision.
 
 If no eligible daemon is connected for a new or reused run, the run SHALL exist
 with `daemon_id = null`, `phase=awaiting_assignment`, `status=unavailable`, and
-no `session.start` command. The operation SHALL return `503
-clarification_unavailable` with that public run projection and SHALL NOT
-fabricate a runtime event, mark the Requirement failed, consume a retry attempt,
-or select a daemon implicitly later. A later selection for that same unassigned
-start attempt requires another explicit start.
+no `session.start` command while occupying the sequential clarification slot.
+The operation SHALL return `503 clarification_unavailable` with that public run
+projection and SHALL NOT fabricate a runtime event, mark the Requirement failed,
+consume a retry attempt, or select a daemon implicitly later. A later selection
+for that same unassigned start attempt requires another explicit start.
 
 Once a run has a `daemon_id`, that daemon pin is immutable for this change. If
 the pinned daemon disconnects, the run remains pinned and `phase=active`; durable
@@ -535,7 +616,7 @@ run with no `session.start` and no runtime execution, cancellation persists
 command or command identity, and makes the run ineligible for reuse. For an
 assigned `phase=active` run, cancellation persists the intent, creates or reuses
 exactly one durable `session.cancel` for its pinned daemon, and leaves the run
-`phase=active` in the competing slot. `command_ack` only means the daemon
+`phase=active` in the sequential clarification slot. `command_ack` only means the daemon
 recorded the command durably; it does not close the run or permit a new start.
 
 Only existing terminal runtime facts close an assigned run:
@@ -551,7 +632,7 @@ terminal operational failure. No `session.cancelled` frame is introduced.
 All dispatch and cancellation operations are run-scoped and require their
 explicit `run_id`; they SHALL not resolve the latest run. Dispatch is legal only
 for assigned `phase=active` runs with `cancel_requested=false`. An active
-run with `cancel_requested=true` remains competing, but later message dispatch
+run with `cancel_requested=true` remains in the sequential clarification slot, but later message dispatch
 is prohibited; repeated cancellation remains idempotent. This change SHALL expose
 only the small
 `awaiting_assignment`/`active`/`terminal` phase and coarse
@@ -568,7 +649,7 @@ belong to `introduce-runtime-retry-and-failure-state`.
 #### Scenario: Reuse unavailable start attempt
 
 - **WHEN** run A is `phase=awaiting_assignment`, has never been dispatched or cancelled, and the requester retries `/clarification/start` with A's recorded `start_message_id`
-- **THEN** the server reuses A's `run_id` and attempts daemon selection again without creating a competing run
+- **THEN** the server reuses A's `run_id` and attempts daemon selection again without creating a second non-terminal run
 
 #### Scenario: No concurrent run while active
 
@@ -580,7 +661,7 @@ belong to `introduce-runtime-retry-and-failure-state`.
 - **GIVEN** assigned run A is `phase=active` and `status=running`
 - **WHEN** cancellation is requested, `cancel_requested` is persisted, and the daemon durably acknowledges `session.cancel`
 - **AND** no terminal runtime event has been projected
-- **THEN** A remains `phase=active` and competing, a new start with another message returns the canonical conflict, and run B is not created
+- **THEN** A remains `phase=active` in the sequential clarification slot, a new start with another message returns the canonical conflict, and run B is not created
 
 #### Scenario: Terminal runtime fact releases cancelled run
 
@@ -615,12 +696,14 @@ browser UI without requiring daemon traffic or SSE replay:
   for this Requirement, ordered by creation time. Its public projection SHALL
   include `run_id`, `requirement_id`, `start_message_id`, `phase`, `status`,
   `cancel_requested`, `created_at`, `updated_at`, and `last_activity_at`. The
-  phase is `awaiting_assignment`, `active`, or `terminal`: an unassigned run
-  with no `session.start` is `awaiting_assignment`; an assigned non-terminal
-  run, including a pinned disconnected or cancellation-requested run, is
-  `active`; and an unassigned cancellation or durably projected
-  `session.completed`/`session.failed` run is `terminal`. Status remains the
-  coarse `starting`/`running`/`completed`/`unavailable` operational
+  phase is `awaiting_assignment`, `active`, or `terminal` and determines
+  sequential clarification slot ownership: an unassigned run with no
+  `session.start` is `awaiting_assignment` and occupies the slot; an assigned
+  non-terminal run, including a pinned disconnected or cancellation-requested
+  run, is `active` and occupies the slot; and an unassigned cancellation or
+  durably projected `session.completed`/`session.failed` run is `terminal` and
+  releases it. Status remains the coarse
+  `starting`/`running`/`completed`/`unavailable` operational
   health/result and may be `unavailable` in any phase. It SHALL return
   `{ "session": null }` only when no run has ever existed. An unassigned
   no-daemon run returns `phase=awaiting_assignment`, `status=unavailable`; an
@@ -695,7 +778,7 @@ may create a new sequential run.
 For an assigned `phase=active` run, cancellation SHALL persist
 `cancel_requested=true`, create or reuse exactly one durable `session.cancel`
 command for its pinned daemon, and leave the run `phase=active` in the
-competing slot. `command_ack` only means the daemon durably recorded the command;
+sequential clarification slot. `command_ack` only means the daemon durably recorded the command;
 it is not a runtime terminal fact, does not complete cancellation, and does not
 permit a new start. Repeated requests reuse the same command/result and runtime
 cancellation occurs at most once. A different start message SHALL remain a
@@ -729,7 +812,7 @@ never decides retry or final-failure policy.
 - **GIVEN** assigned run A is `phase=active` and `status=running`
 - **WHEN** cancellation is requested, `cancel_requested` is persisted, and the daemon durably acknowledges `session.cancel`
 - **AND** no terminal runtime event has been projected
-- **THEN** A remains `phase=active` and competing, a new start with another message returns the canonical active-run conflict, and run B is not created
+- **THEN** A remains `phase=active` in the sequential clarification slot, a new start with another message returns the canonical active-run conflict, and run B is not created
 
 #### Scenario: Terminal runtime fact releases cancelled run
 

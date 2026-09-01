@@ -50,12 +50,13 @@ implicitly determine mutation identity. The UI SHALL use `phase`, not coarse
 - no run (`session: null`) starts clarification;
 - `phase=awaiting_assignment` allows same-start retry only with the canonical
   public `start_message_id`, or cancellation of that explicit `run_id`; it does
-  not dispatch later messages or create a competing start;
+  not dispatch later messages or create another start while the sequential
+  clarification slot is occupied;
 - `phase=active` with `cancel_requested=false` allows later-message dispatch
-  and cancellation to the explicit `run_id`, but never a competing start, even
+  and cancellation to the explicit `run_id`, but never another non-terminal run, even
   when `status=unavailable` because the pinned daemon is disconnected;
-- `phase=active` with `cancel_requested=true` keeps the run competing and
-  permits only idempotent cancellation; later-message dispatch is rejected; and
+- `phase=active` with `cancel_requested=true` keeps the run in the sequential
+  clarification slot and permits only idempotent cancellation; later-message dispatch is rejected; and
 - `phase=terminal` allows a new persisted eligible message to use `start`.
 
 Except for identity-creating `start`, the UI SHALL never perform dispatch or
@@ -64,7 +65,33 @@ is never replaced with a newer latest-run ID. A different message during an
 awaiting-assignment attempt or active run is a server conflict, not a local
 run. The UI never infers the operation solely from transcript contents or
 selects canonical context messages. Duplicate/replayed command delivery SHALL
-not add another logical message or runtime submission.
+not add another logical message or runtime submission. Concurrent start requests
+are not arbitrated by the browser; the server/persistence authority returns the
+canonical run or conflict under one sequential clarification slot.
+
+#### Scenario: Concurrent same-message starts resolve one run
+
+- **GIVEN** Requirement R has no non-terminal clarification run and persisted requester message M is eligible
+- **WHEN** the UI submits two clarification/start requests for M concurrently
+- **THEN** both canonical results identify the same `run_id`, at most one daemon assignment and durable `session.start` exist, and the UI creates no second local run
+
+#### Scenario: Concurrent different-message starts preserve history
+
+- **GIVEN** Requirement R has no non-terminal clarification run and persisted eligible messages M1 and M2
+- **WHEN** the UI submits clarification/start for M1 and M2 concurrently
+- **THEN** one request establishes the run, the other shows the canonical different-message conflict, and both messages remain canonical conversation history without local rollback or automatic dispatch
+
+#### Scenario: Awaiting retry cannot be replaced by a concurrent message
+
+- **GIVEN** run A is `phase=awaiting_assignment` with `start_message_id=M1`
+- **WHEN** the UI retries start with M1 concurrently with a start for different message M2
+- **THEN** M1 reuses A, M2 shows the canonical conflict, and the UI never replaces A with a second run
+
+#### Scenario: Awaiting retry and cancellation render one serialized outcome
+
+- **GIVEN** run A is `phase=awaiting_assignment`
+- **WHEN** the UI's start retry races cancellation
+- **THEN** it renders either terminal cancellation with no assigned command or assigned active cancellation-pending state from canonical reads, never a locally invented hybrid
 
 #### Scenario: Posting history does not invoke runtime
 
@@ -85,7 +112,7 @@ not add another logical message or runtime submission.
 
 - **GIVEN** run A is `phase=active` with `cancel_requested=true`
 - **WHEN** the UI attempts to dispatch later message M to A
-- **THEN** dispatch fails/conflicts, creates no `message.send`, A remains active and competing, and repeated cancellation remains idempotent
+- **THEN** dispatch fails/conflicts, creates no `message.send`, A remains active in the sequential clarification slot, and repeated cancellation remains idempotent
 
 #### Scenario: Persisted message survives cancellation/dispatch race
 
@@ -115,9 +142,9 @@ not add another logical message or runtime submission.
 - **WHEN** the UI reads `GET /requirements/{requirement_id}/session`
 - **THEN** the response includes A's `run_id`, `start_message_id`, `phase=awaiting_assignment`, and `status=unavailable`
 - **AND** the UI can explicitly retry `/clarification/start` using that persisted start message
-- **AND** no competing run is created
+- **AND** no second non-terminal run is created
 
-#### Scenario: Active phase rejects competing start after cancellation intent
+#### Scenario: Active phase rejects second start after cancellation intent
 
 - **WHEN** the session read contains run A with `phase=active`, including `status=unavailable` for a pinned disconnected daemon or `cancel_requested=true`, and the UI persists another message that is sent as a start request
 - **THEN** the UI does not infer legality from `status`, shows the canonical active-run conflict, creates no second run, and refetches canonical detail reads
@@ -144,7 +171,7 @@ not add another logical message or runtime submission.
 
 - **GIVEN** run A has `phase=active` and `cancel_requested=true`
 - **WHEN** the UI receives a successful `session.cancel` `command_ack` but no terminal runtime event
-- **THEN** the UI keeps A active and competing, does not offer a competing start, rejects later-message dispatch, permits repeated idempotent cancellation, and continues targeting cancellation at A's explicit `run_id`
+- **THEN** the UI keeps A active in the sequential clarification slot, does not offer another start while the sequential clarification slot is occupied, rejects later-message dispatch, permits repeated idempotent cancellation, and continues targeting cancellation at A's explicit `run_id`
 
 #### Scenario: Unassigned cancellation releases slot immediately
 
@@ -210,9 +237,9 @@ including `run_id`, `start_message_id`, `phase`, coarse `status`,
 `awaiting_assignment`, `active`, or `terminal` and SHALL determine legal
 clarification actions; `status` SHALL remain display-only coarse operational
 health/result (`starting`, `running`, `completed`, or `unavailable`). The UI
-shall not infer action legality from `status=unavailable` alone. `phase=active`
-continues to occupy the competing slot when a pinned daemon is disconnected or
-cancellation is pending. `cancel_requested` is user intent and does not itself
+shall not infer action legality from `status=unavailable` alone.
+`phase=active` continues to occupy the sequential clarification slot when a
+pinned daemon is disconnected or cancellation is pending. `cancel_requested` is user intent and does not itself
 make an assigned run terminal. Later-message dispatch is legal only when
 `cancel_requested=false`; cancellation remains legal and idempotent while the
 assigned run stays active. A newer sequential run replaces an older run as
@@ -224,7 +251,7 @@ terminal execution failure semantics.
 #### Scenario: Phase disambiguates unavailable status
 
 - **WHEN** the session read reports `status=unavailable`
-- **THEN** the UI uses `phase=awaiting_assignment` to offer only same-start retry/cancel, `phase=active` to keep the run competing without a new start and reject later
+- **THEN** the UI uses `phase=awaiting_assignment` to offer only same-start retry/cancel, `phase=active` to keep the run in the sequential clarification slot without a new start and reject later
 dispatch when cancellation is pending, and `phase=terminal` to allow a new
 eligible start, while retaining canonical Requirement lifecycle/status
 

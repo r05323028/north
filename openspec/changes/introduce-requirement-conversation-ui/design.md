@@ -40,18 +40,21 @@ are server projections, not transport caches. The existing Ready-only
     current `expected_state_version`, then retain returned run identity;
   - `phase=awaiting_assignment` → allow only same-start retry using the
     canonical `start_message_id`, or cancellation of that explicit `run_id`;
-    do not dispatch a later message or create a competing start;
+    do not dispatch a later message or create another start while the sequential clarification slot is occupied;
   - `phase=active` with `cancel_requested=false` → dispatch later persisted
     messages to the explicit `run_id` and target cancellation at that ID; do
-    not start a competing run, including when `status=unavailable` because
+    not start a second non-terminal run, including when `status=unavailable` because
     the pinned daemon is disconnected;
-  - `phase=active` with `cancel_requested=true` → keep the run competing,
-    allow only idempotent cancellation, and reject later-message dispatch;
+  - `phase=active` with `cancel_requested=true` → keep the run in the
+    sequential clarification slot, allow only idempotent cancellation, and
+    reject later-message dispatch;
   - `phase=terminal` → call `start` with a new persisted eligible message to
     create a sequential run and retain its returned `run_id`.
   `status` is for display (`starting`, `running`, `completed`, or
-  `unavailable`), not sole mutation-legality. Dispatch and cancel controls SHALL
-  not run without a known `run_id`; cancellation calls
+  `unavailable`), not sole mutation-legality. The UI need not serialize
+  concurrent starts; server/persistence authority arbitrates them under one
+  sequential clarification slot and returns the canonical run or conflict.
+  Dispatch and cancel controls SHALL not run without a known `run_id`; cancellation calls
   `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel`.
   If a newer run becomes latest after the UI learned run A, the UI keeps A in
   the mutation URL; the server evaluates A and never retargets the request to B.

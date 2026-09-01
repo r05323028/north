@@ -18,11 +18,13 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
   `awaiting_assignment` permits only same-start retry or cancellation,
   `active` with `cancel_requested=false` permits later dispatch or
   cancellation, while active `cancel_requested=true` permits only idempotent
-  cancellation and remains competing, and `terminal` permits a new start.
-  `status` remains display-only coarse
+  cancellation and remains in the sequential clarification slot, and `terminal`
+  permits a new start. `status` remains display-only coarse
   health/result. Latest-session reads may guide presentation, but never supply
   an implicit mutation target; SSE only hints that a refetch may be useful and
-  transcript contents never select the operation.
+  transcript contents never select the operation. Concurrent start requests are
+  not arbitrated by the browser; server/persistence authority returns one
+  canonical run or conflict under the clarification slot contract.
 - Overview renders canonical Requirement fields, readiness/repository evidence,
   lifecycle status, content revision, and the minimal clarification session
   `phase`, coarse `status`, cancellation intent, and timestamps supplied by the
@@ -48,8 +50,8 @@ and latest-run reads. The public session projection includes `run_id`,
 so reload can retry an `awaiting_assignment` run using its persisted start
 message. The UI uses `phase` and `cancel_requested`, not coarse `status` alone,
 for legal intent; later dispatch is allowed only for active runs with
-`cancel_requested=false`, while an active cancellation-pending run keeps its
-slot and rejects dispatch. The URL's explicit `run_id`, not latest-read
+`cancel_requested=false`, while an active cancellation-pending run remains in the
+sequential clarification slot and rejects dispatch. The URL's explicit `run_id`, not latest-read
 recency, determines every later mutation target. Latest-run reads may guide presentation but MUST NOT supply an
 implicit target, and the UI never performs dispatch or cancellation without a
 known `run_id`. Existing protocol `session_id` carries the same identity
