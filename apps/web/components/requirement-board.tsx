@@ -1,5 +1,6 @@
 "use client";
 
+import { RequirementCard } from "@/components/requirement-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,7 +11,6 @@ import {
 } from "@/lib/requirements";
 import { useRequirementCollection } from "@/lib/use-requirement-collection";
 import type { RequirementCollectionState } from "@/lib/use-requirement-collection";
-import { RequirementCard } from "@/components/requirement-card";
 
 export function RequirementBoard({
   onCreateAction,
@@ -35,7 +35,7 @@ export function RequirementBoardView({
   onCreateAction,
 }: RequirementBoardViewProps) {
   if (loading && requirements.length === 0) {
-    return <p role="status">Loading requirements…</p>;
+    return <p role="status">載入需求中…</p>;
   }
 
   const groups = groupRequirements(requirements);
@@ -43,47 +43,48 @@ export function RequirementBoardView({
     <Card>
       <CardHeader>
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <CardTitle>Board</CardTitle>
-          <Button type="button" onClick={onCreateAction}>
-            New requirement
+          <CardTitle aria-label="Board">看板</CardTitle>
+          <Button
+            aria-label="New requirement"
+            size="sm"
+            type="button"
+            variant="ghost"
+            onClick={onCreateAction}
+          >
+            新增需求
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-4 pt-0">
         {error && (
           <p className="text-sm text-destructive" role="alert">
-            {error} Showing last successful results.
+            {error} · 顯示上次成功結果
           </p>
         )}
         {refreshing && (
           <p className="text-xs text-muted-foreground" role="status">
-            Refreshing…
+            重新整理中…
           </p>
         )}
-        <div className="grid gap-4 xl:grid-cols-5">
+        <div className="north-board">
           {requirementStatuses.map((status) => {
             const items = groups[status];
             return (
               <section
                 aria-labelledby={`requirement-column-${status}`}
-                className="min-h-56 rounded-lg border bg-muted/20 p-3"
+                className="north-column"
                 data-status={status}
                 key={status}
               >
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <h2
-                    className="font-semibold"
-                    id={`requirement-column-${status}`}
-                  >
+                <div className="north-column-head">
+                  <h2 id={`requirement-column-${status}`}>
                     {requirementStatusLabels[status]}
                   </h2>
                   <Badge>{items.length}</Badge>
                 </div>
-                <div className="grid gap-3">
+                <div className="north-column-body">
                   {items.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      No requirements
-                    </p>
+                    <p className="north-column-empty">無符合需求</p>
                   ) : (
                     items.map((requirement) => (
                       <RequirementCard

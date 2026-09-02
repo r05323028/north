@@ -1,28 +1,30 @@
 import Link from "next/link";
 
-import { Badge } from "@/components/ui/badge";
-import { requirementStatusLabels, type Requirement } from "@/lib/requirements";
+import { StatusBadge } from "@/components/ui/status";
+import { type Requirement } from "@/lib/requirements";
 
 export function RequirementCard({ requirement }: { requirement: Requirement }) {
   return (
     <Link
-      className="block rounded-lg border bg-background p-4 shadow-xs transition-colors hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="north-req-card block rounded-md border bg-background p-3 shadow-none transition-colors hover:bg-accent/50 focus-visible:outline-none"
       data-testid={`requirement-card-${requirement.id}`}
       href={`/requirements/${encodeURIComponent(requirement.id)}`}
     >
       <div className="flex items-start justify-between gap-3">
-        <h3 className="font-medium leading-snug">{requirement.title}</h3>
-        <Badge>{requirementStatusLabels[requirement.status]}</Badge>
+        <h3 className="min-w-0 font-medium leading-snug text-pretty">
+          {requirement.title}
+        </h3>
+        <StatusBadge status={requirement.status} />
       </div>
-      <dl className="mt-4 grid gap-1 text-xs text-muted-foreground">
+      <dl className="mt-3 grid gap-1 text-xs text-muted-foreground">
         <div className="flex justify-between gap-3">
-          <dt>Creator</dt>
+          <dt>建立者</dt>
           <dd className="truncate font-medium text-foreground">
             {requirement.created_by}
           </dd>
         </div>
         <div className="flex justify-between gap-3">
-          <dt>Updated</dt>
+          <dt>更新</dt>
           <dd>
             <time dateTime={requirement.updated_at}>
               {requirement.updated_at}

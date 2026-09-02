@@ -2,6 +2,8 @@
 
 Read top-down; each doc stays small and links instead of duplicating.
 
+- [DESIGN.md](DESIGN.md) — product UI design system extracted from current prototype
+
 ## Product (semantics agents must not contradict)
 
 - [product/requirement-lifecycle.md](product/requirement-lifecycle.md) — states, transitions, who owns which move

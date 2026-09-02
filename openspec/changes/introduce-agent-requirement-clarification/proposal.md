@@ -125,11 +125,26 @@ POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel
      assigned run creates/reuses session.cancel but remains active until terminal fact
 ```
 
-`clarification/start` is the identity-creating exception: before a client knows a
-run ID, it validates the persisted start message and state-version precondition,
-resolves the sequential create/reuse rules, and returns a public run projection
-including `run_id`. It may inspect the latest run only for that create/reuse/idempotency
-decision. A valid start with no eligible daemon still returns its unassigned
+`clarification/start` is the identity-creating exception. Server processes each
+request in this order: authenticate/authorize; validate the Requirement and
+persisted requester-message binding; enter per-Requirement sequential-slot
+arbitration; and inspect the authoritative non-terminal occupant, if any. If an
+occupant exists and its `start_message_id` matches the request, the request is a
+same logical start retry: it reuses the existing `run_id` and command identities,
+creates no run, does not reapply Draft → Discussing, and does not reapply the
+original `expected_state_version` as a new-mutation precondition. If the message
+differs, the request receives the canonical existing-run sequential-slot conflict;
+the persisted message remains history and no Requirement mutation, run, or
+`session.start` is created. Only an unoccupied slot represents a genuinely new
+logical start. The server then validates `expected_state_version` as the atomic
+precondition for that new run and any associated Requirement transition. A stale
+token returns `409` with no Requirement mutation, run, daemon assignment, or
+command, while the already-persisted message remains history. Sequential-slot
+arbitration therefore decides reuse, different-message conflict, or new start
+before a new-start state-version check. The state version protects creation of a
+new logical clarification start and its Requirement transition; it does not
+invalidate an already-committed matching logical start during idempotent replay or
+concurrent same-message arbitration. A valid start with no eligible daemon still returns its unassigned
 `phase=awaiting_assignment`, `status=unavailable` run. A reusable unavailable
 attempt is retried only with the same recorded `start_message_id`; a terminal or otherwise inapplicable latest run plus
 a new eligible message creates a new sequential run. If a matching
@@ -140,6 +155,15 @@ one serialized request may complete conditional assignment for an awaiting run,
 but no request creates a second run or performs a second assignment,
 lifecycle transition, or `session.start`. The state-version precondition gates a new start mutation; it
 does not turn a matching idempotent retry into a second mutation.
+
+For the concurrent Draft case, if Requirement R is `Draft` at
+`state_version=1` and A and B both call `start(M, expected_state_version=1)`,
+the winner applies Draft → Discussing once, commits `state_version=2`, and
+creates run A. B resolves as an idempotent reference to A's `run_id`; it does
+not perform a second transition or fail as a stale new start. If messages differ
+(`M1` versus `M2`), the winner occupies the slot and the loser receives the
+canonical existing-run/different-message conflict, even though both originally
+supplied the current token.
 
 After a run ID is known, dispatch and cancellation are explicitly run-scoped.
 Each request SHALL validate that `run_id` exists, belongs to the Requirement in

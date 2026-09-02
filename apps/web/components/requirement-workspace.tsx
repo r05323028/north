@@ -3,6 +3,8 @@
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { SegmentedControl } from "@/components/ui/tabs";
+import { PageHeader } from "@/components/north-shell";
 import { RequirementBoard } from "@/components/requirement-board";
 import { RequirementCreate } from "@/components/requirement-create";
 import { RequirementList } from "@/components/requirement-list";
@@ -13,41 +15,34 @@ export function RequirementWorkspace() {
   const [view, setView] = useState<View>("board");
 
   return (
-    <main className="min-h-screen bg-background px-6 py-8 text-foreground">
-      <div className="mx-auto grid max-w-7xl gap-8">
-        <header className="flex flex-wrap items-end justify-between gap-4">
-          <div>
-            <p className="text-sm font-medium text-muted-foreground">North</p>
-            <h1 className="text-3xl font-semibold tracking-tight">
-              Requirement board
-            </h1>
-            <p className="mt-2 text-muted-foreground">
-              Track Requirements by canonical lifecycle state.
-            </p>
-          </div>
-          <nav aria-label="Requirement views" className="flex flex-wrap gap-2">
+    <main className="north-container">
+      <PageHeader
+        actions={
+          <>
+            <SegmentedControl
+              ariaLabel="Requirement views"
+              items={[
+                { accessibleName: "Board", label: "看板", value: "board" },
+                { accessibleName: "List", label: "清單", value: "list" },
+              ]}
+              value={view === "create" ? "board" : view}
+              onValueChangeAction={(value) => {
+                if (value === "board" || value === "list") setView(value);
+              }}
+            />
             <Button
-              aria-pressed={view === "board"}
+              aria-label="New requirement"
               type="button"
-              variant={view === "board" ? "default" : "outline"}
-              onClick={() => setView("board")}
+              onClick={() => setView("create")}
             >
-              Board
+              新增需求
             </Button>
-            <Button
-              aria-pressed={view === "list"}
-              type="button"
-              variant={view === "list" ? "default" : "outline"}
-              onClick={() => setView("list")}
-            >
-              List
-            </Button>
-            <Button type="button" onClick={() => setView("create")}>
-              New requirement
-            </Button>
-          </nav>
-        </header>
-
+          </>
+        }
+        description="依 canonical lifecycle state 分組 · 搜尋與篩選即時查詢"
+        title="需求看板"
+      />
+      <div className="grid gap-4 pt-4">
         {view === "board" && (
           <RequirementBoard onCreateAction={() => setView("create")} />
         )}

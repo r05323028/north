@@ -66,13 +66,18 @@ describe("requirement SSE subscription", () => {
     source.fail();
     source.open();
     source.open();
-    source.emit(
+    for (const category of [
       REQUIREMENT_CHANGED_EVENT,
-      JSON.stringify({
-        category: REQUIREMENT_CHANGED_EVENT,
-        requirement_id: "r-1",
-      }),
-    );
+      "conversation.changed",
+      "readiness.changed",
+      "activity.changed",
+      "session.changed",
+    ]) {
+      source.emit(
+        category,
+        JSON.stringify({ category, requirement_id: "r-1" }),
+      );
+    }
     source.emit(
       "message",
       JSON.stringify({
@@ -81,7 +86,7 @@ describe("requirement SSE subscription", () => {
       }),
     );
 
-    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledTimes(6);
     expect(onReconnect).toHaveBeenCalledTimes(2);
     unsubscribe();
     source.emit(
@@ -92,6 +97,6 @@ describe("requirement SSE subscription", () => {
       }),
     );
     expect(source.closed).toBe(true);
-    expect(onChange).toHaveBeenCalledTimes(2);
+    expect(onChange).toHaveBeenCalledTimes(6);
   });
 });

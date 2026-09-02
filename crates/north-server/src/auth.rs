@@ -193,6 +193,7 @@ pub fn router(state: AuthState) -> Router {
         .route("/auth/logout", post(logout))
         .merge(crate::roles::router())
         .merge(crate::requirements::router())
+        .merge(crate::clarification::router())
         .merge(crate::events::router())
         .merge(crate::repositories::router())
         .merge(crate::daemon::protected_router())

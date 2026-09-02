@@ -3,13 +3,10 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 
-import { Badge } from "@/components/ui/badge";
+import { PageHeader } from "@/components/north-shell";
+import { StatusBadge } from "@/components/ui/status";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  requirementStatusLabels,
-  getRequirement,
-  type Requirement,
-} from "@/lib/requirements";
+import { getRequirement, type Requirement } from "@/lib/requirements";
 
 export function RequirementDetail({ id }: { id: string }) {
   const [requirement, setRequirement] = useState<Requirement | null>(null);
@@ -50,9 +47,9 @@ export function RequirementDetail({ id }: { id: string }) {
 
   if (error?.id === id) return <p role="alert">{error.message}</p>;
   if (loading || loadedId !== id) {
-    return <p role="status">Loading requirement…</p>;
+    return <p role="status">載入需求中…</p>;
   }
-  if (!requirement) return <p role="alert">Requirement not found.</p>;
+  if (!requirement) return <p role="alert">找不到需求。</p>;
   return <RequirementDetailView requirement={requirement} />;
 }
 
@@ -61,7 +58,7 @@ function CanonicalList({ items, title }: { items: string[]; title: string }) {
     <section className="grid gap-2">
       <h2 className="font-semibold">{title}</h2>
       {items.length === 0 ? (
-        <p className="text-sm text-muted-foreground">None recorded.</p>
+        <p className="text-sm text-muted-foreground">尚無紀錄。</p>
       ) : (
         <ul className="list-disc space-y-1 pl-5 text-sm">
           {items.map((item) => (
@@ -79,36 +76,33 @@ export function RequirementDetailView({
   requirement: Requirement;
 }) {
   return (
-    <div className="grid gap-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <p className="text-sm text-muted-foreground">Requirement</p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-            {requirement.title}
-          </h1>
-        </div>
-        <Badge>{requirementStatusLabels[requirement.status]}</Badge>
-      </div>
+    <div className="grid gap-4 pt-4">
+      <PageHeader
+        actions={<StatusBadge status={requirement.status} />}
+        description="Canonical Requirement state · 重新整理即為最新"
+        eyebrow="Requirement"
+        title={requirement.title}
+      />
       <Card>
         <CardHeader>
-          <CardTitle>Details</CardTitle>
+          <CardTitle>概覽</CardTitle>
         </CardHeader>
-        <CardContent className="grid gap-6">
+        <CardContent className="grid gap-6 pt-0">
           <section className="grid gap-2">
-            <h2 className="font-semibold">Description</h2>
+            <h2 className="font-semibold">描述</h2>
             <p className="whitespace-pre-wrap text-sm">
               {requirement.description}
             </p>
           </section>
           <section className="grid gap-2 text-sm">
             <h2 className="font-semibold">Metadata</h2>
-            <dl className="grid gap-2 sm:grid-cols-2">
+            <dl className="grid gap-3 sm:grid-cols-2">
               <div>
-                <dt className="text-muted-foreground">Creator</dt>
+                <dt className="text-muted-foreground">建立者</dt>
                 <dd>{requirement.created_by}</dd>
               </div>
               <div>
-                <dt className="text-muted-foreground">Created</dt>
+                <dt className="text-muted-foreground">建立時間</dt>
                 <dd>
                   <time dateTime={requirement.created_at}>
                     {requirement.created_at}
@@ -116,7 +110,7 @@ export function RequirementDetailView({
                 </dd>
               </div>
               <div>
-                <dt className="text-muted-foreground">Updated</dt>
+                <dt className="text-muted-foreground">更新時間</dt>
                 <dd>
                   <time dateTime={requirement.updated_at}>
                     {requirement.updated_at}
@@ -134,9 +128,9 @@ export function RequirementDetailView({
             </dl>
           </section>
           <section className="grid gap-2">
-            <h2 className="font-semibold">Summary</h2>
+            <h2 className="font-semibold">摘要</h2>
             <p className="whitespace-pre-wrap text-sm">
-              {requirement.summary || "None recorded."}
+              {requirement.summary || "尚無紀錄。"}
             </p>
           </section>
           <CanonicalList
@@ -151,7 +145,7 @@ export function RequirementDetailView({
         </CardContent>
       </Card>
       <Link className="text-sm font-medium hover:underline" href="/">
-        ← Back to board
+        ← 返回需求看板
       </Link>
     </div>
   );

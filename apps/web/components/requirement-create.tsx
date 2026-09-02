@@ -12,6 +12,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { createRequirement } from "@/lib/requirements";
 
 type CreateForm = {
@@ -74,8 +76,8 @@ export function RequirementCreate({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>New requirement</CardTitle>
-        <CardDescription>Start with title and description.</CardDescription>
+        <CardTitle>新增需求</CardTitle>
+        <CardDescription>僅需標題與描述。</CardDescription>
       </CardHeader>
       <CardContent>
         <form className="grid gap-4" onSubmit={(event) => void submit(event)}>
@@ -85,10 +87,10 @@ export function RequirementCreate({
             </p>
           )}
           <div className="grid gap-2">
-            <label htmlFor="requirement-title">Title</label>
-            <input
+            <label htmlFor="requirement-title">標題</label>
+            <Input
+              aria-label="Title"
               autoFocus
-              className="rounded-md border bg-background px-3 py-2"
               id="requirement-title"
               maxLength={500}
               required
@@ -102,9 +104,9 @@ export function RequirementCreate({
             />
           </div>
           <div className="grid gap-2">
-            <label htmlFor="requirement-description">Description</label>
-            <textarea
-              className="min-h-32 rounded-md border bg-background px-3 py-2"
+            <label htmlFor="requirement-description">描述</label>
+            <Textarea
+              aria-label="Description"
               id="requirement-description"
               maxLength={10000}
               required
@@ -118,16 +120,21 @@ export function RequirementCreate({
             />
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button disabled={saving} type="submit">
-              {saving ? "Creating…" : "Create requirement"}
+            <Button
+              aria-label="Create requirement"
+              disabled={saving}
+              type="submit"
+            >
+              {saving ? "建立中…" : "建立需求"}
             </Button>
             <Button
+              aria-label="Cancel"
               disabled={saving}
               type="button"
               variant="outline"
               onClick={onCancelAction}
             >
-              Cancel
+              取消
             </Button>
           </div>
         </form>

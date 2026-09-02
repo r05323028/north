@@ -5,6 +5,7 @@
 //! bounded conversation excerpt and filtered configured repositories.
 
 use north_domain::requirement::Requirement;
+use north_persistence::{MAX_CONTEXT_BYTES, MAX_CONTEXT_MESSAGES};
 use north_protocol::{
     ConversationContext, ConversationMessageContext, ConversationRoleWire, FrameError,
     RepositoryContext, RequirementContext, SessionStart,
@@ -106,6 +107,54 @@ impl From<RepositorySnapshot> for RepositoryContext {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSelectionError {
+    StartMessageNotFound,
+    InvalidBounds,
+}
+
+/// Select a deterministic provider-independent conversation excerpt.
+/// Newest fitting messages win; the start message is retained even when it
+/// requires removing older non-start messages.
+pub fn select_conversation_excerpt(
+    messages: &[ConversationMessageSnapshot],
+    start_message_id: &str,
+) -> Result<Vec<ConversationMessageSnapshot>, ContextSelectionError> {
+    if start_message_id.trim().is_empty() {
+        return Err(ContextSelectionError::StartMessageNotFound);
+    }
+    let Some(start_index) = messages
+        .iter()
+        .position(|message| message.message_id == start_message_id)
+    else {
+        return Err(ContextSelectionError::StartMessageNotFound);
+    };
+    let mut selected = vec![true; messages.len()];
+    let mut selected_count = messages.len();
+    let mut bytes = messages.iter().fold(0usize, |total, message| {
+        total.saturating_add(message.content.len())
+    });
+    let mut oldest = 0;
+    while selected_count > MAX_CONTEXT_MESSAGES || bytes > MAX_CONTEXT_BYTES {
+        while oldest < messages.len() && (oldest == start_index || !selected[oldest]) {
+            oldest += 1;
+        }
+        if oldest == messages.len() {
+            break;
+        }
+        selected[oldest] = false;
+        selected_count -= 1;
+        bytes = bytes.saturating_sub(messages[oldest].content.len());
+        oldest += 1;
+    }
+    Ok(messages
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| selected[*index])
+        .map(|(_, message)| message.clone())
+        .collect())
+}
+
 /// Assemble complete runtime context before the server dispatches `session.start`.
 /// The caller supplies a bounded/relevant conversation excerpt; disabled
 /// repositories are excluded and no credential-bearing fields exist in inputs.
@@ -183,5 +232,63 @@ mod tests {
         assert_eq!(start.conversation.excerpt.len(), 1);
         assert_eq!(start.repositories.len(), 1);
         assert_eq!(start.repositories[0].repository_id, "enabled");
+    }
+
+    #[test]
+    fn retains_start_and_drops_oldest_non_start_message() {
+        let messages = (0..=51)
+            .map(|index| ConversationMessageSnapshot {
+                message_id: format!("message-{index}"),
+                role: ConversationRole::Requester,
+                content: format!("content-{index}"),
+            })
+            .collect::<Vec<_>>();
+        let excerpt = select_conversation_excerpt(&messages, "message-0").expect("excerpt");
+
+        assert_eq!(excerpt.len(), MAX_CONTEXT_MESSAGES);
+        assert_eq!(
+            excerpt.first().map(|message| message.message_id.as_str()),
+            Some("message-0")
+        );
+        assert_eq!(
+            excerpt.last().map(|message| message.message_id.as_str()),
+            Some("message-51")
+        );
+        assert!(!excerpt
+            .iter()
+            .any(|message| message.message_id == "message-2"));
+        assert!(excerpt
+            .iter()
+            .any(|message| message.message_id == "message-3"));
+    }
+
+    #[test]
+    fn drops_oversized_newest_message_without_replacing_it_with_old_context() {
+        let messages = vec![
+            ConversationMessageSnapshot {
+                message_id: "start".into(),
+                role: ConversationRole::Requester,
+                content: "start".into(),
+            },
+            ConversationMessageSnapshot {
+                message_id: "old".into(),
+                role: ConversationRole::Requester,
+                content: "old".into(),
+            },
+            ConversationMessageSnapshot {
+                message_id: "newest".into(),
+                role: ConversationRole::Requester,
+                content: "x".repeat(MAX_CONTEXT_BYTES + 1),
+            },
+        ];
+
+        let excerpt = select_conversation_excerpt(&messages, "start").expect("excerpt");
+        assert_eq!(
+            excerpt
+                .iter()
+                .map(|message| message.message_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["start"]
+        );
     }
 }

@@ -1544,6 +1544,1620 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn clarification_start_reuse_cancel_and_terminal_slot_release() {
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for clarification integration tests");
+    let _database_test_guard = database_test_lock().await;
+    let pool = PoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await
+        .expect("connect test database");
+    north_server::run_migrations(&pool)
+        .await
+        .expect("run migrations");
+    sqlx::query(
+        "UPDATE daemon_registrations
+         SET connected_at = NULL, connection_id = NULL",
+    )
+    .execute(&pool)
+    .await
+    .expect("clear daemon leases");
+
+    let store = AuthStore::new(pool.clone());
+    let email = unique_email("clarification-requester");
+    store
+        .issue_code(&email, "444444")
+        .await
+        .expect("issue requester code");
+    let requester = store
+        .verify_code(&email, "444444")
+        .await
+        .expect("verify requester code");
+    let requirement = store
+        .create_requirement(
+            "Clarification lifecycle",
+            "Need clarification",
+            &requester.user.id,
+        )
+        .await
+        .expect("create requirement");
+    let first = store
+        .post_requester_message(&requirement.id, &requester.user.id, "first question")
+        .await
+        .expect("persist first message");
+    let app = auth_router(AuthState::with_log_delivery(store.clone()));
+    let start_uri = format!("/requirements/{}/clarification/start", requirement.id);
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &start_uri,
+            Some(&requester.token),
+            Body::from(
+                serde_json::json!({
+                    "message_id": first.id,
+                    "expected_state_version": 1
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .expect("first clarification start response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let first_body: serde_json::Value = response_json(response).await;
+    assert_eq!(first_body["error"], "clarification_unavailable");
+    assert_eq!(first_body["session"]["phase"], "awaiting_assignment");
+    assert_eq!(first_body["session"]["status"], "unavailable");
+    let first_run_id = first_body["session"]["run_id"]
+        .as_str()
+        .expect("first run ID")
+        .to_owned();
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &start_uri,
+            Some(&requester.token),
+            Body::from(
+                serde_json::json!({
+                    "message_id": first.id,
+                    "expected_state_version": 1
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .expect("same-message retry response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let retry_body: serde_json::Value = response_json(response).await;
+    assert_eq!(retry_body["session"]["run_id"], first_run_id);
+
+    let second = store
+        .post_requester_message(&requirement.id, &requester.user.id, "second question")
+        .await
+        .expect("persist second message");
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &start_uri,
+            Some(&requester.token),
+            Body::from(
+                serde_json::json!({
+                    "message_id": second.id,
+                    "expected_state_version": 2
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .expect("different-message conflict response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let current = store
+        .requirement_by_id(&requirement.id)
+        .await
+        .expect("read requirement")
+        .expect("requirement");
+    assert_eq!(current.state_version, 2);
+
+    let other_requirement = store
+        .create_requirement(
+            "Other clarification requirement",
+            "Must not share run identity",
+            &requester.user.id,
+        )
+        .await
+        .expect("create second requirement");
+    let other_message = store
+        .post_requester_message(
+            &other_requirement.id,
+            &requester.user.id,
+            "Other requirement message",
+        )
+        .await
+        .expect("persist second requirement message");
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!(
+                "/requirements/{}/clarification/runs/missing-run/messages/{}/dispatch",
+                requirement.id, first.id
+            ),
+            Some(&requester.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("unknown-run dispatch response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response_json(response).await;
+    assert_eq!(body["error"], "not_found");
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!(
+                "/requirements/{}/clarification/runs/{}/cancel",
+                other_requirement.id, first_run_id
+            ),
+            Some(&requester.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("cross-requirement cancel response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response_json(response).await;
+    assert_eq!(body["error"], "not_found");
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!(
+                "/requirements/{}/clarification/runs/missing-run/cancel",
+                requirement.id
+            ),
+            Some(&requester.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("unknown-run cancel response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response_json(response).await;
+    assert_eq!(body["error"], "not_found");
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!(
+                "/requirements/{}/clarification/runs/{}/messages/{}/dispatch",
+                other_requirement.id, first_run_id, other_message.id
+            ),
+            Some(&requester.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("cross-requirement dispatch response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: serde_json::Value = response_json(response).await;
+    assert_eq!(body["error"], "not_found");
+
+    let cancel_uri = format!(
+        "/requirements/{}/clarification/runs/{}/cancel",
+        requirement.id, first_run_id
+    );
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &cancel_uri,
+            Some(&requester.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("cancel response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let cancelled: serde_json::Value = response_json(response).await;
+    assert_eq!(cancelled["session"]["phase"], "terminal");
+    assert_eq!(cancelled["session"]["status"], "unavailable");
+    assert_eq!(cancelled["session"]["cancel_requested"], true);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &cancel_uri,
+            Some(&requester.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("repeat cancelled run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let repeated_cancel: serde_json::Value = response_json(response).await;
+    assert_eq!(repeated_cancel["session"]["phase"], "terminal");
+    assert_eq!(repeated_cancel["session"]["cancel_requested"], true);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &start_uri,
+            Some(&requester.token),
+            Body::from(
+                serde_json::json!({
+                    "message_id": first.id,
+                    "expected_state_version": 2
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .expect("terminal same-message response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let third = store
+        .post_requester_message(&requirement.id, &requester.user.id, "third question")
+        .await
+        .expect("persist third message");
+    let response = app
+        .oneshot(request(
+            Method::POST,
+            &start_uri,
+            Some(&requester.token),
+            Body::from(
+                serde_json::json!({
+                    "message_id": third.id,
+                    "expected_state_version": 2
+                })
+                .to_string(),
+            ),
+        ))
+        .await
+        .expect("new terminal-slot start response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let next: serde_json::Value = response_json(response).await;
+    assert_ne!(next["session"]["run_id"], first_run_id);
+    assert_eq!(next["session"]["phase"], "awaiting_assignment");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn clarification_runtime_projects_existing_events_and_releases_slot() {
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for clarification integration tests");
+    let _database_test_guard = database_test_lock().await;
+    let pool = PoolOptions::new()
+        .max_connections(8)
+        .connect(&database_url)
+        .await
+        .expect("connect test database");
+    north_server::run_migrations(&pool)
+        .await
+        .expect("run migrations");
+    sqlx::query(
+        "UPDATE daemon_registrations
+         SET connected_at = NULL, connection_id = NULL",
+    )
+    .execute(&pool)
+    .await
+    .expect("clear daemon leases");
+    let store = AuthStore::new(pool.clone());
+    let email = unique_email("clarification-runtime");
+    store
+        .issue_code(&email, "555555")
+        .await
+        .expect("issue user code");
+    let user = store
+        .verify_code(&email, "555555")
+        .await
+        .expect("verify user code");
+    store
+        .update_user_role(&user.user.id, Role::Admin)
+        .await
+        .expect("promote test user")
+        .expect("test user exists");
+    let requirement = store
+        .create_requirement("Runtime projection", "Runtime output", &user.user.id)
+        .await
+        .expect("create requirement");
+    let first = store
+        .post_requester_message(&requirement.id, &user.user.id, "start clarification")
+        .await
+        .expect("persist start message");
+    let app = auth_router(AuthState::with_log_delivery(store.clone()));
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/daemon/setup/request",
+            None,
+            Body::from(r#"{"label":"clarification runtime daemon"}"#),
+        ))
+        .await
+        .expect("setup request response");
+    let created: north_server::daemon::SetupCreatedResponse = response_json(response).await;
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &created.verification_path,
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("approve daemon response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/daemon/setup/{}", created.request_token),
+            None,
+            Body::empty(),
+        ))
+        .await
+        .expect("claim daemon response");
+    let claimed: SetupClaimed = response_json(response).await;
+    assert_eq!(claimed.status, "claimed");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
+    let address = listener.local_addr().expect("server address");
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app)
+            .await
+            .expect("serve clarification runtime");
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/daemon/ws"))
+        .await
+        .expect("connect daemon");
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&hello(&claimed.daemon_id, &claimed.credential))
+                .expect("encode hello")
+                .into(),
+        ))
+        .await
+        .expect("send hello");
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Welcome(_)
+    ));
+    assert!(matches!(
+        next_server_frame(&mut socket).await,
+        ServerFrame::Reconcile(_)
+    ));
+
+    let start_uri = format!("/requirements/{}/clarification/start", requirement.id);
+    let response = app_for_request_body(
+        &app,
+        Method::POST,
+        &start_uri,
+        &user.token,
+        serde_json::json!({
+            "message_id": first.id,
+            "expected_state_version": 1
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let start_body: serde_json::Value = response_json(response).await;
+    let run_id = start_body["session"]["run_id"]
+        .as_str()
+        .expect("run ID")
+        .to_owned();
+    assert_eq!(start_body["session"]["phase"], "active");
+    assert_eq!(start_body["session"]["status"], "starting");
+    let ServerFrame::Command(start_command) = next_server_frame(&mut socket).await else {
+        panic!("expected session.start command");
+    };
+    assert_eq!(start_command.session_id, run_id);
+    let Command::SessionStart(start_payload) = &start_command.command else {
+        panic!("expected session.start payload");
+    };
+    assert!(start_payload
+        .conversation
+        .excerpt
+        .iter()
+        .any(|message| message.message_id == first.id && message.content == "start clarification"));
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&DaemonFrame::CommandAck(CommandAck {
+                command_id: start_command.command_id,
+                session_id: start_command.session_id,
+                server_command_seq: start_command.server_command_seq,
+                schema_version: SCHEMA_VERSION,
+            }))
+            .expect("encode start ACK")
+            .into(),
+        ))
+        .await
+        .expect("send start ACK");
+
+    let follow_up = store
+        .post_requester_message(&requirement.id, &user.user.id, "follow-up clarification")
+        .await
+        .expect("persist follow-up message");
+    let dispatch_uri = format!(
+        "/requirements/{}/clarification/runs/{}/messages/{}/dispatch",
+        requirement.id, run_id, follow_up.id
+    );
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &dispatch_uri,
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("dispatch follow-up response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let ServerFrame::Command(message_command) = next_server_frame(&mut socket).await else {
+        panic!("expected message.send command");
+    };
+    let Command::MessageSend(message_send) = &message_command.command else {
+        panic!("expected message.send payload");
+    };
+    assert_eq!(message_send.message_id, follow_up.id);
+    assert_eq!(message_send.content, "follow-up clarification");
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&DaemonFrame::CommandAck(CommandAck {
+                command_id: message_command.command_id.clone(),
+                session_id: message_command.session_id.clone(),
+                server_command_seq: message_command.server_command_seq,
+                schema_version: SCHEMA_VERSION,
+            }))
+            .expect("encode message ACK")
+            .into(),
+        ))
+        .await
+        .expect("send message ACK");
+    let replay = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &dispatch_uri,
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("replay follow-up response");
+    assert_eq!(replay.status(), StatusCode::ACCEPTED);
+    if let Ok(ServerFrame::Command(replayed_command)) =
+        timeout(Duration::from_millis(100), next_server_frame(&mut socket)).await
+    {
+        assert_eq!(replayed_command.command_id, message_command.command_id);
+        assert!(matches!(replayed_command.command, Command::MessageSend(_)));
+    }
+
+    let started = DaemonFrame::Event(EventEnvelope {
+        event_id: "clarification-started-event".into(),
+        session_id: run_id.clone(),
+        daemon_event_seq: 1,
+        sent_at: "2026-01-01T00:00:00Z".into(),
+        schema_version: SCHEMA_VERSION,
+        event: Event::SessionStarted(north_protocol::SessionStarted {
+            runtime_id: "pi-runtime-1".into(),
+        }),
+    });
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&started)
+                .expect("encode started event")
+                .into(),
+        ))
+        .await
+        .expect("send started event");
+    let ServerFrame::EventAck(started_ack) = next_server_frame(&mut socket).await else {
+        panic!("expected started ACK");
+    };
+    assert_eq!(started_ack.status, EventAckStatus::Accepted);
+
+    let message_event = DaemonFrame::Event(EventEnvelope {
+        event_id: "clarification-message-event".into(),
+        session_id: run_id.clone(),
+        daemon_event_seq: 2,
+        sent_at: "2026-01-01T00:00:01Z".into(),
+        schema_version: SCHEMA_VERSION,
+        event: Event::AgentMessage(north_protocol::AgentMessage {
+            message_id: "agent-message-1".into(),
+            content: "Please clarify scope.".into(),
+        }),
+    });
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&message_event)
+                .expect("encode agent message event")
+                .into(),
+        ))
+        .await
+        .expect("send agent message event");
+    let ServerFrame::EventAck(message_ack) = next_server_frame(&mut socket).await else {
+        panic!("expected agent message ACK");
+    };
+    assert_eq!(message_ack.status, EventAckStatus::Accepted);
+
+    let activity_event = DaemonFrame::Event(EventEnvelope {
+        event_id: "clarification-activity-event".into(),
+        session_id: run_id.clone(),
+        daemon_event_seq: 3,
+        sent_at: "2026-01-01T00:00:02Z".into(),
+        schema_version: SCHEMA_VERSION,
+        event: Event::AgentActivity(north_protocol::AgentActivity {
+            activity: "Pi reviewed authorized context".into(),
+        }),
+    });
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&activity_event)
+                .expect("encode activity event")
+                .into(),
+        ))
+        .await
+        .expect("send activity event");
+    let ServerFrame::EventAck(activity_ack) = next_server_frame(&mut socket).await else {
+        panic!("expected activity ACK");
+    };
+    assert_eq!(activity_ack.status, EventAckStatus::Accepted);
+
+    let cancel_uri = format!(
+        "/requirements/{}/clarification/runs/{}/cancel",
+        requirement.id, run_id
+    );
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &cancel_uri,
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("cancel assigned run response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let cancel_body: serde_json::Value = response_json(response).await;
+    assert_eq!(cancel_body["session"]["phase"], "active");
+    assert_eq!(cancel_body["session"]["cancel_requested"], true);
+    let ServerFrame::Command(cancel_command) = next_server_frame(&mut socket).await else {
+        panic!("expected session.cancel command");
+    };
+    assert!(matches!(cancel_command.command, Command::SessionCancel(_)));
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&DaemonFrame::CommandAck(CommandAck {
+                command_id: cancel_command.command_id.clone(),
+                session_id: cancel_command.session_id.clone(),
+                server_command_seq: cancel_command.server_command_seq,
+                schema_version: SCHEMA_VERSION,
+            }))
+            .expect("encode cancel ACK")
+            .into(),
+        ))
+        .await
+        .expect("send cancel ACK");
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/requirements/{}/session", requirement.id),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("active cancelled session response");
+    let active_cancel: serde_json::Value = response_json(response).await;
+    assert_eq!(active_cancel["session"]["phase"], "active");
+    assert_eq!(active_cancel["session"]["cancel_requested"], true);
+
+    let blocked_message = store
+        .post_requester_message(&requirement.id, &user.user.id, "blocked after cancel")
+        .await
+        .expect("persist blocked message");
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!(
+                "/requirements/{}/clarification/runs/{}/messages/{}/dispatch",
+                requirement.id, run_id, blocked_message.id
+            ),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("dispatch after cancellation response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let blocked_body: serde_json::Value = response_json(response).await;
+    assert_eq!(blocked_body["error"], "conflict");
+
+    let completed = DaemonFrame::Event(EventEnvelope {
+        event_id: "clarification-completed-event".into(),
+        session_id: run_id.clone(),
+        daemon_event_seq: 4,
+        sent_at: "2026-01-01T00:00:03Z".into(),
+        schema_version: SCHEMA_VERSION,
+        event: Event::SessionCompleted(north_protocol::SessionCompleted {
+            summary: "Clarification completed".into(),
+        }),
+    });
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&completed)
+                .expect("encode completion event")
+                .into(),
+        ))
+        .await
+        .expect("send completion event");
+    let ServerFrame::EventAck(completed_ack) = next_server_frame(&mut socket).await else {
+        panic!("expected completion ACK");
+    };
+    assert_eq!(completed_ack.status, EventAckStatus::Accepted);
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&completed)
+                .expect("encode duplicate completion event")
+                .into(),
+        ))
+        .await
+        .expect("send duplicate completion event");
+    let ServerFrame::EventAck(duplicate_completed_ack) = next_server_frame(&mut socket).await
+    else {
+        panic!("expected duplicate completion ACK");
+    };
+    assert_eq!(duplicate_completed_ack.status, EventAckStatus::Accepted);
+
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/requirements/{}/session", requirement.id),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("session read response");
+    let session: serde_json::Value = response_json(response).await;
+    assert_eq!(session["session"]["run_id"], run_id);
+    assert_eq!(session["session"]["phase"], "terminal");
+    assert_eq!(session["session"]["status"], "completed");
+    let messages = store
+        .conversation_messages(&requirement.id)
+        .await
+        .expect("read projected conversation");
+    assert!(messages.iter().any(|message| {
+        message.id == "agent-message-1" && message.body == "Please clarify scope."
+    }));
+    let activities = store
+        .clarification_activities(&requirement.id, 0, 50)
+        .await
+        .expect("read projected activity")
+        .0;
+    assert!(activities
+        .iter()
+        .any(|activity| activity.activity == "Pi reviewed authorized context"));
+    assert!(store
+        .latest_readiness(&requirement.id)
+        .await
+        .expect("read readiness")
+        .is_none());
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/requirements/{}/readiness", requirement.id),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("readiness endpoint response");
+    let readiness: serde_json::Value = response_json(response).await;
+    assert!(readiness["assessment"].is_null());
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/requirements/{}/activity", requirement.id),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("activity endpoint response");
+    let activity_read: serde_json::Value = response_json(response).await;
+    assert!(activity_read["activities"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["activity"] == "Pi reviewed authorized context")
+    }));
+
+    let second = store
+        .post_requester_message(&requirement.id, &user.user.id, "new clarification")
+        .await
+        .expect("persist second start message");
+    let response = app_for_request_body(
+        &app,
+        Method::POST,
+        &start_uri,
+        &user.token,
+        serde_json::json!({
+            "message_id": second.id,
+            "expected_state_version": 2
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let next_body: serde_json::Value = response_json(response).await;
+    let next_run_id = next_body["session"]["run_id"]
+        .as_str()
+        .expect("second run ID")
+        .to_owned();
+    assert_ne!(next_run_id, run_id);
+    assert_eq!(next_body["session"]["phase"], "active");
+    let ServerFrame::Command(next_command) = next_server_frame(&mut socket).await else {
+        panic!("expected second session.start command");
+    };
+    assert!(matches!(next_command.command, Command::SessionStart(_)));
+    let failure = DaemonFrame::Event(EventEnvelope {
+        event_id: "clarification-failed-event".into(),
+        session_id: next_run_id.clone(),
+        daemon_event_seq: 1,
+        sent_at: "2026-01-01T00:00:04Z".into(),
+        schema_version: SCHEMA_VERSION,
+        event: Event::SessionFailed(north_protocol::SessionFailed {
+            recoverable: false,
+            reason: "Pi clarification failed before assessment".into(),
+        }),
+    });
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&failure)
+                .expect("encode failure event")
+                .into(),
+        ))
+        .await
+        .expect("send failure event");
+    let ServerFrame::EventAck(failure_ack) = next_server_frame(&mut socket).await else {
+        panic!("expected failure ACK");
+    };
+    assert_eq!(failure_ack.status, EventAckStatus::Accepted);
+    socket
+        .send(Message::Text(
+            encode_daemon_frame(&failure)
+                .expect("encode duplicate failure event")
+                .into(),
+        ))
+        .await
+        .expect("send duplicate failure event");
+    let ServerFrame::EventAck(duplicate_failure_ack) = next_server_frame(&mut socket).await else {
+        panic!("expected duplicate failure ACK");
+    };
+    assert_eq!(duplicate_failure_ack.status, EventAckStatus::Accepted);
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/requirements/{}/session", requirement.id),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("failed session read response");
+    let failed_session: serde_json::Value = response_json(response).await;
+    assert_eq!(failed_session["session"]["run_id"], next_run_id);
+    assert_eq!(failed_session["session"]["phase"], "terminal");
+    assert_eq!(failed_session["session"]["status"], "unavailable");
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!(
+                "/requirements/{}/clarification/runs/{}/cancel",
+                requirement.id, next_run_id
+            ),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("completed failed-run cancellation response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let failed_cancel: serde_json::Value = response_json(response).await;
+    assert_eq!(failed_cancel["error"], "conflict");
+
+    let stale_message = store
+        .post_requester_message(&requirement.id, &user.user.id, "stale run message")
+        .await
+        .expect("persist stale-run message");
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            &format!(
+                "/requirements/{}/clarification/runs/{}/messages/{}/dispatch",
+                requirement.id, run_id, stale_message.id
+            ),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("stale run dispatch response");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let stale_body: serde_json::Value = response_json(response).await;
+    assert_eq!(stale_body["error"], "conflict");
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/requirements/{}/session", requirement.id),
+            Some(&user.token),
+            Body::empty(),
+        ))
+        .await
+        .expect("latest session after stale dispatch response");
+    let latest: serde_json::Value = response_json(response).await;
+    assert_eq!(latest["session"]["run_id"], next_run_id);
+    drop(socket);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn clarification_postgres_concurrency_preserves_single_slot_and_command_identity() {
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for clarification integration tests");
+    let _database_test_guard = database_test_lock().await;
+    let pool = PoolOptions::new()
+        .max_connections(16)
+        .connect(&database_url)
+        .await
+        .expect("connect test database");
+    north_server::run_migrations(&pool)
+        .await
+        .expect("run migrations");
+    sqlx::query(
+        "UPDATE daemon_registrations
+         SET connected_at = NULL, connection_id = NULL",
+    )
+    .execute(&pool)
+    .await
+    .expect("clear daemon leases");
+    let store = AuthStore::new(pool.clone());
+    let email = unique_email("clarification-concurrency");
+    store
+        .issue_code(&email, "666666")
+        .await
+        .expect("issue user code");
+    let user = store
+        .verify_code(&email, "666666")
+        .await
+        .expect("verify user code");
+    store
+        .update_user_role(&user.user.id, Role::Admin)
+        .await
+        .expect("promote test user")
+        .expect("test user exists");
+    let daemon_id = unique_email("clarification-daemon").replace(['@', '.'], "-");
+    sqlx::query(
+        "INSERT INTO daemon_registrations
+            (daemon_id, credential_hash, label, created_by, protocol_version,
+             connected_at, last_seen_at, capabilities)
+         VALUES ($1, $2, $3, $4, '0.1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, $5)",
+    )
+    .bind(&daemon_id)
+    .bind(vec![7_u8; 32])
+    .bind("clarification concurrency daemon")
+    .bind(&user.user.id)
+    .bind("[\"agent\"]")
+    .execute(&pool)
+    .await
+    .expect("insert eligible daemon");
+    let context = |requirement_id: &str, revision: u64, message_id: &str, content: &str| {
+        serde_json::json!({
+            "requirement": { "id": requirement_id, "revision": revision },
+            "conversation": {
+                "excerpt": [{
+                    "message_id": message_id,
+                    "role": "requester",
+                    "content": content
+                }]
+            },
+            "repositories": []
+        })
+    };
+    let start = |store: AuthStore,
+                 requirement_id: String,
+                 message_id: String,
+                 expected_state_version: u64,
+                 start_context: serde_json::Value,
+                 capability: String| async move {
+        let capabilities = vec![capability];
+        store
+            .start_clarification(
+                north_persistence::ClarificationStartInput {
+                    requirement_id: &requirement_id,
+                    start_message_id: &message_id,
+                    expected_state_version,
+                    context_requirement_revision: start_context["requirement"]["revision"]
+                        .as_u64()
+                        .expect("context revision"),
+                    context: &start_context,
+                    repository_ids: &[],
+                    required_capabilities: &capabilities,
+                },
+                |_daemon_id, _run_id, _command_id, _sequence, _context| {
+                    Ok::<_, north_persistence::PersistenceError>("session.start".into())
+                },
+            )
+            .await
+    };
+
+    let assigned_requirement = store
+        .create_requirement("Concurrent assigned start", "Description", &user.user.id)
+        .await
+        .expect("create assigned requirement");
+    let assigned_message = store
+        .post_requester_message(
+            &assigned_requirement.id,
+            &user.user.id,
+            "same assigned question",
+        )
+        .await
+        .expect("persist assigned message");
+    let assigned_context = context(
+        &assigned_requirement.id,
+        assigned_requirement.revision,
+        &assigned_message.id,
+        &assigned_message.body,
+    );
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let left_barrier = barrier.clone();
+    let left_pool = pool.clone();
+    let left_requirement_id = assigned_requirement.id.clone();
+    let left_message_id = assigned_message.id.clone();
+    let left_expected_state_version = assigned_requirement.state_version;
+    let left_context = assigned_context.clone();
+    let left = tokio::spawn(async move {
+        left_barrier.wait().await;
+        start(
+            AuthStore::new(left_pool),
+            left_requirement_id,
+            left_message_id,
+            left_expected_state_version,
+            left_context,
+            "agent".into(),
+        )
+        .await
+    });
+    let right_barrier = barrier.clone();
+    let right_pool = pool.clone();
+    let right_requirement_id = assigned_requirement.id.clone();
+    let right_message_id = assigned_message.id.clone();
+    let right_expected_state_version = assigned_requirement.state_version;
+    let right = tokio::spawn(async move {
+        right_barrier.wait().await;
+        start(
+            AuthStore::new(right_pool),
+            right_requirement_id,
+            right_message_id,
+            right_expected_state_version,
+            assigned_context,
+            "agent".into(),
+        )
+        .await
+    });
+    barrier.wait().await;
+    let (left, right) = tokio::join!(left, right);
+    let left = left
+        .expect("left concurrent start task")
+        .expect("left start");
+    let right = right
+        .expect("right concurrent start task")
+        .expect("right start");
+    assert_eq!(left.run.run_id, right.run.run_id);
+    assert_ne!(left.reused, right.reused);
+    assert_eq!(left.command_id, right.command_id);
+    let assigned_sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
+            .bind(&assigned_requirement.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count assigned sessions");
+    let assigned_commands: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+            .bind(&left.run.run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count assigned commands");
+    assert_eq!(assigned_sessions, 1);
+    assert_eq!(assigned_commands, 1);
+    assert_eq!(
+        store
+            .requirement_by_id(&assigned_requirement.id)
+            .await
+            .expect("read assigned requirement")
+            .expect("assigned requirement")
+            .state_version,
+        2
+    );
+
+    let different_requirement = store
+        .create_requirement("Concurrent different start", "Description", &user.user.id)
+        .await
+        .expect("create different requirement");
+    let different_left = store
+        .post_requester_message(
+            &different_requirement.id,
+            &user.user.id,
+            "winning candidate",
+        )
+        .await
+        .expect("persist winning candidate");
+    let different_right = store
+        .post_requester_message(&different_requirement.id, &user.user.id, "losing candidate")
+        .await
+        .expect("persist losing candidate");
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let left_barrier = barrier.clone();
+    let left_requirement_id = different_requirement.id.clone();
+    let left_message_id = different_left.id.clone();
+    let left_context = context(
+        &different_requirement.id,
+        different_requirement.revision,
+        &different_left.id,
+        &different_left.body,
+    );
+    let left_pool = pool.clone();
+    let left = tokio::spawn(async move {
+        left_barrier.wait().await;
+        start(
+            AuthStore::new(left_pool),
+            left_requirement_id,
+            left_message_id,
+            1,
+            left_context,
+            "agent".into(),
+        )
+        .await
+    });
+    let right_barrier = barrier.clone();
+    let right_requirement_id = different_requirement.id.clone();
+    let right_message_id = different_right.id.clone();
+    let right_context = context(
+        &different_requirement.id,
+        different_requirement.revision,
+        &different_right.id,
+        &different_right.body,
+    );
+    let right_pool = pool.clone();
+    let right = tokio::spawn(async move {
+        right_barrier.wait().await;
+        start(
+            AuthStore::new(right_pool),
+            right_requirement_id,
+            right_message_id,
+            1,
+            right_context,
+            "agent".into(),
+        )
+        .await
+    });
+    barrier.wait().await;
+    let (left, right) = tokio::join!(left, right);
+    let left = left.expect("left different start task");
+    let right = right.expect("right different start task");
+    let error = match (left, right) {
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => error,
+        _ => panic!("different concurrent starts must have one winner"),
+    };
+    assert!(matches!(
+        error,
+        north_persistence::ClarificationError::ExistingRunDifferentStart
+    ));
+    let different_sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
+            .bind(&different_requirement.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count different sessions");
+    let different_messages = store
+        .conversation_messages(&different_requirement.id)
+        .await
+        .expect("read different conversation");
+    assert_eq!(different_sessions, 1);
+    assert_eq!(different_messages.len(), 2);
+
+    let stale_requirement = store
+        .create_requirement("Stale clarification start", "Description", &user.user.id)
+        .await
+        .expect("create stale requirement");
+    let stale_message = store
+        .post_requester_message(&stale_requirement.id, &user.user.id, "stale start")
+        .await
+        .expect("persist stale start message");
+    let stale = start(
+        AuthStore::new(pool.clone()),
+        stale_requirement.id.clone(),
+        stale_message.id.clone(),
+        99,
+        context(
+            &stale_requirement.id,
+            stale_requirement.revision,
+            &stale_message.id,
+            &stale_message.body,
+        ),
+        "agent".into(),
+    )
+    .await;
+    assert!(matches!(
+        stale,
+        Err(north_persistence::ClarificationError::StateVersionConflict)
+    ));
+    let stale_sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
+            .bind(&stale_requirement.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count stale sessions");
+    assert_eq!(stale_sessions, 0);
+    assert_eq!(
+        store
+            .conversation_messages(&stale_requirement.id)
+            .await
+            .expect("read stale conversation")
+            .len(),
+        1
+    );
+
+    let awaiting_requirement = store
+        .create_requirement("Concurrent awaiting start", "Description", &user.user.id)
+        .await
+        .expect("create awaiting requirement");
+    let awaiting_message = store
+        .post_requester_message(
+            &awaiting_requirement.id,
+            &user.user.id,
+            "same awaiting question",
+        )
+        .await
+        .expect("persist awaiting message");
+    let awaiting_context = context(
+        &awaiting_requirement.id,
+        awaiting_requirement.revision,
+        &awaiting_message.id,
+        &awaiting_message.body,
+    );
+    let initial = start(
+        AuthStore::new(pool.clone()),
+        awaiting_requirement.id.clone(),
+        awaiting_message.id.clone(),
+        1,
+        awaiting_context.clone(),
+        "missing-agent".into(),
+    )
+    .await
+    .expect("create awaiting run");
+    assert_eq!(
+        initial.run.phase,
+        north_persistence::ClarificationPhase::AwaitingAssignment
+    );
+    let retry_barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let same_barrier = retry_barrier.clone();
+    let same_pool = pool.clone();
+    let same_requirement_id = awaiting_requirement.id.clone();
+    let same_message_id = awaiting_message.id.clone();
+    let same_context = awaiting_context.clone();
+    let same = tokio::spawn(async move {
+        same_barrier.wait().await;
+        start(
+            AuthStore::new(same_pool),
+            same_requirement_id,
+            same_message_id,
+            999,
+            same_context,
+            "missing-agent".into(),
+        )
+        .await
+    });
+    let retry_barrier = retry_barrier.clone();
+    let retry_release = retry_barrier.clone();
+    let retry_pool = pool.clone();
+    let retry_requirement_id = awaiting_requirement.id.clone();
+    let retry_message_id = awaiting_message.id.clone();
+    let retry = tokio::spawn(async move {
+        retry_barrier.wait().await;
+        start(
+            AuthStore::new(retry_pool),
+            retry_requirement_id,
+            retry_message_id,
+            999,
+            awaiting_context,
+            "missing-agent".into(),
+        )
+        .await
+    });
+    retry_release.wait().await;
+    let (same, retry) = tokio::join!(same, retry);
+    let same = same
+        .expect("same-message awaiting retry task")
+        .expect("same-message awaiting retry");
+    let retry = retry
+        .expect("second awaiting retry task")
+        .expect("second awaiting retry");
+    assert_eq!(same.run.run_id, initial.run.run_id);
+    assert_eq!(retry.run.run_id, initial.run.run_id);
+    assert!(same.reused && retry.reused);
+
+    let competing_message = store
+        .post_requester_message(
+            &awaiting_requirement.id,
+            &user.user.id,
+            "different awaiting question",
+        )
+        .await
+        .expect("persist competing awaiting message");
+    let competing_context = context(
+        &awaiting_requirement.id,
+        awaiting_requirement.revision,
+        &competing_message.id,
+        &competing_message.body,
+    );
+    let race_barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let same_race_barrier = race_barrier.clone();
+    let same_race_pool = pool.clone();
+    let same_race_requirement_id = awaiting_requirement.id.clone();
+    let same_race_message_id = awaiting_message.id.clone();
+    let same_race_context = context(
+        &awaiting_requirement.id,
+        awaiting_requirement.revision,
+        &awaiting_message.id,
+        &awaiting_message.body,
+    );
+    let same_race = tokio::spawn(async move {
+        same_race_barrier.wait().await;
+        start(
+            AuthStore::new(same_race_pool),
+            same_race_requirement_id,
+            same_race_message_id,
+            999,
+            same_race_context,
+            "missing-agent".into(),
+        )
+        .await
+    });
+    let different_race_barrier = race_barrier.clone();
+    let different_race_pool = pool.clone();
+    let different_race_requirement_id = awaiting_requirement.id.clone();
+    let different_race_message_id = competing_message.id.clone();
+    let different_race = tokio::spawn(async move {
+        different_race_barrier.wait().await;
+        start(
+            AuthStore::new(different_race_pool),
+            different_race_requirement_id,
+            different_race_message_id,
+            2,
+            competing_context,
+            "missing-agent".into(),
+        )
+        .await
+    });
+    race_barrier.wait().await;
+    let (same_race, different_race) = tokio::join!(same_race, different_race);
+    let same_race = same_race
+        .expect("same-message race task")
+        .expect("same-message race");
+    let different_race = different_race
+        .expect("different-message race task")
+        .expect_err("different message must lose occupied slot");
+    assert_eq!(same_race.run.run_id, initial.run.run_id);
+    assert!(same_race.reused);
+    assert!(matches!(
+        different_race,
+        north_persistence::ClarificationError::ExistingRunDifferentStart
+    ));
+    let awaiting_sessions: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
+            .bind(&awaiting_requirement.id)
+            .fetch_one(&pool)
+            .await
+            .expect("count awaiting sessions");
+    assert_eq!(awaiting_sessions, 1);
+
+    let cancellation_requirement = store
+        .create_requirement("Cancellation arbitration", "Description", &user.user.id)
+        .await
+        .expect("create cancellation requirement");
+    let cancellation_message = store
+        .post_requester_message(
+            &cancellation_requirement.id,
+            &user.user.id,
+            "cancel before assignment",
+        )
+        .await
+        .expect("persist cancellation message");
+    let cancellation_context = context(
+        &cancellation_requirement.id,
+        cancellation_requirement.revision,
+        &cancellation_message.id,
+        &cancellation_message.body,
+    );
+    let awaiting = start(
+        AuthStore::new(pool.clone()),
+        cancellation_requirement.id.clone(),
+        cancellation_message.id.clone(),
+        1,
+        cancellation_context.clone(),
+        "missing-agent".into(),
+    )
+    .await
+    .expect("create cancellable awaiting run");
+    let cancelled = store
+        .cancel_clarification(
+            &cancellation_requirement.id,
+            &awaiting.run.run_id,
+            |_daemon_id, _run_id, _command_id, _sequence| {
+                Ok::<_, north_persistence::PersistenceError>("session.cancel".into())
+            },
+        )
+        .await
+        .expect("cancel awaiting run");
+    assert_eq!(
+        cancelled.run.phase,
+        north_persistence::ClarificationPhase::Terminal
+    );
+    assert!(cancelled.command_id.is_empty());
+    let new_message = store
+        .post_requester_message(
+            &cancellation_requirement.id,
+            &user.user.id,
+            "after cancellation",
+        )
+        .await
+        .expect("persist post-cancellation message");
+    let new_run = start(
+        AuthStore::new(pool.clone()),
+        cancellation_requirement.id.clone(),
+        new_message.id.clone(),
+        2,
+        context(
+            &cancellation_requirement.id,
+            cancellation_requirement.revision,
+            &new_message.id,
+            &new_message.body,
+        ),
+        "missing-agent".into(),
+    )
+    .await
+    .expect("start after cancellation");
+    assert_ne!(new_run.run.run_id, awaiting.run.run_id);
+
+    let assigned_cancel_requirement = store
+        .create_requirement("Assigned cancellation", "Description", &user.user.id)
+        .await
+        .expect("create assigned cancellation requirement");
+    let assigned_cancel_message = store
+        .post_requester_message(
+            &assigned_cancel_requirement.id,
+            &user.user.id,
+            "cancel after assignment",
+        )
+        .await
+        .expect("persist assigned cancellation message");
+    let assigned_cancel = start(
+        AuthStore::new(pool.clone()),
+        assigned_cancel_requirement.id.clone(),
+        assigned_cancel_message.id.clone(),
+        1,
+        context(
+            &assigned_cancel_requirement.id,
+            assigned_cancel_requirement.revision,
+            &assigned_cancel_message.id,
+            &assigned_cancel_message.body,
+        ),
+        "agent".into(),
+    )
+    .await
+    .expect("start assigned cancellation run");
+    let first_cancel = store
+        .cancel_clarification(
+            &assigned_cancel_requirement.id,
+            &assigned_cancel.run.run_id,
+            |_daemon_id, _run_id, _command_id, _sequence| {
+                Ok::<_, north_persistence::PersistenceError>("session.cancel".into())
+            },
+        )
+        .await
+        .expect("first assigned cancellation");
+    let second_cancel = store
+        .cancel_clarification(
+            &assigned_cancel_requirement.id,
+            &assigned_cancel.run.run_id,
+            |_daemon_id, _run_id, _command_id, _sequence| {
+                Ok::<_, north_persistence::PersistenceError>("session.cancel".into())
+            },
+        )
+        .await
+        .expect("replayed assigned cancellation");
+    assert_eq!(
+        first_cancel.run.phase,
+        north_persistence::ClarificationPhase::Active
+    );
+    assert_eq!(first_cancel.command_id, second_cancel.command_id);
+    let assigned_cancel_commands: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+            .bind(&assigned_cancel.run.run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count cancellation commands");
+    assert_eq!(assigned_cancel_commands, 2);
+    let later = store
+        .post_requester_message(
+            &assigned_cancel_requirement.id,
+            &user.user.id,
+            "must remain history",
+        )
+        .await
+        .expect("persist message after cancellation intent");
+    let dispatch = store
+        .dispatch_clarification_message(
+            &assigned_cancel_requirement.id,
+            &assigned_cancel.run.run_id,
+            &later.id,
+            |_daemon_id, _run_id, _command_id, _sequence, _message_id, _body| {
+                Ok::<_, north_persistence::PersistenceError>("message.send".into())
+            },
+        )
+        .await;
+    assert!(matches!(
+        dispatch,
+        Err(north_persistence::ClarificationError::RunNotEligible)
+    ));
+
+    sqlx::query(
+        "UPDATE daemon_registrations
+         SET connected_at = NULL, last_seen_at = NULL",
+    )
+    .execute(&pool)
+    .await
+    .expect("make daemon unavailable for race setup");
+    let race_requirement = store
+        .create_requirement("Assignment cancellation race", "Description", &user.user.id)
+        .await
+        .expect("create race requirement");
+    let race_message = store
+        .post_requester_message(&race_requirement.id, &user.user.id, "race assignment")
+        .await
+        .expect("persist race message");
+    let race_context = context(
+        &race_requirement.id,
+        race_requirement.revision,
+        &race_message.id,
+        &race_message.body,
+    );
+    let race_run = start(
+        AuthStore::new(pool.clone()),
+        race_requirement.id.clone(),
+        race_message.id.clone(),
+        1,
+        race_context.clone(),
+        "agent".into(),
+    )
+    .await
+    .expect("create race awaiting run");
+    assert_eq!(
+        race_run.run.phase,
+        north_persistence::ClarificationPhase::AwaitingAssignment
+    );
+    sqlx::query(
+        "UPDATE daemon_registrations
+         SET connected_at = CURRENT_TIMESTAMP, last_seen_at = CURRENT_TIMESTAMP",
+    )
+    .execute(&pool)
+    .await
+    .expect("make daemon available for race");
+    let race_barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let assignment_barrier = race_barrier.clone();
+    let assignment_pool = pool.clone();
+    let assignment_requirement_id = race_requirement.id.clone();
+    let assignment_message_id = race_message.id.clone();
+    let assignment = tokio::spawn(async move {
+        assignment_barrier.wait().await;
+        start(
+            AuthStore::new(assignment_pool),
+            assignment_requirement_id,
+            assignment_message_id,
+            999,
+            race_context,
+            "agent".into(),
+        )
+        .await
+    });
+    let cancellation_barrier = race_barrier.clone();
+    let cancellation_pool = pool.clone();
+    let cancellation_requirement_id = race_requirement.id.clone();
+    let cancellation_run_id = race_run.run.run_id.clone();
+    let cancellation = tokio::spawn(async move {
+        cancellation_barrier.wait().await;
+        AuthStore::new(cancellation_pool)
+            .cancel_clarification(
+                &cancellation_requirement_id,
+                &cancellation_run_id,
+                |_daemon_id, _run_id, _command_id, _sequence| {
+                    Ok::<_, north_persistence::PersistenceError>("session.cancel".into())
+                },
+            )
+            .await
+    });
+    race_barrier.wait().await;
+    let (assignment, cancellation) = tokio::join!(assignment, cancellation);
+    let assignment = assignment.expect("assignment race task");
+    let cancellation = cancellation
+        .expect("cancellation race task")
+        .expect("cancellation race");
+    let raced = store
+        .clarification_run(&race_requirement.id, &race_run.run.run_id)
+        .await
+        .expect("read raced run");
+    let raced_daemon: Option<String> =
+        sqlx::query_scalar("SELECT daemon_id FROM execution_sessions WHERE id = $1")
+            .bind(&race_run.run.run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read raced daemon");
+    let raced_commands: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+            .bind(&race_run.run.run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count raced commands");
+    match raced.phase {
+        north_persistence::ClarificationPhase::Terminal => {
+            assert!(raced_daemon.is_none());
+            assert_eq!(raced_commands, 0);
+            assert!(matches!(
+                assignment,
+                Err(north_persistence::ClarificationError::RunNotEligible)
+            ));
+            assert!(cancellation.command_id.is_empty());
+        }
+        north_persistence::ClarificationPhase::Active => {
+            assert!(raced_daemon.is_some());
+            assert!(raced.cancel_requested);
+            assert_eq!(raced_commands, 2);
+            assert!(assignment.is_ok());
+            assert!(!cancellation.command_id.is_empty());
+        }
+        north_persistence::ClarificationPhase::AwaitingAssignment => {
+            panic!("assignment/cancellation race left run awaiting");
+        }
+    }
+}
+
+async fn app_for_request_body(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    token: &str,
+    body: serde_json::Value,
+) -> Response {
+    app.clone()
+        .oneshot(request(
+            method,
+            uri,
+            Some(token),
+            Body::from(body.to_string()),
+        ))
+        .await
+        .expect("clarification request response")
+}
+
 async fn app_for_request(
     app: &axum::Router,
     method: Method,

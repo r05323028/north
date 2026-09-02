@@ -4,6 +4,7 @@
 pub mod coordination;
 pub mod journal;
 pub mod repository_inspection;
+pub mod runtime;
 pub mod transport;
 
 pub use coordination::{protocol_error, CoordinationError, DaemonCoordinator, HandshakeActions};

@@ -9,7 +9,10 @@ next-env.d.ts
 
 # Agentic development
 graphify-out
+.ua
 .pi
+
+.ruff_cache
 
 # Local pi agent state (never publish)
 .pi/

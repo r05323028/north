@@ -178,6 +178,54 @@ impl AuthStore {
             next_offset,
         })
     }
+
+    /// Read canonical conversation order for server-owned context selection.
+    pub async fn conversation_messages(
+        &self,
+        requirement_id: &str,
+    ) -> Result<Vec<MessageRecord>, ConversationError> {
+        let mut transaction = self.pool.begin().await?;
+        let conversation = conversation_row(&mut transaction, requirement_id)
+            .await?
+            .ok_or(ConversationError::RequirementNotFound)?;
+        let rows = sqlx::query_as::<_, MessageRow>(
+            "SELECT id, conversation_id, author_user_id, kind, body,
+                    created_at::text AS created_at
+             FROM messages
+             WHERE conversation_id = $1
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(&conversation.id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        rows.into_iter().map(MessageRow::into_record).collect()
+    }
+
+    /// Read one message only when it belongs to Requirement's canonical thread.
+    pub async fn message_for_requirement(
+        &self,
+        requirement_id: &str,
+        message_id: &str,
+    ) -> Result<Option<MessageRecord>, ConversationError> {
+        let mut transaction = self.pool.begin().await?;
+        let conversation = conversation_row(&mut transaction, requirement_id).await?;
+        let Some(conversation) = conversation else {
+            return Ok(None);
+        };
+        let row = sqlx::query_as::<_, MessageRow>(
+            "SELECT id, conversation_id, author_user_id, kind, body,
+                    created_at::text AS created_at
+             FROM messages
+             WHERE conversation_id = $1 AND id = $2",
+        )
+        .bind(&conversation.id)
+        .bind(message_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        row.map(MessageRow::into_record).transpose()
+    }
 }
 
 async fn conversation_row(

@@ -85,12 +85,24 @@ test("Board repairs missed updates on reconnect, duplicate delayed hints, and re
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const hint = `event: requirement.changed\ndata: ${JSON.stringify({
-      category: "requirement.changed",
-      requirement_id: "r-1",
-    })}\n\n`;
+    const categories = [
+      "requirement.changed",
+      "conversation.changed",
+      "readiness.changed",
+      "activity.changed",
+      "session.changed",
+    ] as const;
+    const hints = categories
+      .map(
+        (category) =>
+          `event: ${category}\ndata: ${JSON.stringify({
+            category,
+            requirement_id: "r-1",
+          })}\n\n`,
+      )
+      .join("");
     await route.fulfill({
-      body: hint + hint,
+      body: hints + hints,
       headers: eventHeaders,
     });
   });

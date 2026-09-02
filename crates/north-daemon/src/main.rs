@@ -1,7 +1,8 @@
 use north_daemon::{
     coordination::DaemonCoordinator,
-    journal::{DispatchOutcome, Journal, RecoveryOutcome, RuntimeExecutor},
+    journal::Journal,
     repository_inspection::RepositoryInspector,
+    runtime::PiClarificationAdapter,
     transport::{ConnectionConfig, ConnectionControl, ConnectionEvent, ConnectionSupervisor},
 };
 use north_protocol::{DaemonFrame, Heartbeat, Hello};
@@ -78,39 +79,6 @@ struct LocalState {
     daemon_id: String,
     credential: String,
     capabilities: Vec<String>,
-}
-
-/// Placeholder until `introduce-agent-requirement-clarification` supplies
-/// North's production agent runtime adapter. Durable coordination is real, but
-/// executable commands currently produce a not-configured/unknown fact.
-///
-/// Repository inspection is initialized as a future adapter-injection seam; it
-/// is intentionally not invoked by this change's production dispatch path.
-struct LocalRuntime {
-    /// Used by the downstream clarification runtime, not by `dispatch` here.
-    _repository_inspection: RepositoryInspector,
-}
-
-impl RuntimeExecutor for LocalRuntime {
-    fn dispatch(
-        &self,
-        _runtime_operation_id: &str,
-        _command_id: &str,
-        _command: &north_protocol::Command,
-    ) -> DispatchOutcome {
-        // Agent prompting/SDK execution belongs to the downstream runtime
-        // change. Keep this binary honest rather than claiming completion.
-        DispatchOutcome::Unknown("runtime_adapter_not_configured".into())
-    }
-
-    fn recover(
-        &self,
-        _runtime_operation_id: &str,
-        _command_id: &str,
-        _command: &north_protocol::Command,
-    ) -> RecoveryOutcome {
-        RecoveryOutcome::Unknown
-    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -263,6 +231,7 @@ async fn start(args: &[String]) -> Result<(), CliError> {
     let workspace_root = option(args, "--repository-workspace-dir")
         .map(PathBuf::from)
         .unwrap_or_else(|| default_daemon_directory(&state_path, "disposable-workspaces"));
+    let pi_session_dir = default_daemon_directory(&state_path, "pi-sessions");
     let repository_inspector = RepositoryInspector::new(cache_root, workspace_root)
         .map_err(|error| CliError(format!("initialize repository inspection: {error}")))?;
     for failure in repository_inspector.startup_cleanup().failures {
@@ -274,12 +243,9 @@ async fn start(args: &[String]) -> Result<(), CliError> {
     }
     let journal = Journal::open(&journal_path, daemon_id.clone())
         .map_err(|error| CliError(format!("open {}: {error}", journal_path.display())))?;
-    let coordinator = DaemonCoordinator::new(
-        journal,
-        LocalRuntime {
-            _repository_inspection: repository_inspector,
-        },
-    );
+    let runtime = PiClarificationAdapter::new(repository_inspector, pi_session_dir)
+        .map_err(|error| CliError(format!("initialize Pi clarification runtime: {error}")))?;
+    let coordinator = DaemonCoordinator::new(journal, runtime);
     let recovered = coordinator
         .recover()
         .map_err(|error| CliError(format!("recover daemon journal: {error}")))?;

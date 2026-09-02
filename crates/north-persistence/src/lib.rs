@@ -11,6 +11,7 @@ pub use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::{error::Error, fmt};
 use subtle::ConstantTimeEq;
 
+mod clarification;
 mod conversations;
 mod daemon;
 mod delivery;
@@ -18,6 +19,12 @@ mod readiness;
 mod repositories;
 mod requirements;
 
+pub use clarification::{
+    ClarificationActivity, ClarificationCommandResult, ClarificationError, ClarificationEvent,
+    ClarificationEventError, ClarificationPhase, ClarificationRun, ClarificationStartInput,
+    ClarificationStartResult, ClarificationStatus, ReadinessView, MAX_CONTEXT_BYTES,
+    MAX_CONTEXT_MESSAGES,
+};
 pub use conversations::{
     ConversationError, ConversationPage, ConversationRecord, MessageKind, MessageRecord,
 };

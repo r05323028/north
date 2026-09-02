@@ -32,7 +32,13 @@ infer runtime intent, start a run, choose a daemon, or create
 For an initial clarification message, the UI SHALL call the identity-creating
 `POST /requirements/{requirement_id}/clarification/start` with the persisted
 `message_id` and current `expected_state_version`; the response includes the
-public `run_id` and `start_message_id`. For a later message, it SHALL use the
+public `run_id` and `start_message_id`. The UI does not arbitrate this request:
+the server first resolves same-message reuse or different-message slot conflict,
+and applies `expected_state_version` only when the slot is unoccupied and the
+request is a genuinely new logical start. A matching concurrent retry therefore
+reuses the canonical run even if the winner has already advanced
+`state_version`; it is not rendered as a stale new-start conflict. For a later
+message, it SHALL use the
 known `run_id` from that start response or the explicit `run_id` exposed by the
 canonical session read and call
 `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`.
@@ -69,11 +75,12 @@ not add another logical message or runtime submission. Concurrent start requests
 are not arbitrated by the browser; the server/persistence authority returns the
 canonical run or conflict under one sequential clarification slot.
 
-#### Scenario: Concurrent same-message starts resolve one run
+#### Scenario: Concurrent same-message Draft starts resolve one run
 
-- **GIVEN** Requirement R has no non-terminal clarification run and persisted requester message M is eligible
-- **WHEN** the UI submits two clarification/start requests for M concurrently
+- **GIVEN** Requirement R is `Draft` at `state_version=1` and persisted requester message M is eligible
+- **WHEN** the UI submits two clarification/start requests for M concurrently, both with `expected_state_version=1`
 - **THEN** both canonical results identify the same `run_id`, at most one daemon assignment and durable `session.start` exist, and the UI creates no second local run
+- **AND** the losing response is not rendered as a stale new-start conflict after the winner transitions R to `Discussing` and `state_version=2`
 
 #### Scenario: Concurrent different-message starts preserve history
 
@@ -130,9 +137,10 @@ canonical run or conflict under one sequential clarification slot.
 - **WHEN** requester message persistence succeeds but clarification start/dispatch cannot reach a daemon
 - **THEN** the message remains visible in canonical conversation history and the UI shows operational unavailability separately from message loss
 
-#### Scenario: Stale start preserves persisted history
+#### Scenario: Stale genuinely new start preserves persisted history
 
-- **WHEN** clarification/start returns HTTP 409 for the submitted expected_state_version
+- **GIVEN** no non-terminal clarification run occupies the sequential slot
+- **WHEN** clarification/start returns HTTP 409 for the submitted `expected_state_version`
 - **THEN** the UI keeps the already-persisted message, refetches canonical detail reads, and does not retry with a newer state version
 
 #### Scenario: Reload can retry unassigned start deterministically

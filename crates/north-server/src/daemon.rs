@@ -697,13 +697,17 @@ impl DaemonRuntime {
 
     async fn handle_event(&self, event: &EventEnvelope) -> Result<EventAck, EventHandleError> {
         if matches!(event.event, north_protocol::Event::RequirementAssessed(_)) {
-            return crate::assessment::handle_requirement_assessed_with_events(
+            let result = crate::assessment::handle_requirement_assessed_with_events(
                 &self.inner.store,
                 event,
                 &self.inner.events,
             )
             .await
-            .map_err(map_assessment_event_error);
+            .map_err(map_assessment_event_error)?;
+            self.inner
+                .events
+                .readiness_changed(Self::event_requirement_id(event));
+            return Ok(result);
         }
 
         let value = serde_json::to_value(event)
@@ -711,6 +715,81 @@ impl DaemonRuntime {
         let digest = canonical_payload_digest(&value);
         let payload = serde_json::to_string(event)
             .map_err(|error| EventHandleError::Integrity(error.to_string()))?;
+        let clarification_event = match &event.event {
+            north_protocol::Event::SessionStarted(payload) => {
+                Some(north_persistence::ClarificationEvent::SessionStarted {
+                    runtime_id: payload.runtime_id.clone(),
+                })
+            }
+            north_protocol::Event::AgentMessage(payload) => {
+                Some(north_persistence::ClarificationEvent::AgentMessage {
+                    message_id: payload.message_id.clone(),
+                    content: payload.content.clone(),
+                })
+            }
+            north_protocol::Event::AgentActivity(payload) => {
+                Some(north_persistence::ClarificationEvent::Activity {
+                    activity: payload.activity.clone(),
+                })
+            }
+            north_protocol::Event::SessionCompleted(payload) => {
+                Some(north_persistence::ClarificationEvent::Completed {
+                    summary: payload.summary.clone(),
+                })
+            }
+            north_protocol::Event::SessionFailed(payload) => {
+                Some(north_persistence::ClarificationEvent::Failed {
+                    recoverable: payload.recoverable,
+                    reason: payload.reason.clone(),
+                })
+            }
+            north_protocol::Event::RequirementAssessed(_) => None,
+        };
+        if let Some(clarification_event) = clarification_event {
+            match self
+                .inner
+                .store
+                .project_clarification_event(
+                    &event.event_id,
+                    &event.session_id,
+                    event.daemon_event_seq,
+                    &digest,
+                    &payload,
+                    clarification_event,
+                )
+                .await
+            {
+                Ok(receipt) => {
+                    if !receipt.duplicate && receipt.outcome == EventReceiptOutcome::Accepted {
+                        if let Ok(Some(requirement_id)) = self
+                            .inner
+                            .store
+                            .session_requirement(&event.session_id)
+                            .await
+                        {
+                            match event.event {
+                                north_protocol::Event::AgentMessage(_) => {
+                                    self.inner.events.conversation_changed(requirement_id)
+                                }
+                                north_protocol::Event::AgentActivity(_) => {
+                                    self.inner.events.activity_changed(requirement_id)
+                                }
+                                north_protocol::Event::SessionStarted(_)
+                                | north_protocol::Event::SessionCompleted(_)
+                                | north_protocol::Event::SessionFailed(_) => {
+                                    self.inner.events.session_changed(requirement_id)
+                                }
+                                north_protocol::Event::RequirementAssessed(_) => {}
+                            }
+                        }
+                    }
+                    return Self::event_ack_from_receipt(receipt);
+                }
+                Err(north_persistence::ClarificationEventError::NotClarificationSession) => {}
+                Err(error) => return Err(Self::map_clarification_event_error(error)),
+            }
+        }
+
         let receipt = self
             .inner
             .store
@@ -725,6 +804,12 @@ impl DaemonRuntime {
             })
             .await
             .map_err(map_persistence_event_error)?;
+        Self::event_ack_from_receipt(receipt)
+    }
+
+    fn event_ack_from_receipt(
+        receipt: north_persistence::EventReceipt,
+    ) -> Result<EventAck, EventHandleError> {
         let (status, reason) = match receipt.outcome {
             EventReceiptOutcome::Accepted => (EventAckStatus::Accepted, None),
             EventReceiptOutcome::Rejected => {
@@ -739,6 +824,44 @@ impl DaemonRuntime {
             status,
             reason,
         })
+    }
+
+    fn event_requirement_id(event: &EventEnvelope) -> String {
+        match &event.event {
+            north_protocol::Event::RequirementAssessed(payload) => payload.requirement_id.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn map_clarification_event_error(
+        error: north_persistence::ClarificationEventError,
+    ) -> EventHandleError {
+        match error {
+            north_persistence::ClarificationEventError::Gap { .. } => EventHandleError::Gap,
+            north_persistence::ClarificationEventError::Integrity
+            | north_persistence::ClarificationEventError::SequenceConflict(_) => {
+                EventHandleError::Integrity("event identity conflict".into())
+            }
+            north_persistence::ClarificationEventError::Database(_)
+            | north_persistence::ClarificationEventError::Projection => EventHandleError::Internal,
+            north_persistence::ClarificationEventError::NotClarificationSession => {
+                EventHandleError::Internal
+            }
+        }
+    }
+
+    /// Dispatch an already committed command without reassembling its context.
+    /// Clarification runs persist immutable context before this transport step.
+    pub async fn dispatch_pinned_command(
+        &self,
+        pinned: &north_persistence::PinnedCommand,
+    ) -> Result<(), DaemonDispatchError> {
+        if pinned.compacted {
+            return Ok(());
+        }
+        let command = ServerFrame::from_json(&pinned.payload)
+            .map_err(|_| DaemonDispatchError::InvalidCommand)?;
+        self.dispatch_persisted_command(pinned, command).await
     }
 
     pub async fn persist_and_dispatch_command(

@@ -99,6 +99,24 @@ pub trait RuntimeExecutor: Send + Sync {
         command: &Command,
     ) -> DispatchOutcome;
 
+    /// Session-aware dispatch keeps session identity inside the daemon seam
+    /// without forcing existing journal test executors to know about it.
+    fn dispatch_for_session(
+        &self,
+        _session_id: &str,
+        runtime_operation_id: &str,
+        command_id: &str,
+        command: &Command,
+    ) -> DispatchOutcome {
+        self.dispatch(runtime_operation_id, command_id, command)
+    }
+
+    /// Drain North-neutral facts produced by the last dispatch. Journal owns
+    /// envelope IDs, event sequences, and durable storage.
+    fn take_events(&self, _session_id: &str) -> Vec<Event> {
+        Vec::new()
+    }
+
     /// Resolve an operation after a crash that occurred after dispatch_started.
     /// Returning Unknown is safe: the coordinator will never blindly invoke it.
     fn recover(
@@ -107,6 +125,16 @@ pub trait RuntimeExecutor: Send + Sync {
         command_id: &str,
         command: &Command,
     ) -> RecoveryOutcome;
+
+    fn recover_for_session(
+        &self,
+        _session_id: &str,
+        runtime_operation_id: &str,
+        command_id: &str,
+        command: &Command,
+    ) -> RecoveryOutcome {
+        self.recover(runtime_operation_id, command_id, command)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,12 +385,15 @@ impl Journal {
                 emitted_events: Vec::new(),
             });
         }
-        let outcome = executor.dispatch(
+        let outcome = executor.dispatch_for_session(
+            &record.session_id,
             &record.runtime_operation_id,
             &record.command_id,
             &record.command,
         );
-        let emitted_events = self.finish_command(&record.command_id, outcome.clone())?;
+        let runtime_events = executor.take_events(&record.session_id);
+        let emitted_events =
+            self.finish_command(&record.command_id, outcome.clone(), runtime_events)?;
         self.compact_session(&record.session_id)?;
         Ok(CommandProcessResult {
             acknowledgement,
@@ -425,7 +456,8 @@ impl Journal {
                 results.push(self.process_command(record_to_envelope(&record)?, executor)?);
                 continue;
             }
-            let outcome = match executor.recover(
+            let outcome = match executor.recover_for_session(
+                &record.session_id,
                 &record.runtime_operation_id,
                 &record.command_id,
                 &record.command,
@@ -436,7 +468,8 @@ impl Journal {
                     DispatchOutcome::Unknown(unknown_reason(&record.command_id))
                 }
             };
-            let emitted_events = self.finish_command(&record.command_id, outcome.clone())?;
+            let emitted_events =
+                self.finish_command(&record.command_id, outcome.clone(), Vec::new())?;
             self.compact_session(&record.session_id)?;
             results.push(CommandProcessResult {
                 acknowledgement: command_ack(&record),
@@ -921,6 +954,7 @@ impl Journal {
         &self,
         command_id: &str,
         outcome: DispatchOutcome,
+        runtime_events: Vec<Event>,
     ) -> Result<Vec<EventEnvelope>, JournalError> {
         self.update(|state| {
             let (session_id, runtime_operation_id) = {
@@ -937,6 +971,25 @@ impl Journal {
             };
             advance_processed(state, &session_id);
             let mut events = Vec::new();
+            for (index, event) in runtime_events.into_iter().enumerate() {
+                let envelope = EventEnvelope {
+                    event_id: format!("runtime-{command_id}-{}", index + 1),
+                    session_id: session_id.clone(),
+                    daemon_event_seq: next_event_sequence(state, &session_id),
+                    sent_at: now_string(),
+                    schema_version: SCHEMA_VERSION,
+                    event,
+                };
+                let digest = payload_digest(&envelope)?;
+                state.events.push(EventRecord {
+                    daemon_id: self.daemon_id.clone(),
+                    envelope: envelope.clone(),
+                    payload_digest: digest,
+                    acknowledged: false,
+                    acknowledgement: None,
+                });
+                events.push(envelope);
+            }
             if let DispatchOutcome::Unknown(reason) = &outcome {
                 let event = EventEnvelope {
                     event_id: format!("execution-unknown-{command_id}"),

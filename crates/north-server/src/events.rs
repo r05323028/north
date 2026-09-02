@@ -10,6 +10,10 @@ use std::convert::Infallible;
 use tokio::sync::broadcast;
 
 pub const REQUIREMENT_CHANGED: &str = "requirement.changed";
+pub const CONVERSATION_CHANGED: &str = "conversation.changed";
+pub const READINESS_CHANGED: &str = "readiness.changed";
+pub const ACTIVITY_CHANGED: &str = "activity.changed";
+pub const SESSION_CHANGED: &str = "session.changed";
 const BROWSER_EVENT_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -48,6 +52,34 @@ impl BrowserEventHub {
 
     pub fn requirement_changed(&self, requirement_id: impl Into<String>) {
         self.publish(BrowserNotification::requirement_changed(requirement_id));
+    }
+
+    pub fn conversation_changed(&self, requirement_id: impl Into<String>) {
+        self.publish(BrowserNotification {
+            category: CONVERSATION_CHANGED.into(),
+            requirement_id: requirement_id.into(),
+        });
+    }
+
+    pub fn readiness_changed(&self, requirement_id: impl Into<String>) {
+        self.publish(BrowserNotification {
+            category: READINESS_CHANGED.into(),
+            requirement_id: requirement_id.into(),
+        });
+    }
+
+    pub fn activity_changed(&self, requirement_id: impl Into<String>) {
+        self.publish(BrowserNotification {
+            category: ACTIVITY_CHANGED.into(),
+            requirement_id: requirement_id.into(),
+        });
+    }
+
+    pub fn session_changed(&self, requirement_id: impl Into<String>) {
+        self.publish(BrowserNotification {
+            category: SESSION_CHANGED.into(),
+            requirement_id: requirement_id.into(),
+        });
     }
 }
 

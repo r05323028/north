@@ -1,13 +1,16 @@
+import { PageHeader } from "@/components/north-shell";
 import { RepositorySettings } from "@/components/repository-settings";
 
 export default function RepositorySettingsPage() {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 px-6 py-12">
-      <div>
-        <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground">Repositories</p>
+    <main className="north-container">
+      <PageHeader
+        description="管理 Repository metadata · Git access stays on daemon hosts"
+        title="儲存庫"
+      />
+      <div className="pt-4">
+        <RepositorySettings />
       </div>
-      <RepositorySettings />
     </main>
   );
 }

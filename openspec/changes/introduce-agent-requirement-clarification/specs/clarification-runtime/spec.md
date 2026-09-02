@@ -168,10 +168,27 @@ content snapshot token, not the write precondition.
 - **WHEN** the pinned daemon reconnects after the start command was outboxed
 - **THEN** the server replays the stored command to that same daemon with its original `run_id`/`session_id`, sequence, selected context, and payload
 
-#### Scenario: Stale discussion start creates no new command
+#### Scenario: Stale genuinely new start creates no command
 
+- **GIVEN** no non-terminal clarification run occupies the Requirement's sequential slot
 - **WHEN** an initial-message start uses an older `expected_state_version`
-- **THEN** the server returns the canonical conflict, leaves Requirement state unchanged, keeps the already-persisted message, creates no new run or daemon command, and leaves any existing run unchanged
+- **THEN** the server returns the canonical conflict, leaves Requirement state unchanged, keeps the already-persisted message, creates no new run or daemon command, and leaves any existing terminal history unchanged
+
+#### Scenario: Matching concurrent start ignores its original stale token
+
+- **GIVEN** Requirement R is `Draft` with `state_version=1`, and persisted message M is eligible
+- **WHEN** A and B concurrently call `start(M, expected_state_version=1)` and A wins arbitration
+- **THEN** A applies Draft → Discussing once, commits `state_version=2`, and creates run A
+- **AND** B resolves as an idempotent reference to A's `run_id`, without a second lifecycle transition, run, assignment, or `session.start`
+- **AND** B does not fail as a stale genuinely new start because its matching logical start is already committed
+
+#### Scenario: Different concurrent start receives existing-run conflict
+
+- **GIVEN** Requirement R is `Draft` with `state_version=1`, and persisted messages M1 and M2 are eligible
+- **WHEN** A calls `start(M1, expected_state_version=1)` and B calls `start(M2, expected_state_version=1)` concurrently, and A wins arbitration
+- **THEN** A creates the one new run and B receives the canonical existing-run/different-message sequential-slot conflict
+- **AND** B creates no run, lifecycle mutation, daemon assignment, or `session.start`, despite its originally current token
+- **AND** both M1 and M2 remain canonical conversation history
 
 ### Requirement: Authenticated HTTP mutations separate history from execution intent
 
@@ -183,24 +200,31 @@ introducing a generic command API:
   and returns its `message_id`. It SHALL not start a run, select a daemon, or
   create a runtime command.
 - `POST /requirements/{requirement_id}/clarification/start` accepts
-  `{ "message_id": string, "expected_state_version": u64 }`. It SHALL verify
-  that the message belongs to this Requirement's conversation and is eligible
-  as the start message, apply the canonical Draft → Discussing operation when
-  required, and resolve the latest run only for sequential create/reuse/idempotency. A
-  reusable unassigned attempt requires `daemon_id = null`, no successfully
-  created or dispatched `session.start`, no cancellation/closure, the same
-  logical start attempt, and the recorded `start_message_id`; that request
-  reuses the run. A different message while that attempt remains reusable
-  returns the canonical conflict. An assigned `phase=active` run also rejects a
-  different start message, including after cancellation intent or `command_ack`.
-  After a terminal run, a new eligible persisted
-  message creates a new run with a new `run_id` and current Requirement
+  `{ "message_id": string, "expected_state_version": u64 }`. After normal
+  authentication/authorization, it validates that the message belongs to this
+  Requirement's conversation and is eligible as the start message, enters the
+  per-Requirement sequential-slot arbitration, and inspects the authoritative
+  non-terminal occupant. If an occupant's `start_message_id` matches, the
+  request is a same logical start retry: it reuses that `run_id` and existing
+  command identities, creates no run, does not reapply Draft → Discussing, and
+  does not reapply the original `expected_state_version` as a new-mutation
+  precondition. If the message differs, it returns the canonical existing-run
+  sequential-slot conflict, preserves the persisted message, and creates no
+  Requirement mutation, run, daemon assignment, or `session.start`. Only an
+  unoccupied slot is a genuinely new logical start. For that new start, the
+  server atomically validates `expected_state_version`; a stale token returns
+  canonical `409` before any new-run or command mutation while preserving the
+  already-persisted message. A current token applies Draft → Discussing when
+  required, then creates a new run with a new `run_id` and current Requirement
   snapshot. An assigned start returns `202` with canonical Requirement/run data
   including `run_id` and `start_message_id`; no eligible daemon returns `503
   clarification_unavailable` with the unassigned `phase=awaiting_assignment`,
-  `status=unavailable` run projection. A stale `expected_state_version` returns
-  the canonical `409` conflict before any run/command mutation, while
-  preserving the already-persisted message.
+  `status=unavailable` run projection. Sequential-slot arbitration therefore
+  decides reuse, different-message conflict, or genuinely new start before the
+  new-start state-version precondition is applied. The state version protects
+  creation of a new logical clarification start and its associated Requirement
+  transition; it does not invalidate an already-committed matching logical start
+  during idempotent replay or concurrent same-message arbitration.
 - `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`
   has no message body. It SHALL verify that `run_id` exists, belongs to the
   Requirement in the URL, is `phase=active` with `cancel_requested=false` and
@@ -251,10 +275,24 @@ idempotent result without creating a command for another run.
 - **WHEN** a requester posts message M and calls `/clarification/start` with M's ID and the current expected_state_version
 - **THEN** the server applies any valid Draft → Discussing transition, creates/reuses the run, returns its `run_id`, includes M in assigned `session.start` context, and creates no `message.send` for M
 
-#### Scenario: Stale start preserves the message
+#### Scenario: Stale new start preserves the message
 
-- **WHEN** `/clarification/start` receives an older expected_state_version
-- **THEN** the server returns canonical `409`, preserves M, creates no new run or daemon command, and leaves any existing run unchanged
+- **GIVEN** no non-terminal clarification run occupies the Requirement's sequential slot
+- **WHEN** `/clarification/start` receives an older `expected_state_version` for persisted message M
+- **THEN** the server returns canonical `409`, preserves M, creates no new run, daemon assignment, or daemon command, and leaves terminal history unchanged
+
+#### Scenario: Same-message Draft retry is not stale after the winner transitions
+
+- **GIVEN** Requirement R is `Draft` with `state_version=1`, and A and B both start persisted message M with `expected_state_version=1`
+- **WHEN** A wins arbitration, applies Draft → Discussing, commits `state_version=2`, and creates run A before B resolves
+- **THEN** B reuses A's logical start and returns A's `run_id` without another transition or run
+- **AND** B's original `expected_state_version=1` is not applied as a new-start precondition
+
+#### Scenario: Different message loses to the existing run
+
+- **GIVEN** A and B start different persisted messages with the same current expected state version and A wins the empty slot
+- **WHEN** B reaches sequential-slot arbitration
+- **THEN** B receives the canonical existing-run/different-message conflict, creates no run or Requirement mutation, and its persisted message remains history
 
 #### Scenario: Later dispatch reuses one command for its run
 
@@ -546,18 +584,37 @@ events SHALL not repeat projections.
 ### Requirement: Clarification runs occupy one sequential clarification slot
 
 A valid explicit clarification start MAY resolve the latest run only for its
-sequential create/reuse/idempotency decision. The latest run MAY be reused only when
-`phase=awaiting_assignment`, `daemon_id = null`, no `session.start` was
-successfully created or dispatched, it has not been cancelled or closed, the
-request is the same logical start attempt, and the incoming message is its
-recorded `start_message_id`. A different message while that attempt remains
-reusable SHALL return the canonical conflict. The start response SHALL include
-the public run projection with `run_id` and `start_message_id`. If assignment
+sequential create/reuse/idempotency decision. Every request is conceptually
+processed in this order: authenticate/authorize; validate the Requirement and
+persisted requester-message binding; enter per-Requirement sequential-slot
+arbitration; and inspect the authoritative non-terminal occupant. If an
+occupant's recorded `start_message_id` matches, the request is a same logical
+start retry and SHALL reuse its `run_id` and existing command identities. It
+SHALL create no run, reapply no Draft → Discussing transition, and treat its
+original `expected_state_version` as already consumed for that logical start.
+If the message differs, the request SHALL receive the canonical existing-run
+sequential-slot conflict and SHALL create no Requirement mutation, run,
+daemon assignment, or `session.start`; its persisted message remains history.
+Only an unoccupied slot represents a genuinely new logical start. For that
+new start, and only then, the server SHALL atomically validate
+`expected_state_version` as the precondition for run creation and any associated
+Requirement transition. A stale token SHALL return canonical `409` with no new
+run or command while preserving the persisted message. Thus the state version
+protects creation of a new logical clarification start and its Requirement
+transition; it does not invalidate an already-committed matching logical start
+during idempotent replay or concurrent same-message arbitration. If assignment
 commits before a concurrent same-message retry completes, that retry returns
-that same assigned run and existing command identities; it creates no second
-run, assignment, lifecycle transition, or `session.start`. A stale
-`expected_state_version` does not turn this matching idempotent retry into a
-second mutation.
+the same assigned run and existing command identities; it creates no second run,
+assignment, lifecycle transition, or `session.start`.
+
+For the concurrent Draft example, if R is `Draft` at `state_version=1`, and A
+and B both call `start(M, expected_state_version=1)`, the arbitration winner
+applies Draft → Discussing once, commits `state_version=2`, and creates run A.
+B resolves as an idempotent reference to A's `run_id`; it does not attempt a
+second transition or fail as a stale new start. If A and B use different
+messages, the winner occupies the slot and the loser receives the canonical
+existing-run/different-message conflict, even though both supplied the token
+that was current when their requests began.
 
 For each Requirement, the server/persistence authority SHALL enforce one derived
 sequential clarification slot. At most one non-terminal clarification run may

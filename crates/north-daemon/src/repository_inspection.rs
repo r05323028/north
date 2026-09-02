@@ -1291,7 +1291,22 @@ fn complete_commit_sha(value: &str) -> bool {
 }
 
 fn server_repository_location(url: &str) -> bool {
-    url.starts_with("https://") || url.starts_with("ssh://") || url.starts_with("git@")
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("ssh://"))
+    {
+        let Some((authority, path)) = rest.split_once('/') else {
+            return false;
+        };
+        return !authority.is_empty() && !path.is_empty() && credential_free_location(url);
+    }
+    let Some(rest) = url.strip_prefix("git@") else {
+        return false;
+    };
+    let Some((host, path)) = rest.split_once(':') else {
+        return false;
+    };
+    !host.is_empty() && !path.is_empty() && !host.contains(['/', '@'])
 }
 
 fn credential_free_location(url: &str) -> bool {
@@ -2194,11 +2209,7 @@ where
         .output()
         .map_err(|error| format!("run git {operation}: {error}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(format!(
-            "git {operation} failed with {}: {stderr}",
-            output.status
-        ));
+        return Err(format!("git {operation} failed with {}", output.status));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
@@ -3294,6 +3305,10 @@ mod tests {
         ));
         assert!(server_repository_location("git@example.test:repo.git"));
         assert!(!server_repository_location("file:///tmp/repo.git"));
+        assert!(!server_repository_location("https:///repo.git"));
+        assert!(!server_repository_location("ssh:///repo.git"));
+        assert!(!server_repository_location("git@/etc"));
+        assert!(!server_repository_location("git@example.test"));
         assert!(credential_free_location("https://example.test/repo.git"));
         assert!(credential_free_location("ssh://git@example.test/repo.git"));
         assert!(credential_free_location("git@example.test:repo.git"));

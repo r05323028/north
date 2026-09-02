@@ -1,5 +1,13 @@
 export const REQUIREMENT_CHANGED_EVENT = "requirement.changed";
 
+const INVALIDATION_EVENTS = [
+  REQUIREMENT_CHANGED_EVENT,
+  "conversation.changed",
+  "readiness.changed",
+  "activity.changed",
+  "session.changed",
+] as const;
+
 type RequirementEventSubscription = {
   onChange: () => void;
   onReconnect?: () => void;
@@ -44,13 +52,17 @@ export function subscribeToRequirementEvents({
     }
   };
 
-  source.addEventListener(REQUIREMENT_CHANGED_EVENT, onChanged);
+  INVALIDATION_EVENTS.forEach((eventName) => {
+    source.addEventListener(eventName, onChanged);
+  });
   source.addEventListener("message", onMessage);
   source.onopen = onOpen;
   source.onerror = onError;
 
   return () => {
-    source.removeEventListener(REQUIREMENT_CHANGED_EVENT, onChanged);
+    INVALIDATION_EVENTS.forEach((eventName) => {
+      source.removeEventListener(eventName, onChanged);
+    });
     source.removeEventListener("message", onMessage);
     source.onopen = null;
     source.onerror = null;

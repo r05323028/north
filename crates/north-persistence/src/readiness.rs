@@ -409,6 +409,14 @@ impl AuthStore {
             rejection_reason.as_deref(),
         )
         .await?;
+        sqlx::query(
+            "UPDATE execution_sessions
+             SET updated_at = CURRENT_TIMESTAMP, last_activity_at = CURRENT_TIMESTAMP
+             WHERE id = $1",
+        )
+        .bind(event.session_id)
+        .execute(&mut *transaction)
+        .await?;
         advance_event_watermark(&mut transaction, event.session_id, sequence).await?;
         transaction.commit().await?;
         Ok(ReadinessAssessmentResult {
@@ -442,7 +450,7 @@ impl AuthStore {
                AND accepted_state_version = $3
                AND generation_unknown = FALSE
                AND outcome = 'accepted'
-             ORDER BY created_at DESC, id ASC
+             ORDER BY created_at DESC, id DESC
              LIMIT 1",
         )
         .bind(requirement_id)

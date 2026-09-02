@@ -1,18 +1,24 @@
 import Link from "next/link";
 
+import { PageHeader } from "@/components/north-shell";
+import { Button } from "@/components/ui/button";
 import { DaemonStatus } from "@/components/daemon-status";
 
 export default function DaemonStatusPage() {
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 px-6 py-12">
-      <div>
-        <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground">Daemon status</p>
-        <Link className="text-sm underline" href="/settings/repositories">
-          Repository settings
-        </Link>
+    <main className="north-container">
+      <PageHeader
+        actions={
+          <Button asChild size="sm" variant="outline">
+            <Link href="/settings/repositories">儲存庫</Link>
+          </Button>
+        }
+        description="Connected execution hosts · server-owned status"
+        title="執行狀態"
+      />
+      <div className="pt-4">
+        <DaemonStatus />
       </div>
-      <DaemonStatus />
     </main>
   );
 }

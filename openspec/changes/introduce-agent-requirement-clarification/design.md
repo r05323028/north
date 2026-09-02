@@ -60,9 +60,11 @@ authorization rules.
   including `run_id` and `start_message_id`. A valid start with no eligible
   daemon returns `503 Service Unavailable` with error code
   `clarification_unavailable`, the canonical Requirement, and the unassigned
-  `phase=awaiting_assignment`, `status=unavailable` run projection. A stale
-  state version returns the canonical `409` conflict before any run/command
-  mutation; the message remains persisted.
+  `phase=awaiting_assignment`, `status=unavailable` run projection. After slot
+  arbitration identifies an unoccupied slot as a genuinely new start, a stale
+  state version returns the canonical `409` conflict before any new-run or
+  command mutation; the message remains persisted. A matching non-terminal
+  start is idempotent and does not reapply its original state-version token.
 - `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`
   has no message body. It validates that `run_id` exists, belongs to the
   Requirement in the URL, is `phase=active` with `cancel_requested=false` and an assigned,
@@ -92,6 +94,19 @@ authorization rules.
 
 `clarification/start` is the only identity-creating exception: it may resolve
 the latest run to apply sequential create/reuse rules before returning `run_id`.
+For every start, the conceptual order is authenticate/authorize, validate the
+Requirement and persisted requester-message binding, enter per-Requirement
+sequential-slot arbitration, and inspect the authoritative non-terminal
+occupant. A matching occupant `start_message_id` selects same-start
+idempotency: reuse its `run_id` and command identities, do not create a run or
+reapply Draft → Discussing, and do not apply the original
+`expected_state_version` as a new-mutation precondition. A different message
+gets the existing-run sequential-slot conflict with no Requirement mutation,
+new run, or `session.start`. Only an unoccupied slot is a genuinely new logical
+start; only then does the server atomically validate `expected_state_version`
+for run creation and any associated Requirement transition. Thus the state
+version protects a new logical start, but does not invalidate an already-
+committed matching retry or turn it into a stale new-start failure.
 `GET /requirements/{requirement_id}/session` remains a latest-run read
 convenience, but latest-run reads may guide UI presentation and MUST NOT
 identify a dispatch or cancellation mutation. After `run_id` is known, every
@@ -236,23 +251,27 @@ The initial requester-message flow is two explicit HTTP calls:
 1. `POST /requirements/{requirement_id}/conversation/messages` durably commits
    the requester message and returns its `message_id`. This call has no runtime
    side effect.
-2. `POST /requirements/{requirement_id}/clarification/start` validates that
-   message ID and `expected_state_version` before any run or command mutation.
-   If the Requirement is Draft, it applies the canonical `begin_discussion`
-   operation; a stale token returns `409` and leaves the persisted message and
-   Requirement unchanged. It then applies the sequential reuse/new-run rules
-   above before daemon selection. If the latest run is terminal/inapplicable
-   and this is a new eligible start message, the server creates a new run. If a
-   reusable unassigned attempt is present, it reuses that run. If a daemon is
-   selected, the server assembles `session.start` from the immutable Requirement
-   snapshot, the North-selected deterministic conversation excerpt including the
-   persisted start message, and enabled repository metadata, then atomically
-   persists the daemon pin, immutable run context, and complete command before
-   dispatch. If no daemon is eligible, it retains the run with
-   `daemon_id = null`, `phase=awaiting_assignment`, `status=unavailable`, and no
-   `session.start`, returning HTTP `503` with
-   `clarification_unavailable` and that public run projection. The response
-   includes `run_id` and `start_message_id`.
+2. `POST /requirements/{requirement_id}/clarification/start` validates the
+message binding, enters sequential-slot arbitration, and inspects the
+authoritative occupant before applying a new-start state-version check. A
+matching non-terminal occupant reuses its `run_id` and command identities,
+without reapplying Draft → Discussing or the original
+`expected_state_version`; a different message returns the existing-run
+sequential-slot conflict with no Requirement mutation, new run, or
+`session.start`. Only an unoccupied slot is a genuinely new logical start. For
+that new start, the server atomically validates `expected_state_version`; a
+stale token returns `409`, leaves the persisted message and Requirement
+unchanged, and creates no run, daemon assignment, or command. If the
+Requirement is Draft and the token is current, it applies the canonical
+`begin_discussion` operation and creates a new run. If a daemon is selected,
+the server assembles `session.start` from the immutable Requirement snapshot,
+the North-selected deterministic conversation excerpt including the persisted
+start message, and enabled repository metadata, then atomically persists the
+daemon pin, immutable run context, and complete command before dispatch. If no
+daemon is eligible, it retains the run with `daemon_id = null`,
+`phase=awaiting_assignment`, `status=unavailable`, and no `session.start`,
+returning HTTP `503` with `clarification_unavailable` and that public run
+projection. The response includes `run_id` and `start_message_id`.
 
 The start message is already present in `session.start` context and SHALL NOT
 also create `message.send`. A repeated start with the same recorded
@@ -372,6 +391,17 @@ The daemon and adapter report facts only: they cannot mutate Requirement state,
 apply Requirement business transitions, or access server persistence directly.
 `north-server` applies canonical conversation, readiness, and session
 projections through existing North domain/persistence paths.
+
+`PiClarificationAdapter` validates each server-supplied repository through the
+run authorization, prepares and disposes its North-owned inspection workspace,
+and passes only the resulting repository ID/full revision into Pi context. Pi
+runs with tools, extensions, skills, and context files disabled; it therefore
+cannot select arbitrary repositories, credentials, checkout paths, or server
+persistence. While a run remains at `needs_clarification`, the immutable
+server-selected start context is stored in the daemon's bounded local session
+state so a later `message.send` can rehydrate it after daemon restart. This
+state contains no checkout path or credential and is removed on completion,
+failure, or cancellation.
 
 For the 0.1 vertical slice, the execution path is:
 
