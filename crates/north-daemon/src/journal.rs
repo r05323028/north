@@ -15,7 +15,10 @@ use std::{
     error::Error,
     fmt, fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -89,6 +92,94 @@ pub enum RecoveryOutcome {
     Unknown,
 }
 
+/// Daemon-local control shared from queue admission through runtime cleanup.
+/// It carries no server state and is never serialized onto the North wire.
+#[derive(Debug, Clone)]
+pub struct RuntimeControl {
+    session_id: String,
+    active_command_id: Arc<Mutex<Option<String>>>,
+    lifecycle: Arc<Mutex<RuntimeLifecycle>>,
+    cancellation_requested: Arc<AtomicBool>,
+    terminal_fact_emitted: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeLifecycle {
+    Queued,
+    Preparing,
+    Running,
+    Terminating,
+}
+
+impl RuntimeControl {
+    pub fn new(session_id: impl Into<String>, command_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            active_command_id: Arc::new(Mutex::new(Some(command_id.into()))),
+            lifecycle: Arc::new(Mutex::new(RuntimeLifecycle::Queued)),
+            cancellation_requested: Arc::new(AtomicBool::new(false)),
+            terminal_fact_emitted: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn active_command_id(&self) -> Option<String> {
+        self.active_command_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn lifecycle(&self) -> RuntimeLifecycle {
+        *self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn set_active_command_id(&self, command_id: impl Into<String>) {
+        *self
+            .active_command_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(command_id.into());
+    }
+
+    pub fn set_lifecycle(&self, lifecycle: RuntimeLifecycle) {
+        let lifecycle = if self.is_cancellation_requested() {
+            RuntimeLifecycle::Terminating
+        } else {
+            lifecycle
+        };
+        *self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = lifecycle;
+    }
+
+    pub fn request_cancellation(&self) {
+        self.cancellation_requested.store(true, Ordering::Release);
+        *self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = RuntimeLifecycle::Terminating;
+    }
+
+    pub fn is_cancellation_requested(&self) -> bool {
+        self.cancellation_requested.load(Ordering::Acquire)
+    }
+
+    pub fn mark_terminal_fact_emitted(&self) -> bool {
+        !self.terminal_fact_emitted.swap(true, Ordering::AcqRel)
+    }
+
+    pub fn terminal_fact_emitted(&self) -> bool {
+        self.terminal_fact_emitted.load(Ordering::Acquire)
+    }
+}
+
 pub trait RuntimeExecutor: Send + Sync {
     /// Cross the side-effecting runtime boundary once, using the command ID as
     /// the stable runtime operation identity.
@@ -109,6 +200,19 @@ pub trait RuntimeExecutor: Send + Sync {
         command: &Command,
     ) -> DispatchOutcome {
         self.dispatch(runtime_operation_id, command_id, command)
+    }
+
+    /// Dispatch with one control object created before scheduler admission.
+    /// Legacy executors keep the old hook; cancellation-aware runtimes override it.
+    fn dispatch_for_session_with_control(
+        &self,
+        session_id: &str,
+        runtime_operation_id: &str,
+        command_id: &str,
+        command: &Command,
+        _control: RuntimeControl,
+    ) -> DispatchOutcome {
+        self.dispatch_for_session(session_id, runtime_operation_id, command_id, command)
     }
 
     /// Drain North-neutral facts produced by the last dispatch. Journal owns
