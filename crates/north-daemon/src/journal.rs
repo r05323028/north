@@ -171,6 +171,10 @@ impl RuntimeControl {
         self.cancellation_requested.load(Ordering::Acquire)
     }
 
+    pub(crate) fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancellation_requested)
+    }
+
     pub fn mark_terminal_fact_emitted(&self) -> bool {
         !self.terminal_fact_emitted.swap(true, Ordering::AcqRel)
     }

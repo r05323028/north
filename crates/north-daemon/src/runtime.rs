@@ -503,10 +503,10 @@ impl PiClarificationAdapter {
     ) -> Result<(RepositoryReview, RepositoryEvidence), RuntimeOperationError> {
         check_cancellation(control)?;
         let request = InspectionRequest::new(&input.session_id, &input.operation_id, source);
-        let cancellation = InspectionCancellation::new();
+        let cancellation = InspectionCancellation::from_shared_flag(control.cancellation_flag());
         let workspace = self
             .inspector
-            .prepare_authorized(&request, authorization)
+            .prepare_authorized_with_cancellation(&request, authorization, &cancellation)
             .map_err(|error| classify_inspection_error(control, error))?;
         if control.is_cancellation_requested() {
             cancellation.cancel();
@@ -966,16 +966,23 @@ fn extract_repository_evidence(
         return Err("inspection cancelled".into());
     }
     let listing = workspace
-        .read_git_bounded(
+        .read_git_bounded_with_cancellation(
             authorization,
             &["ls-files".into(), "--cached".into(), "-z".into()],
             MAX_EVIDENCE_LIST_BYTES,
+            cancellation,
         )
         .map_err(|error| error.to_string())?;
-    let mut paths = listing
-        .split('\0')
+    let mut listing_records = listing.bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
+    if listing.truncated {
+        // A bounded listing may end in the middle of one NUL-delimited path.
+        // Ignore that incomplete record and retain deterministic complete ones.
+        listing_records.pop();
+    }
+    let mut paths = listing_records
+        .into_iter()
         .filter(|path| !path.is_empty())
-        .map(str::to_owned)
+        .filter_map(|path| String::from_utf8(path.to_vec()).ok())
         .collect::<Vec<_>>();
     paths.sort_unstable();
     let had_paths = !paths.is_empty();
@@ -991,7 +998,7 @@ fn extract_repository_evidence(
         }
         let object = format!("{}:{path}", workspace.commit_sha());
         let content = workspace
-            .read_git_bounded(
+            .read_git_bounded_with_cancellation(
                 authorization,
                 &[
                     "show".into(),
@@ -1000,8 +1007,17 @@ fn extract_repository_evidence(
                     object,
                 ],
                 MAX_EVIDENCE_FILE_BYTES,
+                cancellation,
             )
             .map_err(|error| error.to_string())?;
+        // Oversized and binary/non-UTF-8 files are not valid bounded source
+        // evidence. Skip them and continue searching for a usable file.
+        if content.truncated || content.bytes.contains(&0) {
+            continue;
+        }
+        let Ok(content) = String::from_utf8(content.bytes) else {
+            continue;
+        };
         let entry_bytes = path.len().saturating_add(content.len());
         if evidence_bytes.saturating_add(entry_bytes) > MAX_EVIDENCE_BYTES {
             break;
@@ -2073,6 +2089,209 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         assert!(receiver.try_recv().is_err());
         assert_eq!(scheduler.control_count(), 0);
         let _ = fs::read_dir(directory.path().join("workspaces"))?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_during_git_preparation_kills_git_before_prepared_workspace(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::{
+            net::{Shutdown, TcpListener},
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                mpsc,
+            },
+            thread,
+        };
+
+        let directory = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let (accepted_sender, accepted_receiver) = mpsc::channel();
+        let release_server = Arc::new(AtomicBool::new(false));
+        let server_release = release_server.clone();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("Git connection");
+            accepted_sender
+                .send(())
+                .expect("Git connection notification");
+            while !server_release.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+
+        let prepared = Arc::new(AtomicBool::new(false));
+        let adapter = Arc::new(
+            PiClarificationAdapter::new(
+                RepositoryInspector::new(
+                    directory.path().join("cache"),
+                    directory.path().join("workspaces"),
+                )?,
+                directory.path().join("sessions"),
+            )?
+            .with_agent_command(fake_pi(directory.path())?),
+        );
+        let prepared_flag = prepared.clone();
+        adapter.set_preparation_checkpoint(move |_repository_id, _path| {
+            prepared_flag.store(true, Ordering::Release);
+        });
+
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::RuntimeScheduler::new(adapter.clone(), sender);
+        scheduler.schedule(CommandEnvelope {
+            command_id: "command-git-prep".into(),
+            session_id: "session-git-prep".into(),
+            server_command_seq: 1,
+            sent_at: "2026-01-01T00:00:00Z".into(),
+            schema_version: SCHEMA_VERSION,
+            command: start_command("repository-git-prep", format!("http://{address}/repo.git")),
+        })?;
+        tokio::task::spawn_blocking(move || {
+            accepted_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|error| std::io::Error::other(format!("Git did not connect: {error}")))
+        })
+        .await??;
+
+        scheduler.schedule(CommandEnvelope {
+            command_id: "cancel-git-prep".into(),
+            session_id: "session-git-prep".into(),
+            server_command_seq: 2,
+            sent_at: "2026-01-01T00:00:00Z".into(),
+            schema_version: SCHEMA_VERSION,
+            command: Command::SessionCancel(SessionCancel {
+                reason: "requester_cancelled".into(),
+            }),
+        })?;
+        let completion = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .map_err(|_| "Git preparation cancellation timed out")?
+            .ok_or("runtime completion channel closed")?;
+        release_server.store(true, Ordering::Release);
+        server.join().expect("Git server thread");
+
+        assert_eq!(completion.command_id, "command-git-prep");
+        assert!(matches!(
+            completion.events.as_slice(),
+            [Event::SessionCompleted(_)]
+        ));
+        assert!(!prepared.load(Ordering::Acquire));
+        assert!(!directory.path().join("pi-started").exists());
+        assert!(fs::read_dir(directory.path().join("workspaces"))?
+            .next()
+            .is_none());
+        let finished = scheduler.finish_active(&completion)?;
+        let followup = match finished.followup {
+            Some(crate::scheduler::RuntimeFollowup::FinishCancellation(command)) => command,
+            other => return Err(format!("unexpected cancellation follow-up: {other:?}").into()),
+        };
+        scheduler.finish_followup(&followup)?;
+        assert_eq!(scheduler.control_count(), 0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_evidence_skips_oversized_binary_and_truncated_listing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::process::Command as GitCommand;
+
+        let directory = tempfile::tempdir()?;
+        let (repository, _) = git_fixture(
+            directory.path(),
+            "bounded-evidence-repository",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        fs::write(repository.join("src/binary.bin"), [0_u8, 1, 2, 3])?;
+        fs::write(
+            repository.join("src/oversized.txt"),
+            vec![b'x'; MAX_EVIDENCE_FILE_BYTES + 1],
+        )?;
+        fs::create_dir_all(repository.join("zz"))?;
+        for index in 0..5_000 {
+            fs::write(
+                repository.join("zz").join(format!("file-{index:04}.txt")),
+                b"listing filler",
+            )?;
+        }
+        let output = GitCommand::new("git")
+            .current_dir(&repository)
+            .args(["add", "."])
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other("stage bounded evidence fixture").into());
+        }
+        let output = GitCommand::new("git")
+            .current_dir(&repository)
+            .args(["commit", "--quiet", "-m", "bounded evidence"])
+            .output()?;
+        if !output.status.success() {
+            return Err(std::io::Error::other("commit bounded evidence fixture").into());
+        }
+
+        let inspector = RepositoryInspector::new(
+            directory.path().join("cache"),
+            directory.path().join("workspaces"),
+        )?;
+        let source = RepositorySource::new(
+            "bounded-evidence",
+            repository.to_string_lossy().into_owned(),
+        );
+        let authorization = RunAuthorization::new("session-bounded", vec![source.clone()])?;
+        let request = InspectionRequest::new("session-bounded", "task-bounded", source);
+        let workspace = inspector.prepare_authorized(&request, &authorization)?;
+        let cancellation = InspectionCancellation::new();
+        let listing = workspace.read_git_bounded_with_cancellation(
+            &authorization,
+            &["ls-files".into(), "--cached".into(), "-z".into()],
+            MAX_EVIDENCE_LIST_BYTES,
+            &cancellation,
+        )?;
+        assert!(listing.truncated, "fixture must exceed listing bound");
+        let binary = workspace.read_git_bounded_with_cancellation(
+            &authorization,
+            &[
+                "show".into(),
+                "--format=".into(),
+                "--no-ext-diff".into(),
+                format!("{}:src/binary.bin", workspace.commit_sha()),
+            ],
+            MAX_EVIDENCE_FILE_BYTES,
+            &cancellation,
+        )?;
+        assert!(binary.bytes.contains(&0));
+        let oversized = workspace.read_git_bounded_with_cancellation(
+            &authorization,
+            &[
+                "show".into(),
+                "--format=".into(),
+                "--no-ext-diff".into(),
+                format!("{}:src/oversized.txt", workspace.commit_sha()),
+            ],
+            MAX_EVIDENCE_FILE_BYTES,
+            &cancellation,
+        )?;
+        assert!(oversized.truncated);
+
+        let control = RuntimeControl::new("session-bounded", "task-bounded");
+        let result =
+            extract_repository_evidence(&workspace, &authorization, &control, &cancellation);
+        inspector.dispose(workspace)?;
+        let evidence = result.map_err(std::io::Error::other)?;
+        assert!(evidence
+            .files
+            .iter()
+            .any(|file| file.path == "src/domain.rs"));
+        assert!(!evidence
+            .files
+            .iter()
+            .any(|file| file.path == "src/binary.bin"));
+        assert!(!evidence
+            .files
+            .iter()
+            .any(|file| file.path == "src/oversized.txt"));
         Ok(())
     }
 }

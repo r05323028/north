@@ -18,11 +18,13 @@ use std::{
     io::Read,
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, TryLockError,
     },
+    thread,
+    time::{Duration, Instant},
 };
 
 #[cfg(not(any(unix, windows)))]
@@ -43,6 +45,8 @@ pub const READ_ONLY_GIT_COMMANDS: &[&str] = &[
 const WORKSPACE_PREFIX: &str = "workspace-";
 const CACHE_STAGING_PREFIX: &str = ".source-";
 const WORKSPACE_MARKER: &str = "north-workspace-identity";
+const GIT_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_GIT_COMMAND_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FsIdentity {
@@ -102,6 +106,7 @@ impl Drop for CleanupPermit {
 }
 
 impl CleanupGate {
+    #[cfg(test)]
     fn enter_operation(self: &Arc<Self>) -> OperationPermit {
         let mut state = self
             .state
@@ -120,6 +125,42 @@ impl CleanupGate {
                 gate: Arc::clone(self),
             }),
         }
+    }
+
+    fn enter_operation_with_cancellation(
+        self: &Arc<Self>,
+        cancellation: &InspectionCancellation,
+    ) -> Result<OperationPermit, InspectionError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.cleanup_running {
+            if cancellation.is_cancelled() {
+                return Err(InspectionError::new(
+                    InspectionPhase::Cancellation,
+                    "inspection cancelled while waiting for repository cleanup",
+                ));
+            }
+            state = self
+                .wake
+                .wait_timeout(state, Duration::from_millis(10))
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        }
+        if cancellation.is_cancelled() {
+            return Err(InspectionError::new(
+                InspectionPhase::Cancellation,
+                "inspection cancelled before repository preparation",
+            ));
+        }
+        state.active_operations += 1;
+        drop(state);
+        Ok(OperationPermit {
+            _lease: Arc::new(OperationLease {
+                gate: Arc::clone(self),
+            }),
+        })
     }
 
     fn begin_cleanup(self: &Arc<Self>) -> Result<CleanupPermit, String> {
@@ -274,6 +315,10 @@ impl InspectionCancellation {
         Self::default()
     }
 
+    pub(crate) fn from_shared_flag(cancelled: Arc<AtomicBool>) -> Self {
+        Self { cancelled }
+    }
+
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
@@ -281,6 +326,55 @@ impl InspectionCancellation {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
     }
+}
+
+fn ensure_not_cancelled(
+    cancellation: &InspectionCancellation,
+    reason: impl Into<String>,
+) -> Result<(), InspectionError> {
+    if cancellation.is_cancelled() {
+        Err(InspectionError::new(InspectionPhase::Cancellation, reason))
+    } else {
+        Ok(())
+    }
+}
+
+fn lock_repository<'a>(
+    lock: &'a Arc<Mutex<()>>,
+    cancellation: &InspectionCancellation,
+) -> Result<std::sync::MutexGuard<'a, ()>, InspectionError> {
+    loop {
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled while waiting for repository",
+        )?;
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
+fn cleanup_workspace_after_error(
+    mut error: InspectionError,
+    root: &Path,
+    path: &Path,
+    root_identity: FsIdentity,
+    identity: Option<&WorkspaceIdentity>,
+) -> InspectionError {
+    if let Some(identity) = identity {
+        if let Err(cleanup_failure) =
+            remove_owned_workspace_path(root, path, root_identity, identity)
+        {
+            error.cleanup_failure = Some(cleanup_failure);
+        }
+    } else {
+        error.cleanup_failure = Some(
+            "workspace ownership was not established; path retained for startup cleanup".into(),
+        );
+    }
+    error
 }
 
 /// Host-Git source metadata. Production callers should construct this through
@@ -401,6 +495,12 @@ pub struct InspectionRequest {
     pub repository: RepositorySource,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundedGitOutput {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) truncated: bool,
+}
+
 impl InspectionRequest {
     pub fn new(
         session_id: impl Into<String>,
@@ -487,14 +587,37 @@ impl PreparedWorkspace {
     }
 
     /// Execute one authorized read-only Git operation with a hard stdout cap.
-    /// This keeps North-owned source evidence bounded before it reaches a
-    /// runtime provider.
+    /// Oversized output is returned as a deterministic prefix instead of
+    /// turning one large tracked file or listing into a fatal inspection error.
     pub fn read_git_bounded(
         &self,
         authorization: &RunAuthorization,
         args: &[String],
         max_output_bytes: usize,
     ) -> Result<String, InspectionError> {
+        self.read_git_bounded_output(authorization, args, max_output_bytes, None)
+            .map(|output| String::from_utf8_lossy(&output.bytes).into_owned())
+    }
+
+    /// Read bounded source bytes while allowing repository preparation/runtime
+    /// cancellation to stop the Git child.
+    pub(crate) fn read_git_bounded_with_cancellation(
+        &self,
+        authorization: &RunAuthorization,
+        args: &[String],
+        max_output_bytes: usize,
+        cancellation: &InspectionCancellation,
+    ) -> Result<BoundedGitOutput, InspectionError> {
+        self.read_git_bounded_output(authorization, args, max_output_bytes, Some(cancellation))
+    }
+
+    fn read_git_bounded_output(
+        &self,
+        authorization: &RunAuthorization,
+        args: &[String],
+        max_output_bytes: usize,
+        cancellation: Option<&InspectionCancellation>,
+    ) -> Result<BoundedGitOutput, InspectionError> {
         let source = RepositorySource::new(&self.repository_id, &self.repository_url);
         validate_authorized_source(&self.session_id, &source, authorization)?;
         validate_workspace_path(
@@ -511,7 +634,7 @@ impl PreparedWorkspace {
                 "Git command is outside the read-only allowlist",
             ));
         }
-        git_output_bounded(
+        git_output_bounded_with_cancellation(
             &self.path,
             &self.workspace_root,
             self.workspace_root_identity,
@@ -519,8 +642,9 @@ impl PreparedWorkspace {
             None,
             args.to_vec(),
             max_output_bytes,
+            cancellation,
         )
-        .map_err(|reason| InspectionError::new(InspectionPhase::Runtime, reason))
+        .map_err(|error| inspection_error_from_git(InspectionPhase::Runtime, error))
     }
 }
 
@@ -684,8 +808,8 @@ impl RepositoryInspector {
         request: &InspectionRequest,
         authorization: &RunAuthorization,
     ) -> Result<PreparedWorkspace, InspectionError> {
-        validate_repository_selection(request, authorization)?;
-        self.prepare_unchecked(request)
+        let cancellation = InspectionCancellation::new();
+        self.prepare_authorized_with_cancellation(request, authorization, &cancellation)
     }
 
     fn validate_cache_root(&self) -> Result<(), InspectionError> {
@@ -706,21 +830,42 @@ impl RepositoryInspector {
     fn prepare_unchecked(
         &self,
         request: &InspectionRequest,
+        cancellation: &InspectionCancellation,
     ) -> Result<PreparedWorkspace, InspectionError> {
         request.validate()?;
-        let operation = self.cleanup_gate.enter_operation();
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled before repository preparation",
+        )?;
+        let operation = self
+            .cleanup_gate
+            .enter_operation_with_cancellation(cancellation)?;
         self.validate_roots()?;
         let lock = self.lock_for(&request.repository.repository_id);
-        let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = lock_repository(&lock, cancellation)?;
 
-        let cache = self.ensure_cache(&request.repository)?;
+        let cache = self.ensure_cache(&request.repository, cancellation)?;
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled before revision resolution",
+        )?;
         self.validate_cache_root()?;
         validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
             .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
-        let commit_sha = resolve_commit(&cache, &self.cache_root, self.cache_root_identity, None)?;
+        let commit_sha = resolve_commit(
+            &cache,
+            &self.cache_root,
+            self.cache_root_identity,
+            None,
+            Some(cancellation),
+        )?;
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled before checkout allocation",
+        )?;
         let path = self.allocate_workspace(request)?;
         let mut checkout_identity = None;
-        if let Err(mut error) = create_checkout(
+        if let Err(error) = create_checkout(
             CheckoutContext {
                 cache_root: &self.cache_root,
                 cache_root_identity: self.cache_root_identity,
@@ -731,53 +876,79 @@ impl RepositoryInspector {
                 commit_sha: &commit_sha,
             },
             &mut checkout_identity,
+            cancellation,
         ) {
-            if let Some(identity) = checkout_identity.as_ref() {
-                if let Err(cleanup_failure) = remove_owned_workspace_path(
-                    &self.workspace_root,
-                    &path,
-                    self.workspace_root_identity,
-                    identity,
-                ) {
-                    error.cleanup_failure = Some(cleanup_failure);
-                }
-            } else {
-                error.cleanup_failure = Some(
-                    "workspace ownership was not established; path retained for startup cleanup"
-                        .into(),
-                );
-            }
-            return Err(error);
+            return Err(cleanup_workspace_after_error(
+                error,
+                &self.workspace_root,
+                &path,
+                self.workspace_root_identity,
+                checkout_identity.as_ref(),
+            ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(cleanup_workspace_after_error(
+                InspectionError::new(
+                    InspectionPhase::Cancellation,
+                    "inspection cancelled after checkout",
+                ),
+                &self.workspace_root,
+                &path,
+                self.workspace_root_identity,
+                checkout_identity.as_ref(),
+            ));
         }
         let workspace_identity = match checkout_identity {
             Some(identity) => identity,
             None => {
-                return Err(InspectionError {
-                    phase: InspectionPhase::Workspace,
-                    reason: "checkout identity was not captured".into(),
-                    contamination: None,
-                    cleanup_failure: Some(
-                        "workspace ownership was not established; path retained for startup cleanup"
-                            .into(),
+                return Err(cleanup_workspace_after_error(
+                    InspectionError::new(
+                        InspectionPhase::Workspace,
+                        "checkout identity was not captured",
                     ),
-                });
-            }
-        };
-        let git_config = match read_git_config(&path) {
-            Ok(git_config) => git_config,
-            Err(reason) => {
-                let mut error = InspectionError::new(InspectionPhase::Workspace, reason);
-                if let Err(cleanup_failure) = remove_owned_workspace_path(
                     &self.workspace_root,
                     &path,
                     self.workspace_root_identity,
-                    &workspace_identity,
-                ) {
-                    error.cleanup_failure = Some(cleanup_failure);
-                }
-                return Err(error);
+                    None,
+                ));
             }
         };
+        if cancellation.is_cancelled() {
+            return Err(cleanup_workspace_after_error(
+                InspectionError::new(
+                    InspectionPhase::Cancellation,
+                    "inspection cancelled before checkout config capture",
+                ),
+                &self.workspace_root,
+                &path,
+                self.workspace_root_identity,
+                Some(&workspace_identity),
+            ));
+        }
+        let git_config = match read_git_config(&path) {
+            Ok(git_config) => git_config,
+            Err(reason) => {
+                return Err(cleanup_workspace_after_error(
+                    InspectionError::new(InspectionPhase::Workspace, reason),
+                    &self.workspace_root,
+                    &path,
+                    self.workspace_root_identity,
+                    Some(&workspace_identity),
+                ));
+            }
+        };
+        if cancellation.is_cancelled() {
+            return Err(cleanup_workspace_after_error(
+                InspectionError::new(
+                    InspectionPhase::Cancellation,
+                    "inspection cancelled after checkout config capture",
+                ),
+                &self.workspace_root,
+                &path,
+                self.workspace_root_identity,
+                Some(&workspace_identity),
+            ));
+        }
         Ok(PreparedWorkspace {
             session_id: request.session_id.clone(),
             repository_id: request.repository.repository_id.clone(),
@@ -800,6 +971,16 @@ impl RepositoryInspector {
         authorization: &RunAuthorization,
     ) -> Result<PreparedWorkspace, InspectionError> {
         self.prepare(request, authorization)
+    }
+
+    pub fn prepare_authorized_with_cancellation(
+        &self,
+        request: &InspectionRequest,
+        authorization: &RunAuthorization,
+        cancellation: &InspectionCancellation,
+    ) -> Result<PreparedWorkspace, InspectionError> {
+        validate_repository_selection(request, authorization)?;
+        self.prepare_unchecked(request, cancellation)
     }
 
     pub fn dispose(&self, workspace: PreparedWorkspace) -> Result<(), InspectionError> {
@@ -902,7 +1083,7 @@ impl RepositoryInspector {
         F: FnOnce(&Path, &InspectionCancellation) -> Result<(), String>,
     {
         validate_repository_selection(request, authorization)?;
-        let workspace = self.prepare_unchecked(request)?;
+        let workspace = self.prepare_unchecked(request, cancellation)?;
         self.inspect_prepared_with_cancellation(
             workspace,
             cancellation,
@@ -921,7 +1102,15 @@ impl RepositoryInspector {
             .clone()
     }
 
-    fn ensure_cache(&self, source: &RepositorySource) -> Result<PathBuf, InspectionError> {
+    fn ensure_cache(
+        &self,
+        source: &RepositorySource,
+        cancellation: &InspectionCancellation,
+    ) -> Result<PathBuf, InspectionError> {
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled before cache preparation",
+        )?;
         self.validate_cache_root()?;
         let repository_root = create_owned_child(
             &self.cache_root,
@@ -952,17 +1141,19 @@ impl RepositoryInspector {
             .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
             validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
                 .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+            ensure_not_cancelled(cancellation, "inspection cancelled before cache validation")?;
             sanitize_local_git_config(&cache, &self.cache_root, self.cache_root_identity, None)
                 .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
-            let remote = git_output(
+            let remote = git_output_for_phase(
                 &cache,
                 &self.cache_root,
                 self.cache_root_identity,
                 None,
                 None,
                 vec!["remote", "get-url", "origin"],
-            )
-            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+                InspectionPhase::Cache,
+                Some(cancellation),
+            )?;
             if remote.trim() != source.url.trim() {
                 return Err(InspectionError::new(
                     InspectionPhase::Cache,
@@ -971,15 +1162,17 @@ impl RepositoryInspector {
             }
             validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
                 .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
-            git_output(
+            git_output_for_phase(
                 &cache,
                 &self.cache_root,
                 self.cache_root_identity,
                 None,
                 None,
                 vec!["remote", "update", "--prune"],
-            )
-            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+                InspectionPhase::Cache,
+                Some(cancellation),
+            )?;
+            ensure_not_cancelled(cancellation, "inspection cancelled after cache update")?;
             return Ok(cache);
         }
 
@@ -1010,7 +1203,24 @@ impl RepositoryInspector {
             }
             return Err(error);
         }
-        let clone = git_output(
+        if cancellation.is_cancelled() {
+            let mut error = InspectionError::new(
+                InspectionPhase::Cancellation,
+                "inspection cancelled before repository clone",
+            );
+            if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+                &self.cache_root,
+                self.cache_root_identity,
+                &repository_root,
+                namespace_identity,
+                staging_identity.staging,
+                &temporary,
+            ) {
+                error.cleanup_failure = Some(cleanup_failure);
+            }
+            return Err(error);
+        }
+        let clone = git_output_for_phase(
             &self.cache_root,
             &self.cache_root,
             self.cache_root_identity,
@@ -1023,9 +1233,27 @@ impl RepositoryInspector {
                 source.url.clone(),
                 staged_cache.to_string_lossy().into_owned(),
             ],
+            InspectionPhase::Cache,
+            Some(cancellation),
         );
-        if let Err(reason) = clone {
-            let mut error = InspectionError::new(InspectionPhase::Cache, reason);
+        if let Err(mut error) = clone {
+            if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+                &self.cache_root,
+                self.cache_root_identity,
+                &repository_root,
+                namespace_identity,
+                staging_identity.staging,
+                &temporary,
+            ) {
+                error.cleanup_failure = Some(cleanup_failure);
+            }
+            return Err(error);
+        }
+        if cancellation.is_cancelled() {
+            let mut error = InspectionError::new(
+                InspectionPhase::Cancellation,
+                "inspection cancelled after repository clone",
+            );
             if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
                 &self.cache_root,
                 self.cache_root_identity,
@@ -1188,8 +1416,10 @@ impl RepositoryInspector {
         }
         // Canonical source.git is never disposable cleanup; failed post-install
         // validation leaves it for the next identity-checked recovery attempt.
+        ensure_not_cancelled(cancellation, "inspection cancelled before cache completion")?;
         sanitize_local_git_config(&cache, &self.cache_root, self.cache_root_identity, None)
             .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        ensure_not_cancelled(cancellation, "inspection cancelled after cache preparation")?;
         Ok(cache)
     }
 
@@ -1392,16 +1622,18 @@ fn resolve_commit(
     root: &Path,
     expected_root_identity: FsIdentity,
     workspace_identity: Option<&WorkspaceIdentity>,
+    cancellation: Option<&InspectionCancellation>,
 ) -> Result<String, InspectionError> {
-    let sha = git_output(
+    let sha = git_output_for_phase(
         repository,
         root,
         expected_root_identity,
         workspace_identity,
         None,
         ["rev-parse", "--verify", "--end-of-options", "HEAD^{commit}"],
-    )
-    .map_err(|reason| InspectionError::new(InspectionPhase::Revision, reason))?
+        InspectionPhase::Revision,
+        cancellation,
+    )?
     .trim()
     .to_owned();
     // Git returns its canonical object spelling here. Re-resolving the
@@ -1413,7 +1645,7 @@ fn resolve_commit(
             "Git returned an invalid full commit object ID",
         ));
     }
-    let canonical = git_output(
+    let canonical = git_output_for_phase(
         repository,
         root,
         expected_root_identity,
@@ -1425,8 +1657,9 @@ fn resolve_commit(
             "--end-of-options".to_owned(),
             format!("{sha}^{{commit}}"),
         ],
-    )
-    .map_err(|reason| InspectionError::new(InspectionPhase::Revision, reason))?
+        InspectionPhase::Revision,
+        cancellation,
+    )?
     .trim()
     .to_owned();
     if canonical != sha || !canonical.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -1862,6 +2095,7 @@ fn record_revision_failure(failure: &mut Option<InspectionError>, workspace: &Pr
         &workspace.workspace_root,
         workspace.workspace_root_identity,
         Some(&workspace.workspace_identity),
+        None,
     ) {
         Ok(commit) if commit == workspace.commit_sha => None,
         Ok(_) => Some(InspectionError::new(
@@ -1910,6 +2144,7 @@ fn record_dirty_failure(failure: &mut Option<InspectionError>, workspace: &Prepa
 fn create_checkout(
     context: CheckoutContext<'_>,
     workspace_identity: &mut Option<WorkspaceIdentity>,
+    cancellation: &InspectionCancellation,
 ) -> Result<(), InspectionError> {
     let CheckoutContext {
         cache_root,
@@ -1920,12 +2155,16 @@ fn create_checkout(
         workspace,
         commit_sha,
     } = context;
+    ensure_not_cancelled(
+        cancellation,
+        "inspection cancelled before checkout creation",
+    )?;
     validate_cache_path(cache_root, cache_root_identity, cache)
         .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
     validate_workspace_destination(workspace_root, workspace_root_identity, workspace)
         .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
     let command_directory = cache.parent().unwrap_or_else(|| Path::new("."));
-    git_output(
+    git_output_for_phase(
         command_directory,
         cache_root,
         cache_root_identity,
@@ -1939,14 +2178,20 @@ fn create_checkout(
             cache.to_string_lossy().into_owned(),
             workspace.to_string_lossy().into_owned(),
         ],
-    )
-    .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+        InspectionPhase::Workspace,
+        Some(cancellation),
+    )?;
+    ensure_not_cancelled(cancellation, "inspection cancelled after checkout clone")?;
     validate_workspace_path(workspace_root, workspace_root_identity, workspace)
         .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
     restrict_root_permissions(workspace)
         .map_err(|error| InspectionError::new(InspectionPhase::Workspace, error.to_string()))?;
     sanitize_local_git_config(workspace, workspace_root, workspace_root_identity, None)
         .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    ensure_not_cancelled(
+        cancellation,
+        "inspection cancelled after checkout sanitization",
+    )?;
     validate_workspace_path(workspace_root, workspace_root_identity, workspace)
         .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
     write_workspace_identity(
@@ -1962,7 +2207,7 @@ fn create_checkout(
     *workspace_identity = Some(identity);
     validate_workspace_path(workspace_root, workspace_root_identity, workspace)
         .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
-    git_output(
+    git_output_for_phase(
         workspace,
         workspace_root,
         workspace_root_identity,
@@ -1974,8 +2219,10 @@ fn create_checkout(
             "--force".to_owned(),
             commit_sha.to_owned(),
         ],
-    )
-    .map_err(|reason| InspectionError::new(InspectionPhase::Revision, reason))?;
+        InspectionPhase::Revision,
+        Some(cancellation),
+    )?;
+    ensure_not_cancelled(cancellation, "inspection cancelled after checkout revision")?;
     validate_workspace_path(workspace_root, workspace_root_identity, workspace)
         .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
     let actual = resolve_commit(
@@ -1983,6 +2230,7 @@ fn create_checkout(
         workspace_root,
         workspace_root_identity,
         workspace_identity.as_ref(),
+        Some(cancellation),
     )?;
     if actual != commit_sha {
         return Err(InspectionError::new(
@@ -2055,27 +2303,32 @@ fn sanitize_git_environment(command: &mut Command) {
         .env("GIT_CONFIG_GLOBAL", empty_git_config());
 }
 
-fn git_host_config_overrides() -> Vec<(String, String)> {
+fn git_host_config_overrides(
+    cancellation: Option<&InspectionCancellation>,
+) -> Result<Vec<(String, String)>, GitCommandError> {
     let mut overrides = Vec::new();
     for scope in ["--system", "--global"] {
         let mut command = Command::new("git");
         sanitize_git_path_environment(&mut command);
         remove_git_config_environment(&mut command);
-        let output = command
-            .args([
-                "config",
-                scope,
-                "--get-regexp",
-                r"^(credential\..*|core\.sshcommand|ssh\.variant)$",
-            ])
-            .output();
-        let Ok(output) = output else {
-            continue;
+        command.args([
+            "config",
+            scope,
+            "--get-regexp",
+            r"^(credential\..*|core\.sshcommand|ssh\.variant)$",
+        ]);
+        let output = match run_git_child(
+            command,
+            format!("config {scope}"),
+            cancellation,
+            Some(MAX_GIT_COMMAND_OUTPUT_BYTES),
+            false,
+        ) {
+            Ok(output) => output,
+            Err(GitCommandError::Cancelled) => return Err(GitCommandError::Cancelled),
+            Err(_) => continue,
         };
-        if !output.status.success() {
-            continue;
-        }
-        for (key, value) in String::from_utf8_lossy(&output.stdout)
+        for (key, value) in String::from_utf8_lossy(&output.bytes)
             .lines()
             .filter_map(|line| line.split_once(char::is_whitespace))
             .filter(|(key, _)| {
@@ -2089,7 +2342,7 @@ fn git_host_config_overrides() -> Vec<(String, String)> {
             overrides.push((key.to_owned(), value.to_owned()));
         }
     }
-    overrides
+    Ok(overrides)
 }
 
 fn apply_git_config_overrides(command: &mut Command, overrides: &[(String, String)]) {
@@ -2219,7 +2472,42 @@ fn sanitize_local_git_config(
     Ok(())
 }
 
-fn git_output_bounded<I, S>(
+#[derive(Debug)]
+enum GitCommandError {
+    Cancelled,
+    TimedOut { operation: String },
+    OutputExceeded { operation: String, max: usize },
+    Failed(String),
+}
+
+impl fmt::Display for GitCommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("Git operation cancelled"),
+            Self::TimedOut { operation } => {
+                write!(formatter, "git {operation} timed out")
+            }
+            Self::OutputExceeded { operation, max } => write!(
+                formatter,
+                "git {operation} output exceeded bounded size of {max} bytes"
+            ),
+            Self::Failed(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+fn inspection_error_from_git(phase: InspectionPhase, error: GitCommandError) -> InspectionError {
+    match error {
+        GitCommandError::Cancelled => InspectionError::new(
+            InspectionPhase::Cancellation,
+            "inspection cancelled during Git operation",
+        ),
+        other => InspectionError::new(phase, other.to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn git_output_bounded_with_cancellation<I, S>(
     current_dir: &Path,
     root: &Path,
     expected_root_identity: FsIdentity,
@@ -2227,7 +2515,8 @@ fn git_output_bounded<I, S>(
     additional_root: Option<(&Path, FsIdentity)>,
     args: I,
     max_output_bytes: usize,
-) -> Result<String, String>
+    cancellation: Option<&InspectionCancellation>,
+) -> Result<BoundedGitOutput, GitCommandError>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -2236,62 +2525,49 @@ where
         .into_iter()
         .map(|argument| argument.as_ref().to_owned())
         .collect::<Vec<_>>();
-    let mut command = Command::new("git");
-    validate_git_spawn_scope(
+    git_output_managed(
         current_dir,
         root,
         expected_root_identity,
         workspace_identity,
-    )?;
-    if let Some((additional_root, identity)) = additional_root {
-        validate_root_identity(additional_root, identity)?;
-    }
-    let host_config_overrides = git_host_config_overrides();
-    sanitize_git_environment(&mut command);
-    apply_git_config_overrides(&mut command, &host_config_overrides);
-    command.current_dir(current_dir).args(&args);
-    validate_git_spawn_scope(
+        additional_root,
+        args,
+        cancellation,
+        Some(max_output_bytes),
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn git_output_for_phase<I, S>(
+    current_dir: &Path,
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    workspace_identity: Option<&WorkspaceIdentity>,
+    additional_root: Option<(&Path, FsIdentity)>,
+    args: I,
+    phase: InspectionPhase,
+    cancellation: Option<&InspectionCancellation>,
+) -> Result<String, InspectionError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let output = git_output_managed(
         current_dir,
         root,
         expected_root_identity,
         workspace_identity,
-    )?;
-    if let Some((additional_root, identity)) = additional_root {
-        validate_root_identity(additional_root, identity)?;
-    }
-    let operation = args.first().map(String::as_str).unwrap_or("command");
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("run git {operation}: {error}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| format!("run git {operation}: stdout pipe was unavailable"))?;
-    let mut output = Vec::new();
-    let read_result = stdout
-        .take(max_output_bytes.saturating_add(1) as u64)
-        .read_to_end(&mut output);
-    if let Err(error) = read_result {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!("read git {operation} output: {error}"));
-    }
-    if output.len() > max_output_bytes {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(format!(
-            "git {operation} output exceeded bounded size of {max_output_bytes} bytes"
-        ));
-    }
-    let status = child
-        .wait()
-        .map_err(|error| format!("wait for git {operation}: {error}"))?;
-    if !status.success() {
-        return Err(format!("git {operation} failed with {status}"));
-    }
-    Ok(String::from_utf8_lossy(&output).into_owned())
+        additional_root,
+        args.into_iter()
+            .map(|argument| argument.as_ref().to_owned())
+            .collect(),
+        cancellation,
+        Some(MAX_GIT_COMMAND_OUTPUT_BYTES),
+        false,
+    )
+    .map_err(|error| inspection_error_from_git(phase, error))?;
+    Ok(String::from_utf8_lossy(&output.bytes).into_owned())
 }
 
 fn git_output<I, S>(
@@ -2306,24 +2582,51 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let args = args
-        .into_iter()
-        .map(|argument| argument.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    let mut command = Command::new("git");
+    let output = git_output_managed(
+        current_dir,
+        root,
+        expected_root_identity,
+        workspace_identity,
+        additional_root,
+        args.into_iter()
+            .map(|argument| argument.as_ref().to_owned())
+            .collect(),
+        None,
+        None,
+        false,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(String::from_utf8_lossy(&output.bytes).into_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn git_output_managed(
+    current_dir: &Path,
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    workspace_identity: Option<&WorkspaceIdentity>,
+    additional_root: Option<(&Path, FsIdentity)>,
+    args: Vec<String>,
+    cancellation: Option<&InspectionCancellation>,
+    max_output_bytes: Option<usize>,
+    allow_truncation: bool,
+) -> Result<BoundedGitOutput, GitCommandError> {
     validate_git_spawn_scope(
         current_dir,
         root,
         expected_root_identity,
         workspace_identity,
-    )?;
+    )
+    .map_err(GitCommandError::Failed)?;
     if let Some((additional_root, identity)) = additional_root {
-        validate_root_identity(additional_root, identity)?;
+        validate_root_identity(additional_root, identity).map_err(GitCommandError::Failed)?;
     }
+    let operation = args.first().cloned().unwrap_or_else(|| "command".into());
+    let host_config_overrides = git_host_config_overrides(cancellation)?;
+    let mut command = Command::new("git");
     // Keep host SSH agents, SSH commands, and helpers. Isolate global/system
     // Git config so URL rewrites cannot redirect a source, then restore only
     // authentication settings through environment variables.
-    let host_config_overrides = git_host_config_overrides();
     sanitize_git_environment(&mut command);
     apply_git_config_overrides(&mut command, &host_config_overrides);
     command.current_dir(current_dir).args(&args);
@@ -2332,18 +2635,148 @@ where
         root,
         expected_root_identity,
         workspace_identity,
-    )?;
+    )
+    .map_err(GitCommandError::Failed)?;
     if let Some((additional_root, identity)) = additional_root {
-        validate_root_identity(additional_root, identity)?;
+        validate_root_identity(additional_root, identity).map_err(GitCommandError::Failed)?;
     }
-    let operation = args.first().map(String::as_str).unwrap_or("command");
-    let output = command
-        .output()
-        .map_err(|error| format!("run git {operation}: {error}"))?;
-    if !output.status.success() {
-        return Err(format!("git {operation} failed with {}", output.status));
+    run_git_child(
+        command,
+        operation,
+        cancellation,
+        max_output_bytes,
+        allow_truncation,
+    )
+}
+
+fn run_git_child(
+    mut command: Command,
+    operation: String,
+    cancellation: Option<&InspectionCancellation>,
+    max_output_bytes: Option<usize>,
+    allow_truncation: bool,
+) -> Result<BoundedGitOutput, GitCommandError> {
+    if cancellation.is_some_and(InspectionCancellation::is_cancelled) {
+        return Err(GitCommandError::Cancelled);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| GitCommandError::Failed(format!("run git {operation}: {error}")))?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            stop_git_process(&mut child);
+            return Err(GitCommandError::Failed(format!(
+                "run git {operation}: stdout pipe was unavailable"
+            )));
+        }
+    };
+    let output_overflow = Arc::new(AtomicBool::new(false));
+    let reader_overflow = output_overflow.clone();
+    let reader = thread::spawn(move || read_git_output(stdout, max_output_bytes, reader_overflow));
+    let deadline = Instant::now() + GIT_OPERATION_TIMEOUT;
+    let wait_result: Result<Option<ExitStatus>, GitCommandError> = loop {
+        if cancellation.is_some_and(InspectionCancellation::is_cancelled) {
+            stop_git_process(&mut child);
+            break Err(GitCommandError::Cancelled);
+        }
+        if output_overflow.load(Ordering::Acquire) {
+            stop_git_process(&mut child);
+            if allow_truncation {
+                break Ok(None);
+            }
+            break Err(GitCommandError::OutputExceeded {
+                operation: operation.clone(),
+                max: max_output_bytes.unwrap_or_default(),
+            });
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(Some(status)),
+            Ok(None) if Instant::now() >= deadline => {
+                stop_git_process(&mut child);
+                break Err(GitCommandError::TimedOut {
+                    operation: operation.clone(),
+                });
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(error) => {
+                stop_git_process(&mut child);
+                break Err(GitCommandError::Failed(format!(
+                    "wait for git {operation}: {error}"
+                )));
+            }
+        }
+    };
+    let output = match reader.join() {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            if wait_result.is_ok() {
+                stop_git_process(&mut child);
+            }
+            return Err(GitCommandError::Failed(format!(
+                "read git {operation} output: {error}"
+            )));
+        }
+        Err(_) => {
+            if wait_result.is_ok() {
+                stop_git_process(&mut child);
+            }
+            return Err(GitCommandError::Failed(format!(
+                "read git {operation} panicked"
+            )));
+        }
+    };
+    let truncated = output_overflow.load(Ordering::Acquire);
+    let status = wait_result?;
+    if cancellation.is_some_and(InspectionCancellation::is_cancelled) {
+        return Err(GitCommandError::Cancelled);
+    }
+    if truncated && !allow_truncation {
+        return Err(GitCommandError::OutputExceeded {
+            operation,
+            max: max_output_bytes.unwrap_or_default(),
+        });
+    }
+    if let Some(status) = status {
+        if !status.success() {
+            return Err(GitCommandError::Failed(format!(
+                "git {operation} failed with {status}"
+            )));
+        }
+    }
+    Ok(BoundedGitOutput {
+        bytes: output,
+        truncated,
+    })
+}
+
+fn stop_git_process(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn read_git_output<R: Read>(
+    mut reader: R,
+    max_output_bytes: Option<usize>,
+    output_overflow: Arc<AtomicBool>,
+) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    match max_output_bytes {
+        Some(max) => {
+            reader
+                .take(max.saturating_add(1) as u64)
+                .read_to_end(&mut output)?;
+        }
+        None => {
+            reader.read_to_end(&mut output)?;
+        }
+    }
+    if max_output_bytes.is_some_and(|max| output.len() > max) {
+        output_overflow.store(true, Ordering::Release);
+    }
+    Ok(output)
 }
 
 fn is_cache_staging_name(name: &OsStr) -> bool {
