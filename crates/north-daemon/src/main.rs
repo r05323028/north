@@ -1,8 +1,9 @@
 use north_daemon::{
-    coordination::DaemonCoordinator,
-    journal::Journal,
+    coordination::{DaemonCoordinator, RuntimeActions},
+    journal::{Journal, RuntimeExecutor},
     repository_inspection::RepositoryInspector,
     runtime::PiClarificationAdapter,
+    scheduler::{RuntimeFollowup, RuntimeScheduler},
     transport::{ConnectionConfig, ConnectionControl, ConnectionEvent, ConnectionSupervisor},
 };
 use north_protocol::{DaemonFrame, Heartbeat, Hello};
@@ -246,8 +247,10 @@ async fn start(args: &[String]) -> Result<(), CliError> {
     let runtime = PiClarificationAdapter::new(repository_inspector, pi_session_dir)
         .map_err(|error| CliError(format!("initialize Pi clarification runtime: {error}")))?;
     let coordinator = DaemonCoordinator::new(journal, runtime);
+    let (runtime_completion_sender, mut runtime_completion_receiver) = mpsc::unbounded_channel();
+    let scheduler = RuntimeScheduler::new(coordinator.executor(), runtime_completion_sender);
     let recovered = coordinator
-        .recover()
+        .recover_for_scheduler()
         .map_err(|error| CliError(format!("recover daemon journal: {error}")))?;
     let (outbound, outbound_receiver) = ConnectionSupervisor::outbound_channel();
     let (close_sender, close_receiver) = ConnectionSupervisor::control_channel();
@@ -278,54 +281,114 @@ async fn start(args: &[String]) -> Result<(), CliError> {
             .run_with_control(outbound_receiver, events, close_receiver)
             .await
     });
-    let mut pending_frames = recovered;
+    let mut pending_frames = recovered.frames;
+    let mut pending_commands = recovered.commands;
     loop {
         tokio::select! {
             result = &mut task => {
+                let _ = scheduler.request_shutdown();
                 return result
                     .map_err(|error| CliError(format!("supervisor task failed: {error}")))?
                     .map_err(|error| CliError(error.to_string()));
             }
+            completion = runtime_completion_receiver.recv() => {
+                let Some(completion) = completion else {
+                    let _ = scheduler.request_shutdown();
+                    return Err(CliError("runtime completion channel closed".into()));
+                };
+                let finished = scheduler
+                    .finish_active(&completion)
+                    .map_err(|error| CliError(format!("finish scheduled runtime: {error}")))?;
+                let actions = coordinator
+                    .finish_runtime(
+                        &completion.session_id,
+                        &completion.command_id,
+                        completion.outcome,
+                        completion.events,
+                    )
+                    .map_err(|error| CliError(format!("finish runtime command: {error}")))?;
+                emit_runtime_actions(&outbound, &scheduler, actions).await?;
+                if let Some(followup) = finished.followup {
+                    match followup {
+                        RuntimeFollowup::FinishCancellation(command) => {
+                            let actions = coordinator
+                                .finish_runtime(
+                                    &command.session_id,
+                                    &command.command_id,
+                                    north_daemon::DispatchOutcome::DispatchSucceeded,
+                                    Vec::new(),
+                                )
+                                .map_err(|error| CliError(format!("finish cancellation: {error}")))?;
+                            emit_runtime_actions(&outbound, &scheduler, actions).await?;
+                        }
+                        RuntimeFollowup::RescheduleCancellation(command) => scheduler
+                            .schedule_runtime(command)
+                            .map_err(|error| CliError(format!("schedule cancellation: {error}")))?,
+                    }
+                }
+            }
             event = events_receiver.recv() => match event {
                 Some(ConnectionEvent::HandshakeComplete { result, ready }) => {
-                    let mut frames = coordinator
+                    let mut actions = coordinator
                         .reconcile(result.reconciliation)
-                        .map_err(|error| CliError(format!("reconcile daemon journal: {error}")))?
-                        .replay;
-                    frames.append(&mut pending_frames);
+                        .map_err(|error| CliError(format!("reconcile daemon journal: {error}")))?;
+                    actions.replay.append(&mut pending_frames);
                     ready.send(()).map_err(|_| CliError("supervisor stopped during handshake".into()))?;
-                    for frame in frames {
+                    for frame in actions.replay {
                         outbound
                             .send(frame)
                             .await
                             .map_err(|_| CliError("supervisor stopped during event replay".into()))?;
                     }
+                    for command in pending_commands.drain(..) {
+                        scheduler
+                            .schedule(command)
+                            .map_err(|error| CliError(format!("schedule recovered command: {error}")))?;
+                    }
                 }
                 Some(ConnectionEvent::Frame(frame)) => {
-                    let responses = match coordinator.process_server_frame(frame) {
-                        Ok(responses) => responses,
+                    let actions = match coordinator.accept_server_frame(frame) {
+                        Ok(actions) => actions,
                         Err(north_daemon::coordination::CoordinationError::RetryableGap { .. }) => {
                             close_sender
                                 .send(ConnectionControl::CloseRetryable)
                                 .await
                                 .map_err(|_| CliError("supervisor stopped at gap boundary".into()))?;
-                            Vec::new()
+                            RuntimeActions::default()
                         }
                         Err(error) => {
+                            let _ = scheduler.request_shutdown();
                             return Err(CliError(format!("process server frame: {error}")));
                         }
                     };
-                    for response in responses {
-                        outbound
-                            .send(response)
-                            .await
-                            .map_err(|_| CliError("supervisor stopped while sending response".into()))?;
-                    }
+                    emit_runtime_actions(&outbound, &scheduler, actions).await?;
                 }
-                None => return Err(CliError("supervisor event channel closed".into())),
+                None => {
+                    let _ = scheduler.request_shutdown();
+                    return Err(CliError("supervisor event channel closed".into()));
+                }
             }
         }
     }
+}
+
+async fn emit_runtime_actions<E: RuntimeExecutor + 'static>(
+    outbound: &mpsc::Sender<DaemonFrame>,
+    scheduler: &RuntimeScheduler<E>,
+    actions: RuntimeActions,
+) -> Result<(), CliError> {
+    for frame in actions.frames {
+        outbound
+            .send(frame)
+            .await
+            .map_err(|_| CliError("supervisor stopped while sending runtime frame".into()))?;
+    }
+    for command in actions.commands {
+        scheduler
+            .schedule(command)
+            .map_err(|error| CliError(format!("schedule runtime command: {error}")))?;
+    }
+    Ok(())
 }
 
 fn curl_json<T: DeserializeOwned>(

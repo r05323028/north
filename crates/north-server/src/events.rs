@@ -138,9 +138,13 @@ mod tests {
         let mut receiver = hub.subscribe();
         hub.requirement_changed("requirement-1");
 
-        let notification = receiver.recv().await.expect("notification");
+        let notification = receiver
+            .recv()
+            .await
+            .unwrap_or_else(|_| panic!("notification"));
         assert_eq!(
-            serde_json::to_value(notification).expect("serializable notification"),
+            serde_json::to_value(notification)
+                .unwrap_or_else(|_| panic!("serializable notification")),
             json!({
                 "category": "requirement.changed",
                 "requirement_id": "requirement-1"
@@ -160,7 +164,7 @@ mod tests {
         let mut stream = Box::pin(notification_stream(receiver));
         let item = timeout(Duration::from_secs(1), stream.next())
             .await
-            .expect("lagged stream should terminate promptly");
+            .unwrap_or_else(|_| panic!("lagged stream should terminate promptly"));
         assert!(
             item.is_none(),
             "lagged stream must terminate, not skip and continue"

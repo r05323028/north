@@ -117,6 +117,12 @@ pub trait RuntimeExecutor: Send + Sync {
         Vec::new()
     }
 
+    /// Request cancellation without executing another runtime operation. The
+    /// scheduler calls this only for a session with an active operation.
+    fn cancel_for_session(&self, _session_id: &str) -> bool {
+        false
+    }
+
     /// Resolve an operation after a crash that occurred after dispatch_started.
     /// Returning Unknown is safe: the coordinator will never blindly invoke it.
     fn recover(
@@ -145,6 +151,18 @@ pub struct CommandProcessResult {
     pub duplicate: bool,
     pub buffered: bool,
     pub emitted_events: Vec<EventEnvelope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandAcceptance {
+    pub result: CommandProcessResult,
+    pub command: Option<CommandEnvelope>,
+}
+
+#[derive(Debug, Default)]
+pub struct RecoveryActions {
+    pub results: Vec<CommandProcessResult>,
+    pub commands: Vec<CommandEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,6 +374,55 @@ impl Journal {
         envelope: CommandEnvelope,
         executor: &E,
     ) -> Result<CommandProcessResult, JournalError> {
+        let accepted = if matches!(&envelope.command, Command::SessionCancel(_)) {
+            self.accept_control_command(envelope)?
+        } else {
+            self.accept_command(envelope)?
+        };
+        let CommandAcceptance { result, command } = accepted;
+        let Some(command) = command else {
+            return Ok(result);
+        };
+        let outcome = executor.dispatch_for_session(
+            &command.session_id,
+            &command.command_id,
+            &command.command_id,
+            &command.command,
+        );
+        let runtime_events = executor.take_events(&command.session_id);
+        let emitted_events =
+            self.finish_command(&command.command_id, outcome.clone(), runtime_events)?;
+        self.compact_session(&command.session_id)?;
+        Ok(CommandProcessResult {
+            acknowledgement: result.acknowledgement,
+            state: CommandJournalState::Terminal,
+            outcome: Some(outcome),
+            duplicate: result.duplicate,
+            buffered: false,
+            emitted_events,
+        })
+    }
+
+    /// Process durable received commands whose per-session gap is now closed.
+    pub fn accept_command(
+        &self,
+        envelope: CommandEnvelope,
+    ) -> Result<CommandAcceptance, JournalError> {
+        self.accept_command_with_control(envelope, false)
+    }
+
+    pub fn accept_control_command(
+        &self,
+        envelope: CommandEnvelope,
+    ) -> Result<CommandAcceptance, JournalError> {
+        self.accept_command_with_control(envelope, true)
+    }
+
+    fn accept_command_with_control(
+        &self,
+        envelope: CommandEnvelope,
+        allow_control_interrupt: bool,
+    ) -> Result<CommandAcceptance, JournalError> {
         ServerFrame::Command(envelope.clone())
             .validate()
             .map_err(|error| JournalError::Protocol(error.to_string()))?;
@@ -363,49 +430,80 @@ impl Journal {
         let message_id = message_id(&envelope.command);
         let (record, duplicate, buffered) = self.prepare_command(&envelope, &digest, message_id)?;
         let acknowledgement = command_ack(&record);
-        if record.state != CommandJournalState::Received || buffered {
-            return Ok(CommandProcessResult {
-                acknowledgement,
-                state: record.state,
-                outcome: record.outcome,
-                duplicate,
-                buffered,
-                emitted_events: Vec::new(),
+        let control_interrupt = allow_control_interrupt
+            && matches!(&envelope.command, Command::SessionCancel(_))
+            && buffered
+            && self.has_prior_dispatch_started(&envelope)?;
+        if record.state != CommandJournalState::Received || (buffered && !control_interrupt) {
+            return Ok(CommandAcceptance {
+                result: CommandProcessResult {
+                    acknowledgement,
+                    state: record.state,
+                    outcome: record.outcome,
+                    duplicate,
+                    buffered,
+                    emitted_events: Vec::new(),
+                },
+                command: None,
             });
         }
-
         if !self.mark_dispatch_started(&record.command_id)? {
             let current = self.command_record(&record.command_id)?;
-            return Ok(CommandProcessResult {
-                acknowledgement: command_ack(&current),
-                state: current.state,
-                outcome: current.outcome,
-                duplicate: true,
-                buffered: false,
-                emitted_events: Vec::new(),
+            return Ok(CommandAcceptance {
+                result: CommandProcessResult {
+                    acknowledgement: command_ack(&current),
+                    state: current.state,
+                    outcome: current.outcome,
+                    duplicate: true,
+                    buffered: false,
+                    emitted_events: Vec::new(),
+                },
+                command: None,
             });
         }
-        let outcome = executor.dispatch_for_session(
-            &record.session_id,
-            &record.runtime_operation_id,
-            &record.command_id,
-            &record.command,
-        );
-        let runtime_events = executor.take_events(&record.session_id);
-        let emitted_events =
-            self.finish_command(&record.command_id, outcome.clone(), runtime_events)?;
-        self.compact_session(&record.session_id)?;
-        Ok(CommandProcessResult {
-            acknowledgement,
-            state: CommandJournalState::Terminal,
-            outcome: Some(outcome),
-            duplicate,
-            buffered: false,
-            emitted_events,
+        Ok(CommandAcceptance {
+            result: CommandProcessResult {
+                acknowledgement,
+                state: CommandJournalState::DispatchStarted,
+                outcome: None,
+                duplicate,
+                buffered: false,
+                emitted_events: Vec::new(),
+            },
+            command: Some(record_to_envelope(&record)?),
         })
     }
 
-    /// Process durable received commands whose per-session gap is now closed.
+    fn has_prior_dispatch_started(&self, envelope: &CommandEnvelope) -> Result<bool, JournalError> {
+        let state = self.state.lock().map_err(lock_error)?;
+        Ok(state.commands.iter().any(|record| {
+            record.session_id == envelope.session_id
+                && record.server_command_seq < envelope.server_command_seq
+                && record.state == CommandJournalState::DispatchStarted
+        }))
+    }
+
+    pub fn accept_next_ready_command(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CommandAcceptance>, JournalError> {
+        let next = {
+            let state = self.state.lock().map_err(lock_error)?;
+            let expected = expected_command_sequence(&state, session_id);
+            state
+                .commands
+                .iter()
+                .find(|record| {
+                    record.session_id == session_id
+                        && record.server_command_seq == expected
+                        && record.state == CommandJournalState::Received
+                })
+                .map(record_to_envelope)
+                .transpose()?
+        };
+        next.map(|command| self.accept_command(command)).transpose()
+    }
+
     pub fn process_ready<E: RuntimeExecutor + ?Sized>(
         &self,
         session_id: &str,
@@ -437,6 +535,56 @@ impl Journal {
 
     /// Recover records after daemon restart. `received` records may continue;
     /// `dispatch_started` records use runtime status recovery only.
+    pub fn recover_for_scheduler<E: RuntimeExecutor + ?Sized>(
+        &self,
+        executor: &E,
+    ) -> Result<RecoveryActions, JournalError> {
+        let records = {
+            let state = self.state.lock().map_err(lock_error)?;
+            state
+                .commands
+                .iter()
+                .filter(|record| record.state == CommandJournalState::DispatchStarted)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut results = Vec::new();
+        for record in records {
+            let outcome = match executor.recover_for_session(
+                &record.session_id,
+                &record.runtime_operation_id,
+                &record.command_id,
+                &record.command,
+            ) {
+                RecoveryOutcome::DispatchSucceeded => DispatchOutcome::DispatchSucceeded,
+                RecoveryOutcome::DispatchFailed(reason) => DispatchOutcome::DispatchFailed(reason),
+                RecoveryOutcome::Unknown => {
+                    DispatchOutcome::Unknown(unknown_reason(&record.command_id))
+                }
+            };
+            let emitted_events =
+                self.complete_command(&record.command_id, outcome.clone(), Vec::new())?;
+            results.push(CommandProcessResult {
+                acknowledgement: command_ack(&record),
+                state: CommandJournalState::Terminal,
+                outcome: Some(outcome),
+                duplicate: false,
+                buffered: false,
+                emitted_events,
+            });
+        }
+        let mut commands = Vec::new();
+        for session_id in session_ids(&self.state)? {
+            if let Some(accepted) = self.accept_next_ready_command(&session_id)? {
+                if let Some(command) = accepted.command.clone() {
+                    commands.push(command);
+                }
+                results.push(accepted.result);
+            }
+        }
+        Ok(RecoveryActions { results, commands })
+    }
+
     pub fn recover<E: RuntimeExecutor + ?Sized>(
         &self,
         executor: &E,
@@ -948,6 +1096,18 @@ impl Journal {
             record.updated_at = now_string();
             Ok(true)
         })
+    }
+
+    pub fn complete_command(
+        &self,
+        command_id: &str,
+        outcome: DispatchOutcome,
+        runtime_events: Vec<Event>,
+    ) -> Result<Vec<EventEnvelope>, JournalError> {
+        let session_id = self.command_record(command_id)?.session_id;
+        let emitted_events = self.finish_command(command_id, outcome, runtime_events)?;
+        self.compact_session(&session_id)?;
+        Ok(emitted_events)
     }
 
     fn finish_command(

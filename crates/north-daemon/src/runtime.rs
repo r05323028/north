@@ -15,12 +15,15 @@ use north_protocol::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fmt, fs,
     io::Read,
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -168,6 +171,8 @@ pub struct PiClarificationAdapter {
     session_dir: PathBuf,
     sessions: Mutex<HashMap<String, AssessmentContext>>,
     pending_events: Mutex<HashMap<String, Vec<Event>>>,
+    cancellation_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    cancelled_sessions: Mutex<HashSet<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +214,8 @@ impl PiClarificationAdapter {
             session_dir,
             sessions: Mutex::new(HashMap::new()),
             pending_events: Mutex::new(HashMap::new()),
+            cancellation_flags: Mutex::new(HashMap::new()),
+            cancelled_sessions: Mutex::new(HashSet::new()),
         })
     }
 
@@ -499,21 +506,33 @@ impl PiClarificationAdapter {
         })?;
         let stdout_reader = thread::spawn(|| read_process_output(stdout));
         let stderr_reader = thread::spawn(|| read_process_output(stderr));
+        let cancellation = Arc::new(AtomicBool::new(false));
+        self.cancellation_flags
+            .lock()
+            .map_err(|_| RuntimeError::new("Pi cancellation state lock poisoned"))?
+            .insert(session_id.to_owned(), cancellation.clone());
         let deadline = Instant::now() + PI_PROCESS_TIMEOUT;
-        let status = loop {
+        let wait_result = loop {
+            if cancellation.load(Ordering::SeqCst) {
+                stop_process(&mut child);
+                break Err(RuntimeError::new("Pi Agent process cancelled"));
+            }
             match child.try_wait() {
-                Ok(Some(status)) => break status,
+                Ok(Some(status)) => break Ok(status),
                 Ok(None) if Instant::now() >= deadline => {
                     stop_process(&mut child);
-                    return Err(RuntimeError::new("Pi Agent process timed out"));
+                    break Err(RuntimeError::new("Pi Agent process timed out"));
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(20)),
                 Err(error) => {
                     stop_process(&mut child);
-                    return Err(RuntimeError::new(format!("wait for Pi Agent: {error}")));
+                    break Err(RuntimeError::new(format!("wait for Pi Agent: {error}")));
                 }
             }
         };
+        if let Ok(mut flags) = self.cancellation_flags.lock() {
+            flags.remove(session_id);
+        }
         let stdout = stdout_reader
             .join()
             .map_err(|_| RuntimeError::new("read Pi Agent stdout panicked"))?
@@ -522,6 +541,7 @@ impl PiClarificationAdapter {
             .join()
             .map_err(|_| RuntimeError::new("read Pi Agent stderr panicked"))?
             .map_err(|error| RuntimeError::new(format!("read Pi Agent stderr: {error}")))?;
+        let status = wait_result?;
         if !status.success() {
             return Err(RuntimeError::new(format!("Pi Agent exited with {status}")));
         }
@@ -616,6 +636,11 @@ impl crate::journal::RuntimeExecutor for PiClarificationAdapter {
             command: command_to_runtime(command),
         };
         let result = ClarificationRuntime::dispatch(self, input);
+        let cancelled = self
+            .cancelled_sessions
+            .lock()
+            .map(|mut sessions| sessions.remove(session_id))
+            .unwrap_or(false);
         let outcome = match result {
             Ok(facts) => {
                 let events = facts.into_iter().map(fact_to_event).collect::<Vec<_>>();
@@ -624,6 +649,16 @@ impl crate::journal::RuntimeExecutor for PiClarificationAdapter {
                         .entry(session_id.to_owned())
                         .or_default()
                         .extend(events);
+                }
+                crate::journal::DispatchOutcome::DispatchSucceeded
+            }
+            Err(_error) if cancelled => {
+                if let Ok(mut pending) = self.pending_events.lock() {
+                    pending.entry(session_id.to_owned()).or_default().push(
+                        Event::SessionCompleted(SessionCompleted {
+                            summary: "Pi clarification cancelled".into(),
+                        }),
+                    );
                 }
                 crate::journal::DispatchOutcome::DispatchSucceeded
             }
@@ -649,6 +684,21 @@ impl crate::journal::RuntimeExecutor for PiClarificationAdapter {
             .lock()
             .map(|mut pending| pending.remove(session_id).unwrap_or_default())
             .unwrap_or_default()
+    }
+
+    fn cancel_for_session(&self, session_id: &str) -> bool {
+        let Ok(flags) = self.cancellation_flags.lock() else {
+            return false;
+        };
+        let Some(flag) = flags.get(session_id) else {
+            return false;
+        };
+        flag.store(true, Ordering::SeqCst);
+        drop(flags);
+        if let Ok(mut sessions) = self.cancelled_sessions.lock() {
+            sessions.insert(session_id.to_owned());
+        }
+        true
     }
 
     fn recover(
@@ -1198,6 +1248,90 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
             crate::journal::RuntimeExecutor::take_events(&adapter, "session-a").as_slice(),
             [Event::SessionFailed(_)]
         ));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_interrupts_active_pi_child() -> Result<(), Box<dyn std::error::Error>> {
+        use std::{
+            fs,
+            os::unix::fs::PermissionsExt,
+            sync::{mpsc, Arc},
+        };
+
+        let directory = tempfile::tempdir()?;
+        let command = directory.path().join("fake-pi");
+        fs::write(&command, "#!/bin/sh\nwhile :; do :; done\n")?;
+        let mut permissions = fs::metadata(&command)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&command, permissions)?;
+        let adapter = Arc::new(
+            PiClarificationAdapter::new(
+                RepositoryInspector::new(
+                    directory.path().join("cache"),
+                    directory.path().join("workspaces"),
+                )?,
+                directory.path().join("sessions"),
+            )?
+            .with_agent_command(command),
+        );
+        let (sender, receiver) = mpsc::channel();
+        let worker_adapter = adapter.clone();
+        let worker = thread::spawn(move || {
+            let outcome = crate::journal::RuntimeExecutor::dispatch_for_session(
+                worker_adapter.as_ref(),
+                "session-1",
+                "operation-1",
+                "command-1",
+                &Command::SessionStart(north_protocol::SessionStart {
+                    requirement: north_protocol::RequirementContext {
+                        id: "requirement-1".into(),
+                        revision: 1,
+                        title: "Title".into(),
+                        description: "Description".into(),
+                        summary: "Summary".into(),
+                        acceptance_criteria: Vec::new(),
+                        assumptions: Vec::new(),
+                        open_questions: Vec::new(),
+                    },
+                    conversation: north_protocol::ConversationContext {
+                        excerpt: Vec::new(),
+                    },
+                    repositories: Vec::new(),
+                }),
+            );
+            let events =
+                crate::journal::RuntimeExecutor::take_events(worker_adapter.as_ref(), "session-1");
+            sender
+                .send((outcome, events))
+                .expect("send cancellation result");
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if adapter
+                .cancellation_flags
+                .lock()
+                .expect("cancellation state")
+                .contains_key("session-1")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(adapter
+            .cancellation_flags
+            .lock()
+            .expect("cancellation state")
+            .contains_key("session-1"));
+        assert!(crate::journal::RuntimeExecutor::cancel_for_session(
+            adapter.as_ref(),
+            "session-1"
+        ));
+        let (outcome, events) = receiver.recv_timeout(Duration::from_secs(2))?;
+        assert_eq!(outcome, crate::journal::DispatchOutcome::DispatchSucceeded);
+        assert!(matches!(events.as_slice(), [Event::SessionCompleted(_)]));
+        worker.join().expect("join cancellation worker");
         Ok(())
     }
 }
