@@ -4,21 +4,26 @@
 //! process/session details stay in `PiClarificationAdapter`; this module never
 //! writes Requirement state or server persistence.
 
-use crate::repository_inspection::{
-    InspectionError, InspectionRequest, RepositoryInspector, RepositorySource, RunAuthorization,
+use crate::{
+    journal::RuntimeControl,
+    repository_inspection::{
+        InspectionCancellation, InspectionError, InspectionPhase, InspectionRequest,
+        PreparedWorkspace, RepositoryInspector, RepositorySource, RunAuthorization,
+    },
 };
+#[cfg(not(test))]
+use north_protocol::RepositoryContext;
 use north_protocol::{
     AgentActivity, AgentMessage, Command, Event, MessageSend, ReadinessVerdictWire,
-    RepositoryContext, RequirementAssessed, ReviewedRepositoryWire, SessionCompleted,
-    SessionFailed, SessionStarted,
+    RequirementAssessed, ReviewedRepositoryWire, SessionCompleted, SessionFailed, SessionStarted,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env, fmt, fs,
     io::Read,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command as ProcessCommand, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -30,9 +35,17 @@ use std::{
 
 const MAX_PI_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_SESSION_CONTEXT_BYTES: usize = 128 * 1024;
+const MAX_EVIDENCE_LIST_BYTES: usize = 64 * 1024;
+const MAX_EVIDENCE_BYTES: usize = 32 * 1024;
+const MAX_EVIDENCE_FILE_BYTES: usize = 8 * 1024;
+const MAX_EVIDENCE_FILES: usize = 32;
+const MAX_TOTAL_EVIDENCE_BYTES: usize = 64 * 1024;
+const MAX_TOTAL_EVIDENCE_FILES: usize = 64;
 const PI_PROCESS_TIMEOUT: Duration = Duration::from_secs(120);
-const PI_PROCESS_REAP_TIMEOUT: Duration = Duration::from_secs(1);
 const PI_SYSTEM_PROMPT: &str = "You are North's requirement clarification agent. Use only context in this prompt. Do not claim repository facts not supplied. Return only one JSON object with keys message, verdict, blockers, assumptions. verdict must be ready or needs_clarification. Keep message concise and user-facing. Do not include reasoning, tool output, or markdown.";
+
+#[cfg(test)]
+type PreparationCheckpoint = Arc<dyn Fn(&str, &std::path::Path) + Send + Sync>;
 
 /// Provider-neutral requirement snapshot copied from one server command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +166,42 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+#[derive(Debug)]
+enum RuntimeOperationError {
+    Cancelled,
+    Failed(RuntimeError),
+}
+
+impl RuntimeOperationError {
+    fn into_runtime_error(self) -> RuntimeError {
+        match self {
+            Self::Cancelled => RuntimeError::new("Pi clarification operation cancelled"),
+            Self::Failed(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for RuntimeOperationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("Pi clarification operation cancelled"),
+            Self::Failed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl From<RuntimeError> for RuntimeOperationError {
+    fn from(error: RuntimeError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<InspectionError> for RuntimeOperationError {
+    fn from(error: InspectionError) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
 impl From<InspectionError> for RuntimeError {
     fn from(error: InspectionError) -> Self {
         Self::new(error.to_string())
@@ -172,7 +221,8 @@ pub struct PiClarificationAdapter {
     sessions: Mutex<HashMap<String, AssessmentContext>>,
     pending_events: Mutex<HashMap<String, Vec<Event>>>,
     cancellation_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    cancelled_sessions: Mutex<HashSet<String>>,
+    #[cfg(test)]
+    preparation_checkpoint: Mutex<Option<PreparationCheckpoint>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,9 +230,24 @@ struct AssessmentContext {
     requirement_id: String,
     requirement_revision: u64,
     repositories_reviewed: Vec<RepositoryReview>,
+    #[serde(default)]
+    evidence: Vec<RepositoryEvidence>,
     context: Option<StartInput>,
     #[serde(skip)]
     in_flight: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RepositoryEvidence {
+    repository_id: String,
+    commit_sha: String,
+    files: Vec<SourceFileEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SourceFileEvidence {
+    path: String,
+    content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,7 +280,8 @@ impl PiClarificationAdapter {
             sessions: Mutex::new(HashMap::new()),
             pending_events: Mutex::new(HashMap::new()),
             cancellation_flags: Mutex::new(HashMap::new()),
-            cancelled_sessions: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            preparation_checkpoint: Mutex::new(None),
         })
     }
 
@@ -306,67 +372,112 @@ impl PiClarificationAdapter {
         self.clear_context(session_id)
     }
 
+    fn preparation_checkpoint(&self, repository_id: &str, path: &std::path::Path) {
+        #[cfg(test)]
+        {
+            let hook = self
+                .preparation_checkpoint
+                .lock()
+                .ok()
+                .and_then(|hook| hook.clone());
+            if let Some(hook) = hook {
+                hook(repository_id, path);
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (repository_id, path);
+        }
+    }
+
+    #[cfg(test)]
+    fn set_preparation_checkpoint<F>(&self, hook: F)
+    where
+        F: Fn(&str, &std::path::Path) + Send + Sync + 'static,
+    {
+        let mut checkpoint = match self.preparation_checkpoint.lock() {
+            Ok(checkpoint) => checkpoint,
+            Err(_) => panic!("preparation checkpoint lock"),
+        };
+        *checkpoint = Some(Arc::new(hook));
+    }
+
     fn start(
         &self,
         input: &RuntimeInput,
         start: StartInput,
-    ) -> Result<Vec<RuntimeFact>, RuntimeError> {
+        control: &RuntimeControl,
+    ) -> Result<Vec<RuntimeFact>, RuntimeOperationError> {
+        check_cancellation(control)?;
         let sources = start
             .repositories
             .iter()
-            .map(|repository| {
-                RepositorySource::from_context(&RepositoryContext {
-                    repository_id: repository.repository_id.clone(),
-                    name: repository.name.clone(),
-                    url: repository.url.clone(),
-                    description: repository.description.clone(),
-                })
-            })
+            .map(source_for_repository)
             .collect::<Result<Vec<_>, _>>()?;
-        let authorization = RunAuthorization::new(input.session_id.clone(), sources.clone())?;
+        let authorization = RunAuthorization::new(input.session_id.clone(), sources.clone())
+            .map_err(RuntimeOperationError::from)?;
         let mut reviewed = Vec::with_capacity(start.repositories.len());
+        let mut evidence = Vec::with_capacity(start.repositories.len());
+        let mut total_evidence_bytes = 0usize;
+        let mut total_evidence_files = 0usize;
         for source in sources {
-            let request = InspectionRequest::new(&input.session_id, &input.operation_id, source);
-            let inspection = self
-                .inspector
-                .inspect(&request, &authorization, |_| Ok(()))?;
-            reviewed.push(RepositoryReview {
-                repository_id: inspection.repository_id,
-                commit_sha: inspection.commit_sha,
-            });
+            check_cancellation(control)?;
+            let (review, bundle) =
+                self.inspect_repository(input, source, &authorization, control)?;
+            let (bundle_bytes, bundle_files) = evidence_size(&bundle);
+            total_evidence_bytes = total_evidence_bytes.saturating_add(bundle_bytes);
+            total_evidence_files = total_evidence_files.saturating_add(bundle_files);
+            if total_evidence_bytes > MAX_TOTAL_EVIDENCE_BYTES
+                || total_evidence_files > MAX_TOTAL_EVIDENCE_FILES
+            {
+                return Err(RuntimeOperationError::Failed(RuntimeError::new(
+                    "clarification repository evidence exceeded run bounds",
+                )));
+            }
+            reviewed.push(review);
+            evidence.push(bundle);
         }
+        check_cancellation(control)?;
 
         let mut assessment = AssessmentContext {
             requirement_id: start.requirement.id.clone(),
             requirement_revision: start.requirement.revision,
             repositories_reviewed: reviewed.clone(),
+            evidence: evidence.clone(),
             context: Some(start.clone()),
             in_flight: true,
         };
-        self.persist_context(&input.session_id, &assessment)?;
+        self.persist_context(&input.session_id, &assessment)
+            .map_err(RuntimeOperationError::from)?;
         self.sessions
             .lock()
-            .map_err(|_| RuntimeError::new("Pi session state lock poisoned"))?
+            .map_err(|_| {
+                RuntimeOperationError::from(RuntimeError::new("Pi session state lock poisoned"))
+            })?
             .insert(input.session_id.clone(), assessment.clone());
-        let prompt = start_prompt(&start, &reviewed);
-        let response = match self.invoke_pi(&input.session_id, &prompt, None) {
+        check_cancellation_or_cleanup(self, &input.session_id, control)?;
+        let prompt = start_prompt(&start, &reviewed, &evidence);
+        let response = match self.invoke_pi(&input.session_id, &prompt, control) {
             Ok(response) => response,
-            Err(error) => {
-                if let Err(cleanup) = self.clear_session(&input.session_id) {
-                    return Err(RuntimeError::new(format!("{error}; {cleanup}")));
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(self.cleanup_after_error(&input.session_id, error)),
         };
+        if control.is_cancellation_requested() {
+            return Err(
+                self.cleanup_after_error(&input.session_id, RuntimeOperationError::Cancelled)
+            );
+        }
         let parsed = parse_assessment(&response);
         assessment.in_flight = false;
         let completes = parsed.verdict == ReadinessVerdict::Ready;
         if completes {
-            self.clear_context(&input.session_id)?;
+            self.clear_context(&input.session_id)
+                .map_err(RuntimeOperationError::from)?;
         }
         self.sessions
             .lock()
-            .map_err(|_| RuntimeError::new("Pi session state lock poisoned"))?
+            .map_err(|_| {
+                RuntimeOperationError::from(RuntimeError::new("Pi session state lock poisoned"))
+            })?
             .insert(input.session_id.clone(), assessment.clone());
         let facts = facts_for_response(
             &input.operation_id,
@@ -377,44 +488,135 @@ impl PiClarificationAdapter {
             completes,
         );
         if completes {
-            self.clear_session(&input.session_id)?;
+            self.clear_session(&input.session_id)
+                .map_err(RuntimeOperationError::from)?;
         }
         Ok(facts)
+    }
+
+    fn inspect_repository(
+        &self,
+        input: &RuntimeInput,
+        source: RepositorySource,
+        authorization: &RunAuthorization,
+        control: &RuntimeControl,
+    ) -> Result<(RepositoryReview, RepositoryEvidence), RuntimeOperationError> {
+        check_cancellation(control)?;
+        let request = InspectionRequest::new(&input.session_id, &input.operation_id, source);
+        let cancellation = InspectionCancellation::new();
+        let workspace = self
+            .inspector
+            .prepare_authorized(&request, authorization)
+            .map_err(|error| classify_inspection_error(control, error))?;
+        if control.is_cancellation_requested() {
+            cancellation.cancel();
+        }
+        let mut evidence = None;
+        let inspection = self
+            .inspector
+            .inspect_prepared_with_cancellation(
+                workspace,
+                &cancellation,
+                |workspace, inspection_cancellation| {
+                    self.preparation_checkpoint(workspace.repository_id(), workspace.path());
+                    if control.is_cancellation_requested() {
+                        inspection_cancellation.cancel();
+                        return Err("inspection cancelled".into());
+                    }
+                    let bundle = extract_repository_evidence(
+                        workspace,
+                        authorization,
+                        control,
+                        inspection_cancellation,
+                    )?;
+                    if control.is_cancellation_requested() {
+                        inspection_cancellation.cancel();
+                        return Err("inspection cancelled".into());
+                    }
+                    evidence = Some(bundle);
+                    Ok(())
+                },
+            )
+            .map_err(|error| classify_inspection_error(control, error))?;
+        let evidence = evidence.ok_or_else(|| {
+            RuntimeOperationError::Failed(RuntimeError::new(
+                "repository source inspection produced no evidence",
+            ))
+        })?;
+        if evidence.repository_id != inspection.repository_id
+            || evidence.commit_sha != inspection.commit_sha
+        {
+            return Err(RuntimeOperationError::Failed(RuntimeError::new(
+                "repository evidence identity did not match inspected revision",
+            )));
+        }
+        Ok((
+            RepositoryReview {
+                repository_id: inspection.repository_id,
+                commit_sha: inspection.commit_sha,
+            },
+            evidence,
+        ))
+    }
+
+    fn cleanup_after_error(
+        &self,
+        session_id: &str,
+        error: RuntimeOperationError,
+    ) -> RuntimeOperationError {
+        match self.clear_session(session_id) {
+            Ok(()) => error,
+            Err(cleanup) => {
+                RuntimeOperationError::Failed(RuntimeError::new(format!("{error}; {cleanup}",)))
+            }
+        }
     }
 
     fn message(
         &self,
         input: &RuntimeInput,
         message: MessageSend,
-    ) -> Result<Vec<RuntimeFact>, RuntimeError> {
-        let context = self.load_context(&input.session_id)?;
-        let prompt = message_prompt(context.as_ref(), &message)?;
+        control: &RuntimeControl,
+    ) -> Result<Vec<RuntimeFact>, RuntimeOperationError> {
+        check_cancellation(control)?;
+        let context = self
+            .load_context(&input.session_id)
+            .map_err(RuntimeOperationError::from)?;
+        let prompt =
+            message_prompt(context.as_ref(), &message).map_err(RuntimeOperationError::from)?;
         let mut running_context = context.ok_or_else(|| {
-            RuntimeError::new("Pi clarification message has no active session context")
+            RuntimeOperationError::Failed(RuntimeError::new(
+                "Pi clarification message has no active session context",
+            ))
         })?;
         if running_context.in_flight {
-            return Err(RuntimeError::new(
+            return Err(RuntimeOperationError::Failed(RuntimeError::new(
                 "Pi clarification session is already running",
-            ));
+            )));
         }
         running_context.in_flight = true;
         self.sessions
             .lock()
-            .map_err(|_| RuntimeError::new("Pi session state lock poisoned"))?
+            .map_err(|_| {
+                RuntimeOperationError::from(RuntimeError::new("Pi session state lock poisoned"))
+            })?
             .insert(input.session_id.clone(), running_context.clone());
-        let response = match self.invoke_pi(&input.session_id, &prompt, None) {
+        check_cancellation_or_cleanup(self, &input.session_id, control)?;
+        let response = match self.invoke_pi(&input.session_id, &prompt, control) {
             Ok(response) => response,
-            Err(error) => {
-                if let Err(cleanup) = self.clear_session(&input.session_id) {
-                    return Err(RuntimeError::new(format!("{error}; {cleanup}")));
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(self.cleanup_after_error(&input.session_id, error)),
         };
+        if control.is_cancellation_requested() {
+            return Err(
+                self.cleanup_after_error(&input.session_id, RuntimeOperationError::Cancelled)
+            );
+        }
         running_context.in_flight = false;
         self.sessions
             .lock()
-            .map_err(|_| RuntimeError::new("Pi session state lock poisoned"))?
+            .map_err(|_| {
+                RuntimeOperationError::from(RuntimeError::new("Pi session state lock poisoned"))
+            })?
             .insert(input.session_id.clone(), running_context.clone());
         let parsed = parse_assessment(&response);
         let completes = parsed.verdict == ReadinessVerdict::Ready;
@@ -427,36 +629,91 @@ impl PiClarificationAdapter {
             completes,
         );
         if completes {
-            self.clear_session(&input.session_id)?;
+            self.clear_session(&input.session_id)
+                .map_err(RuntimeOperationError::from)?;
         }
         Ok(facts)
     }
 
-    fn cancel(&self, input: &RuntimeInput, reason: &str) -> Result<Vec<RuntimeFact>, RuntimeError> {
+    fn cancel(
+        &self,
+        input: &RuntimeInput,
+        reason: &str,
+        _control: &RuntimeControl,
+    ) -> Result<Vec<RuntimeFact>, RuntimeOperationError> {
         // Pi invocation is synchronous and waits for its child. Retained state
         // represents a live clarification turn, not an in-flight child.
-        let Some(context) = self.load_context(&input.session_id)? else {
-            return Err(RuntimeError::new(
+        let Some(context) = self
+            .load_context(&input.session_id)
+            .map_err(RuntimeOperationError::from)?
+        else {
+            return Err(RuntimeOperationError::Failed(RuntimeError::new(
                 "Pi clarification session cancellation was not confirmed",
-            ));
+            )));
         };
         if context.in_flight {
-            return Err(RuntimeError::new(
+            return Err(RuntimeOperationError::Failed(RuntimeError::new(
                 "Pi clarification cancellation could not interrupt active execution",
-            ));
+            )));
         }
-        self.clear_session(&input.session_id)?;
+        self.clear_session(&input.session_id)
+            .map_err(RuntimeOperationError::from)?;
         Ok(vec![RuntimeFact::Completed {
             summary: format!("Pi clarification cancelled: {reason}"),
         }])
+    }
+
+    fn dispatch_with_control(
+        &self,
+        input: RuntimeInput,
+        control: &RuntimeControl,
+    ) -> Result<Vec<RuntimeFact>, RuntimeOperationError> {
+        let cancellation_command = matches!(&input.command, RuntimeCommand::Cancel { .. });
+        let result = match input.command.clone() {
+            RuntimeCommand::Start {
+                requirement,
+                conversation,
+                repositories,
+            } => self.start(
+                &input,
+                StartInput {
+                    requirement,
+                    conversation,
+                    repositories,
+                },
+                control,
+            ),
+            RuntimeCommand::Message {
+                message_id,
+                content,
+            } => self.message(
+                &input,
+                MessageSend {
+                    message_id,
+                    content,
+                },
+                control,
+            ),
+            RuntimeCommand::Cancel { reason } => self.cancel(&input, &reason, control),
+            RuntimeCommand::Resume => {
+                check_cancellation(control)?;
+                Ok(Vec::new())
+            }
+        };
+        if control.is_cancellation_requested() && !cancellation_command {
+            Err(RuntimeOperationError::Cancelled)
+        } else {
+            result
+        }
     }
 
     fn invoke_pi(
         &self,
         session_id: &str,
         prompt: &str,
-        checkout: Option<&Path>,
-    ) -> Result<String, RuntimeError> {
+        control: &RuntimeControl,
+    ) -> Result<String, RuntimeOperationError> {
+        check_cancellation(control)?;
         let mut command = ProcessCommand::new(&self.agent_command);
         for variable in [
             "GIT_ASKPASS",
@@ -489,44 +746,76 @@ impl PiClarificationAdapter {
             ])
             .arg(&self.session_dir)
             .arg(prompt);
-        if let Some(checkout) = checkout {
-            command.current_dir(checkout);
+        if control.is_cancellation_requested() {
+            return Err(RuntimeOperationError::Cancelled);
         }
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command
-            .spawn()
-            .map_err(|error| RuntimeError::new(format!("run Pi Agent: {error}")))?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            stop_process(&mut child);
-            RuntimeError::new("Pi Agent stdout pipe was unavailable")
+        let mut child = command.spawn().map_err(|error| {
+            RuntimeOperationError::Failed(RuntimeError::new(format!("run Pi Agent: {error}")))
         })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            stop_process(&mut child);
-            RuntimeError::new("Pi Agent stderr pipe was unavailable")
-        })?;
-        let stdout_reader = thread::spawn(|| read_process_output(stdout));
-        let stderr_reader = thread::spawn(|| read_process_output(stderr));
-        let cancellation = Arc::new(AtomicBool::new(false));
-        self.cancellation_flags
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                stop_process(&mut child);
+                return Err(RuntimeOperationError::Failed(RuntimeError::new(
+                    "Pi Agent stdout pipe was unavailable",
+                )));
+            }
+        };
+        let stderr = match child.stderr.take() {
+            Some(stderr) => stderr,
+            None => {
+                stop_process(&mut child);
+                return Err(RuntimeOperationError::Failed(RuntimeError::new(
+                    "Pi Agent stderr pipe was unavailable",
+                )));
+            }
+        };
+        let cancellation = Arc::new(AtomicBool::new(control.is_cancellation_requested()));
+        if self
+            .cancellation_flags
             .lock()
-            .map_err(|_| RuntimeError::new("Pi cancellation state lock poisoned"))?
-            .insert(session_id.to_owned(), cancellation.clone());
+            .map(|mut flags| {
+                flags.insert(session_id.to_owned(), cancellation.clone());
+            })
+            .is_err()
+        {
+            stop_process(&mut child);
+            return Err(RuntimeOperationError::Failed(RuntimeError::new(
+                "Pi cancellation state lock poisoned",
+            )));
+        }
+        let output_overflow = Arc::new(AtomicBool::new(false));
+        let stdout_overflow = output_overflow.clone();
+        let stderr_overflow = output_overflow.clone();
+        let stdout_reader = thread::spawn(move || read_process_output(stdout, stdout_overflow));
+        let stderr_reader = thread::spawn(move || read_process_output(stderr, stderr_overflow));
         let deadline = Instant::now() + PI_PROCESS_TIMEOUT;
         let wait_result = loop {
-            if cancellation.load(Ordering::SeqCst) {
+            if control.is_cancellation_requested() || cancellation.load(Ordering::Acquire) {
                 stop_process(&mut child);
-                break Err(RuntimeError::new("Pi Agent process cancelled"));
+                break Err(RuntimeOperationError::Cancelled);
+            }
+            if output_overflow.load(Ordering::Acquire) {
+                stop_process(&mut child);
+                break Err(RuntimeOperationError::Failed(RuntimeError::new(
+                    "Pi Agent response exceeded bounded output",
+                )));
             }
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(status),
                 Ok(None) if Instant::now() >= deadline => {
                     stop_process(&mut child);
-                    break Err(RuntimeError::new("Pi Agent process timed out"));
+                    break Err(RuntimeOperationError::Failed(RuntimeError::new(
+                        "Pi Agent process timed out",
+                    )));
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(20)),
                 Err(error) => {
                     stop_process(&mut child);
-                    break Err(RuntimeError::new(format!("wait for Pi Agent: {error}")));
+                    break Err(RuntimeOperationError::Failed(RuntimeError::new(format!(
+                        "wait for Pi Agent: {error}"
+                    ))));
                 }
             }
         };
@@ -535,41 +824,61 @@ impl PiClarificationAdapter {
         }
         let stdout = stdout_reader
             .join()
-            .map_err(|_| RuntimeError::new("read Pi Agent stdout panicked"))?
-            .map_err(|error| RuntimeError::new(format!("read Pi Agent stdout: {error}")))?;
-        let _stderr = stderr_reader
+            .map_err(|_| {
+                RuntimeOperationError::Failed(RuntimeError::new("read Pi Agent stdout panicked"))
+            })?
+            .map_err(|error| {
+                RuntimeOperationError::Failed(RuntimeError::new(format!(
+                    "read Pi Agent stdout: {error}"
+                )))
+            })?;
+        let stderr = stderr_reader
             .join()
-            .map_err(|_| RuntimeError::new("read Pi Agent stderr panicked"))?
-            .map_err(|error| RuntimeError::new(format!("read Pi Agent stderr: {error}")))?;
+            .map_err(|_| {
+                RuntimeOperationError::Failed(RuntimeError::new("read Pi Agent stderr panicked"))
+            })?
+            .map_err(|error| {
+                RuntimeOperationError::Failed(RuntimeError::new(format!(
+                    "read Pi Agent stderr: {error}"
+                )))
+            })?;
+        if control.is_cancellation_requested() || cancellation.load(Ordering::Acquire) {
+            return Err(RuntimeOperationError::Cancelled);
+        }
         let status = wait_result?;
         if !status.success() {
-            return Err(RuntimeError::new(format!("Pi Agent exited with {status}")));
+            return Err(RuntimeOperationError::Failed(RuntimeError::new(format!(
+                "Pi Agent exited with {status}"
+            ))));
         }
-        if stdout.len() > MAX_PI_OUTPUT_BYTES {
-            return Err(RuntimeError::new(
+        if output_overflow.load(Ordering::Acquire)
+            || stdout.len() > MAX_PI_OUTPUT_BYTES
+            || stderr.len() > MAX_PI_OUTPUT_BYTES
+        {
+            return Err(RuntimeOperationError::Failed(RuntimeError::new(
                 "Pi Agent response exceeded bounded output",
-            ));
+            )));
         }
-        extract_assistant_text(&stdout)
+        extract_assistant_text(&stdout).map_err(RuntimeOperationError::from)
     }
 }
 
 fn stop_process(child: &mut Child) {
     let _ = child.kill();
-    let deadline = Instant::now() + PI_PROCESS_REAP_TIMEOUT;
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => break,
-            Ok(None) => thread::sleep(Duration::from_millis(10)),
-        }
-    }
+    let _ = child.wait();
 }
 
-fn read_process_output<R: Read>(reader: R) -> std::io::Result<Vec<u8>> {
+fn read_process_output<R: Read>(
+    reader: R,
+    output_overflow: Arc<AtomicBool>,
+) -> std::io::Result<Vec<u8>> {
     let mut output = Vec::new();
     reader
         .take(MAX_PI_OUTPUT_BYTES as u64 + 1)
         .read_to_end(&mut output)?;
+    if output.len() > MAX_PI_OUTPUT_BYTES {
+        output_overflow.store(true, Ordering::Release);
+    }
     Ok(output)
 }
 
@@ -580,34 +889,148 @@ struct StartInput {
     repositories: Vec<AuthorizedRepository>,
 }
 
+fn source_for_repository(
+    repository: &AuthorizedRepository,
+) -> Result<RepositorySource, RuntimeOperationError> {
+    #[cfg(test)]
+    {
+        // Unit fixtures use local Git paths. Production always validates the
+        // server wire URL through RepositorySource::from_context below.
+        Ok(RepositorySource::new(
+            repository.repository_id.clone(),
+            repository.url.clone(),
+        ))
+    }
+    #[cfg(not(test))]
+    {
+        RepositorySource::from_context(&RepositoryContext {
+            repository_id: repository.repository_id.clone(),
+            name: repository.name.clone(),
+            url: repository.url.clone(),
+            description: repository.description.clone(),
+        })
+        .map_err(RuntimeOperationError::from)
+    }
+}
+
+fn check_cancellation(control: &RuntimeControl) -> Result<(), RuntimeOperationError> {
+    if control.is_cancellation_requested() {
+        Err(RuntimeOperationError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn check_cancellation_or_cleanup(
+    adapter: &PiClarificationAdapter,
+    session_id: &str,
+    control: &RuntimeControl,
+) -> Result<(), RuntimeOperationError> {
+    if control.is_cancellation_requested() {
+        Err(adapter.cleanup_after_error(session_id, RuntimeOperationError::Cancelled))
+    } else {
+        Ok(())
+    }
+}
+
+fn classify_inspection_error(
+    control: &RuntimeControl,
+    error: InspectionError,
+) -> RuntimeOperationError {
+    if control.is_cancellation_requested() || matches!(error.phase, InspectionPhase::Cancellation) {
+        RuntimeOperationError::Cancelled
+    } else {
+        RuntimeOperationError::from(error)
+    }
+}
+
+fn evidence_size(evidence: &RepositoryEvidence) -> (usize, usize) {
+    let bytes = evidence.repository_id.len()
+        + evidence.commit_sha.len()
+        + evidence
+            .files
+            .iter()
+            .map(|file| file.path.len().saturating_add(file.content.len()))
+            .sum::<usize>();
+    (bytes, evidence.files.len())
+}
+
+fn extract_repository_evidence(
+    workspace: &PreparedWorkspace,
+    authorization: &RunAuthorization,
+    control: &RuntimeControl,
+    cancellation: &InspectionCancellation,
+) -> Result<RepositoryEvidence, String> {
+    if control.is_cancellation_requested() {
+        cancellation.cancel();
+        return Err("inspection cancelled".into());
+    }
+    let listing = workspace
+        .read_git_bounded(
+            authorization,
+            &["ls-files".into(), "--cached".into(), "-z".into()],
+            MAX_EVIDENCE_LIST_BYTES,
+        )
+        .map_err(|error| error.to_string())?;
+    let mut paths = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    paths.sort_unstable();
+    let had_paths = !paths.is_empty();
+    let mut files = Vec::new();
+    let mut evidence_bytes = 0usize;
+    for path in paths.into_iter().take(MAX_EVIDENCE_FILES) {
+        if control.is_cancellation_requested() {
+            cancellation.cancel();
+            return Err("inspection cancelled".into());
+        }
+        if path.bytes().any(|byte| byte == 0) {
+            return Err("repository file path contains NUL".into());
+        }
+        let object = format!("{}:{path}", workspace.commit_sha());
+        let content = workspace
+            .read_git_bounded(
+                authorization,
+                &[
+                    "show".into(),
+                    "--format=".into(),
+                    "--no-ext-diff".into(),
+                    object,
+                ],
+                MAX_EVIDENCE_FILE_BYTES,
+            )
+            .map_err(|error| error.to_string())?;
+        let entry_bytes = path.len().saturating_add(content.len());
+        if evidence_bytes.saturating_add(entry_bytes) > MAX_EVIDENCE_BYTES {
+            break;
+        }
+        evidence_bytes = evidence_bytes.saturating_add(entry_bytes);
+        files.push(SourceFileEvidence { path, content });
+    }
+    if !had_paths {
+        return Err("repository contains no tracked source files".into());
+    }
+    if files.is_empty() {
+        return Err("repository source evidence exceeded bounded size".into());
+    }
+    if control.is_cancellation_requested() {
+        cancellation.cancel();
+        return Err("inspection cancelled".into());
+    }
+    Ok(RepositoryEvidence {
+        repository_id: workspace.repository_id().to_owned(),
+        commit_sha: workspace.commit_sha().to_owned(),
+        files,
+    })
+}
+
 impl ClarificationRuntime for PiClarificationAdapter {
     fn dispatch(&self, input: RuntimeInput) -> Result<Vec<RuntimeFact>, RuntimeError> {
-        match input.command.clone() {
-            RuntimeCommand::Start {
-                requirement,
-                conversation,
-                repositories,
-            } => self.start(
-                &input,
-                StartInput {
-                    requirement,
-                    conversation,
-                    repositories,
-                },
-            ),
-            RuntimeCommand::Message {
-                message_id,
-                content,
-            } => self.message(
-                &input,
-                MessageSend {
-                    message_id,
-                    content,
-                },
-            ),
-            RuntimeCommand::Cancel { reason } => self.cancel(&input, &reason),
-            RuntimeCommand::Resume => Ok(Vec::new()),
-        }
+        let control = RuntimeControl::new(&input.session_id, &input.operation_id);
+        self.dispatch_with_control(input, &control)
+            .map_err(RuntimeOperationError::into_runtime_error)
     }
 }
 
@@ -630,17 +1053,29 @@ impl crate::journal::RuntimeExecutor for PiClarificationAdapter {
         command_id: &str,
         command: &Command,
     ) -> crate::journal::DispatchOutcome {
+        self.dispatch_for_session_with_control(
+            session_id,
+            runtime_operation_id,
+            command_id,
+            command,
+            RuntimeControl::new(session_id, command_id),
+        )
+    }
+
+    fn dispatch_for_session_with_control(
+        &self,
+        session_id: &str,
+        runtime_operation_id: &str,
+        command_id: &str,
+        command: &Command,
+        control: RuntimeControl,
+    ) -> crate::journal::DispatchOutcome {
         let input = RuntimeInput {
             operation_id: runtime_operation_id.to_owned(),
             session_id: session_id.to_owned(),
             command: command_to_runtime(command),
         };
-        let result = ClarificationRuntime::dispatch(self, input);
-        let cancelled = self
-            .cancelled_sessions
-            .lock()
-            .map(|mut sessions| sessions.remove(session_id))
-            .unwrap_or(false);
+        let result = self.dispatch_with_control(input, &control);
         let outcome = match result {
             Ok(facts) => {
                 let events = facts.into_iter().map(fact_to_event).collect::<Vec<_>>();
@@ -652,7 +1087,7 @@ impl crate::journal::RuntimeExecutor for PiClarificationAdapter {
                 }
                 crate::journal::DispatchOutcome::DispatchSucceeded
             }
-            Err(_error) if cancelled => {
+            Err(RuntimeOperationError::Cancelled) => {
                 if let Ok(mut pending) = self.pending_events.lock() {
                     pending.entry(session_id.to_owned()).or_default().push(
                         Event::SessionCompleted(SessionCompleted {
@@ -662,7 +1097,7 @@ impl crate::journal::RuntimeExecutor for PiClarificationAdapter {
                 }
                 crate::journal::DispatchOutcome::DispatchSucceeded
             }
-            Err(error) => {
+            Err(RuntimeOperationError::Failed(error)) => {
                 if let Ok(mut pending) = self.pending_events.lock() {
                     pending
                         .entry(session_id.to_owned())
@@ -694,10 +1129,6 @@ impl crate::journal::RuntimeExecutor for PiClarificationAdapter {
             return false;
         };
         flag.store(true, Ordering::SeqCst);
-        drop(flags);
-        if let Ok(mut sessions) = self.cancelled_sessions.lock() {
-            sessions.insert(session_id.to_owned());
-        }
         true
     }
 
@@ -906,7 +1337,11 @@ fn non_empty_facts(values: Vec<String>, fallback: &str) -> Vec<String> {
     }
 }
 
-fn start_prompt(start: &StartInput, reviewed: &[RepositoryReview]) -> String {
+fn start_prompt(
+    start: &StartInput,
+    reviewed: &[RepositoryReview],
+    evidence: &[RepositoryEvidence],
+) -> String {
     let context = serde_json::json!({
         "requirement": start.requirement,
         "conversation": start.conversation,
@@ -914,6 +1349,7 @@ fn start_prompt(start: &StartInput, reviewed: &[RepositoryReview]) -> String {
             "repository_id": repository.repository_id,
         })).collect::<Vec<_>>(),
         "repository_revisions_reviewed": reviewed,
+        "repository_source_evidence": evidence,
     });
     format!(
         "Clarify this Requirement from North-authorized context.\n{}",
@@ -934,7 +1370,7 @@ fn message_prompt(
         .ok_or_else(|| RuntimeError::new("Pi clarification context is unavailable"))?;
     Ok(format!(
         "{}\nRespond to this requester message in the established clarification session.\nMessage ID: {}\nMessage: {}",
-        start_prompt(start, &context.repositories_reviewed),
+        start_prompt(start, &context.repositories_reviewed, &context.evidence),
         message.message_id,
         message.content,
     ))
@@ -990,6 +1426,18 @@ mod tests {
     }
 
     #[test]
+    fn process_output_sets_overflow_flag_at_limit() -> Result<(), Box<dyn std::error::Error>> {
+        let overflow = Arc::new(AtomicBool::new(false));
+        let output = read_process_output(
+            std::io::Cursor::new(vec![b'x'; MAX_PI_OUTPUT_BYTES + 1]),
+            overflow.clone(),
+        )?;
+        assert_eq!(output.len(), MAX_PI_OUTPUT_BYTES + 1);
+        assert!(overflow.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[test]
     fn start_prompt_contains_only_server_review_context() {
         let prompt = start_prompt(
             &StartInput {
@@ -1019,6 +1467,7 @@ mod tests {
                 repository_id: "repository-1".into(),
                 commit_sha: "0123456789abcdef0123456789abcdef01234567".into(),
             }],
+            &[],
         );
         assert!(prompt.contains("repository-1"));
         assert!(prompt.contains("0123456789abcdef0123456789abcdef01234567"));
@@ -1203,6 +1652,7 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
                     requirement_id: "requirement-1".into(),
                     requirement_revision: 1,
                     repositories_reviewed: Vec::new(),
+                    evidence: Vec::new(),
                     context: None,
                     in_flight: false,
                 },
@@ -1332,6 +1782,297 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         assert_eq!(outcome, crate::journal::DispatchOutcome::DispatchSucceeded);
         assert!(matches!(events.as_slice(), [Event::SessionCompleted(_)]));
         worker.join().expect("join cancellation worker");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn git_fixture(
+        root: &std::path::Path,
+        name: &str,
+        marker: &str,
+    ) -> Result<(std::path::PathBuf, String), Box<dyn std::error::Error>> {
+        use std::{fs, process::Command as GitCommand};
+
+        let repository = root.join(name);
+        fs::create_dir_all(repository.join("src"))?;
+        fs::write(
+            repository.join("src/domain.rs"),
+            format!("// {marker}\nfn domain() {{}}\n"),
+        )?;
+        let run = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = GitCommand::new("git")
+                .current_dir(&repository)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(std::io::Error::other(format!(
+                    "git {args:?} failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        };
+        run(&["init", "--quiet"])?;
+        run(&["config", "user.email", "north-test@example.test"])?;
+        run(&["config", "user.name", "North Test"])?;
+        run(&["add", "."])?;
+        run(&["commit", "--quiet", "-m", "fixture"])?;
+        let sha = run(&["rev-parse", "HEAD"])?.trim().to_owned();
+        Ok((repository, sha))
+    }
+
+    #[cfg(unix)]
+    fn fake_pi(root: &std::path::Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let command = root.join("fake-pi");
+        fs::write(
+            &command,
+            r##"#!/bin/sh
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+printf '%s' started > "$base/pi-started"
+last=
+for arg in "$@"; do last="$arg"; done
+printf '%s' "$last" > "$base/pi-prompt"
+case "$last" in
+  *NORTH_AUTHORIZED_REPOSITORY_MARKER*) ;;
+  *) exit 41 ;;
+esac
+case "$last" in
+  *FORBIDDEN_MARKER*) exit 42 ;;
+esac
+printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"{\"message\":\"reviewed\",\"verdict\":\"ready\",\"blockers\":[],\"assumptions\":[]}"}}'
+"##,
+        )?;
+        let mut permissions = fs::metadata(&command)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&command, permissions)?;
+        Ok(command)
+    }
+
+    #[cfg(unix)]
+    fn start_command(repository_id: &str, url: String) -> Command {
+        Command::SessionStart(north_protocol::SessionStart {
+            requirement: north_protocol::RequirementContext {
+                id: "requirement-1".into(),
+                revision: 7,
+                title: "Title".into(),
+                description: "Description".into(),
+                summary: "Summary".into(),
+                acceptance_criteria: vec!["Criterion".into()],
+                assumptions: vec![],
+                open_questions: vec![],
+            },
+            conversation: north_protocol::ConversationContext {
+                excerpt: vec![north_protocol::ConversationMessageContext {
+                    message_id: "message-1".into(),
+                    role: north_protocol::ConversationRoleWire::Requester,
+                    content: "Clarify source behavior".into(),
+                }],
+            },
+            repositories: vec![north_protocol::RepositoryContext {
+                repository_id: repository_id.into(),
+                name: "Authorized repository".into(),
+                url,
+                description: "Server-selected source".into(),
+            }],
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_source_reaches_pi_and_unauthorized_source_stays_out(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs;
+
+        let directory = tempfile::tempdir()?;
+        let (authorized, sha) = git_fixture(
+            directory.path(),
+            "authorized-repository",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let (_unauthorized, _) = git_fixture(
+            directory.path(),
+            "unauthorized-repository",
+            "FORBIDDEN_MARKER",
+        )?;
+        let (second_authorized, second_sha) = git_fixture(
+            directory.path(),
+            "second-authorized-repository",
+            "SECOND_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let adapter = PiClarificationAdapter::new(
+            RepositoryInspector::new(
+                directory.path().join("cache"),
+                directory.path().join("workspaces"),
+            )?,
+            directory.path().join("sessions"),
+        )?
+        .with_agent_command(fake_pi(directory.path())?);
+        let mut start = start_command(
+            "repository-authorized",
+            authorized.to_string_lossy().into_owned(),
+        );
+        if let Command::SessionStart(context) = &mut start {
+            context
+                .repositories
+                .push(north_protocol::RepositoryContext {
+                    repository_id: "repository-second".into(),
+                    name: "Second authorized repository".into(),
+                    url: second_authorized.to_string_lossy().into_owned(),
+                    description: "Second server-selected source".into(),
+                });
+        }
+        let outcome = crate::journal::RuntimeExecutor::dispatch_for_session_with_control(
+            &adapter,
+            "session-authorized",
+            "operation-authorized",
+            "command-authorized",
+            &start,
+            RuntimeControl::new("session-authorized", "command-authorized"),
+        );
+        assert_eq!(outcome, crate::journal::DispatchOutcome::DispatchSucceeded);
+        let events = crate::journal::RuntimeExecutor::take_events(&adapter, "session-authorized");
+        let assessment = events.iter().find_map(|event| match event {
+            Event::RequirementAssessed(assessment) => Some(assessment),
+            _ => None,
+        });
+        let assessment = assessment.ok_or("missing assessment")?;
+        assert_eq!(
+            assessment.repositories_reviewed,
+            vec![
+                ReviewedRepositoryWire {
+                    repository_id: "repository-authorized".into(),
+                    commit_sha: sha,
+                },
+                ReviewedRepositoryWire {
+                    repository_id: "repository-second".into(),
+                    commit_sha: second_sha,
+                },
+            ]
+        );
+        let prompt = fs::read_to_string(directory.path().join("pi-prompt"))?;
+        assert!(prompt.contains("NORTH_AUTHORIZED_REPOSITORY_MARKER"));
+        assert!(prompt.contains("SECOND_AUTHORIZED_REPOSITORY_MARKER"));
+        assert!(!prompt.contains("FORBIDDEN_MARKER"));
+        assert!(!prompt.contains("authorized-repository"));
+        assert!(!prompt.contains("unauthorized-repository"));
+        assert!(fs::read_dir(directory.path().join("workspaces"))?
+            .next()
+            .is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancellation_during_repository_preparation_skips_pi_and_cleans_workspace(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::{
+            fs,
+            sync::{atomic::AtomicBool, Arc},
+        };
+
+        let directory = tempfile::tempdir()?;
+        let (authorized, _) = git_fixture(
+            directory.path(),
+            "cancel-repository",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let adapter = Arc::new(
+            PiClarificationAdapter::new(
+                RepositoryInspector::new(
+                    directory.path().join("cache"),
+                    directory.path().join("workspaces"),
+                )?,
+                directory.path().join("sessions"),
+            )?
+            .with_agent_command(fake_pi(directory.path())?),
+        );
+        let entered = Arc::new(AtomicBool::new(false));
+        let observed_workspace = Arc::new(Mutex::new(None));
+        let release = Arc::new(AtomicBool::new(false));
+        {
+            let entered = entered.clone();
+            let observed_workspace = observed_workspace.clone();
+            let release = release.clone();
+            adapter.set_preparation_checkpoint(move |_repository_id, path| {
+                {
+                    let mut workspace = match observed_workspace.lock() {
+                        Ok(workspace) => workspace,
+                        Err(_) => panic!("workspace checkpoint"),
+                    };
+                    *workspace = Some(path.to_owned());
+                }
+                entered.store(true, Ordering::Release);
+                while !release.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            });
+        }
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let scheduler = crate::scheduler::RuntimeScheduler::new(adapter, sender);
+        let start = CommandEnvelope {
+            command_id: "command-prep".into(),
+            session_id: "session-prep".into(),
+            server_command_seq: 1,
+            sent_at: "2026-01-01T00:00:00Z".into(),
+            schema_version: SCHEMA_VERSION,
+            command: start_command(
+                "repository-cancel",
+                authorized.to_string_lossy().into_owned(),
+            ),
+        };
+        scheduler.schedule(start)?;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !entered.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| "preparation checkpoint not reached")?;
+        let workspace = observed_workspace
+            .lock()
+            .expect("workspace checkpoint")
+            .clone()
+            .ok_or("missing workspace checkpoint")?;
+        assert!(!directory.path().join("pi-started").exists());
+        scheduler.schedule(CommandEnvelope {
+            command_id: "cancel-prep".into(),
+            session_id: "session-prep".into(),
+            server_command_seq: 2,
+            sent_at: "2026-01-01T00:00:00Z".into(),
+            schema_version: SCHEMA_VERSION,
+            command: Command::SessionCancel(SessionCancel {
+                reason: "requester_cancelled".into(),
+            }),
+        })?;
+        release.store(true, Ordering::Release);
+        let completion = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .map_err(|_| "runtime completion timeout")?
+            .ok_or("runtime completion channel closed")?;
+        assert_eq!(completion.command_id, "command-prep");
+        assert!(matches!(
+            completion.events.as_slice(),
+            [Event::SessionCompleted(_)]
+        ));
+        assert!(!completion
+            .events
+            .iter()
+            .any(|event| matches!(event, Event::RequirementAssessed(_))));
+        let finished = scheduler.finish_active(&completion)?;
+        let followup = match finished.followup {
+            Some(crate::scheduler::RuntimeFollowup::FinishCancellation(command)) => command,
+            other => return Err(format!("unexpected cancellation follow-up: {other:?}").into()),
+        };
+        scheduler.finish_followup(&followup)?;
+        assert!(!workspace.exists());
+        assert!(!directory.path().join("pi-started").exists());
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(scheduler.control_count(), 0);
+        let _ = fs::read_dir(directory.path().join("workspaces"))?;
         Ok(())
     }
 }

@@ -144,8 +144,75 @@ impl<E: RuntimeExecutor + 'static> RuntimeScheduler<E> {
                 RuntimeFollowup::RescheduleCancellation(pending.command)
             }
         });
+        let cleanup_now = followup.is_none() && terminal;
         self.drain_queue()?;
+        if cleanup_now {
+            self.maybe_cleanup_control(&completion.session_id)?;
+        }
         Ok(RuntimeFinished { followup })
+    }
+
+    /// Finish journal-only cancellation follow-up, then release terminal
+    /// daemon-local control state when no runtime work remains.
+    pub fn finish_followup(&self, command: &CommandEnvelope) -> Result<(), String> {
+        self.maybe_cleanup_control(&command.session_id)
+    }
+
+    #[cfg(test)]
+    pub fn control_count(&self) -> usize {
+        self.controls
+            .lock()
+            .map(|controls| controls.len())
+            .unwrap_or(usize::MAX)
+    }
+
+    fn maybe_cleanup_control(&self, session_id: &str) -> Result<(), String> {
+        let mut controls = self
+            .controls
+            .lock()
+            .map_err(|_| "runtime control state lock poisoned".to_owned())?;
+        let Some(control) = controls.get(session_id) else {
+            return Ok(());
+        };
+        if !control.terminal_fact_emitted() {
+            return Ok(());
+        }
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| "active runtime state lock poisoned".to_owned())?
+            .contains_key(session_id);
+        if active {
+            return Ok(());
+        }
+        let queued = self
+            .queued
+            .lock()
+            .map_err(|_| "runtime queue lock poisoned".to_owned())?
+            .iter()
+            .any(|item| item.command.session_id == session_id);
+        if queued {
+            return Ok(());
+        }
+        let suppressed = self
+            .suppressed
+            .lock()
+            .map_err(|_| "suppressed runtime state lock poisoned".to_owned())?
+            .values()
+            .any(|suppressed| suppressed.session_id() == session_id);
+        if suppressed {
+            return Ok(());
+        }
+        let pending_cancellation = self
+            .pending_cancellations
+            .lock()
+            .map_err(|_| "runtime cancellation state lock poisoned".to_owned())?
+            .contains_key(session_id);
+        if pending_cancellation {
+            return Ok(());
+        }
+        controls.remove(session_id);
+        Ok(())
     }
 
     /// Signal every currently executing session during daemon shutdown. The
@@ -726,15 +793,69 @@ mod tests {
             [Event::SessionCompleted(_)]
         ));
         let finished = scheduler.finish_active(&completion).unwrap();
-        assert!(matches!(
-            finished.followup,
-            Some(RuntimeFollowup::FinishCancellation(command)) if command.command_id == "cancel-race"
-        ));
+        let followup = match finished.followup {
+            Some(RuntimeFollowup::FinishCancellation(command)) => command,
+            other => panic!("unexpected cancellation follow-up: {other:?}"),
+        };
+        assert_eq!(followup.command_id, "cancel-race");
+        assert!(scheduler.finish_followup(&followup).is_ok());
+        assert_eq!(scheduler.control_count(), 0);
         assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
         assert!(
             tokio::time::timeout(Duration::from_millis(20), receiver.recv())
                 .await
                 .is_err()
         );
+    }
+
+    #[derive(Clone)]
+    struct TerminalExecutor;
+
+    impl RuntimeExecutor for TerminalExecutor {
+        fn recover(
+            &self,
+            _operation_id: &str,
+            _command_id: &str,
+            _command: &Command,
+        ) -> crate::journal::RecoveryOutcome {
+            crate::journal::RecoveryOutcome::Unknown
+        }
+
+        fn dispatch(
+            &self,
+            _operation_id: &str,
+            _command_id: &str,
+            _command: &Command,
+        ) -> DispatchOutcome {
+            DispatchOutcome::DispatchSucceeded
+        }
+
+        fn take_events(&self, _session_id: &str) -> Vec<Event> {
+            vec![Event::SessionCompleted(SessionCompleted {
+                summary: "finished".into(),
+            })]
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn terminal_controls_are_reclaimed_for_successful_sessions(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let scheduler = RuntimeScheduler::new(Arc::new(TerminalExecutor), sender);
+        for index in 0..32 {
+            let session_id = format!("session-{index}");
+            let command_id = format!("command-{index}");
+            scheduler
+                .schedule(command(&session_id, &command_id, 1))
+                .map_err(std::io::Error::other)?;
+            let completion = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+                .await?
+                .ok_or_else(|| std::io::Error::other("runtime completion channel closed"))?;
+            scheduler
+                .finish_active(&completion)
+                .map_err(std::io::Error::other)?;
+        }
+        assert_eq!(scheduler.control_count(), 0);
+        Ok(())
     }
 }

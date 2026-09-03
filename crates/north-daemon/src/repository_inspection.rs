@@ -15,9 +15,10 @@ use std::{
     ffi::OsStr,
     fmt::{self, Write as _},
     fs,
+    io::Read,
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex,
@@ -484,6 +485,43 @@ impl PreparedWorkspace {
             .map_err(|reason| InspectionError::new(InspectionPhase::Runtime, reason))?;
         run_read_git(self, args)
     }
+
+    /// Execute one authorized read-only Git operation with a hard stdout cap.
+    /// This keeps North-owned source evidence bounded before it reaches a
+    /// runtime provider.
+    pub fn read_git_bounded(
+        &self,
+        authorization: &RunAuthorization,
+        args: &[String],
+        max_output_bytes: usize,
+    ) -> Result<String, InspectionError> {
+        let source = RepositorySource::new(&self.repository_id, &self.repository_url);
+        validate_authorized_source(&self.session_id, &source, authorization)?;
+        validate_workspace_path(
+            &self.workspace_root,
+            self.workspace_root_identity,
+            &self.path,
+        )
+        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+        validate_git_config(self)
+            .map_err(|reason| InspectionError::new(InspectionPhase::Runtime, reason))?;
+        if !read_git_allowed(args) {
+            return Err(InspectionError::new(
+                InspectionPhase::Runtime,
+                "Git command is outside the read-only allowlist",
+            ));
+        }
+        git_output_bounded(
+            &self.path,
+            &self.workspace_root,
+            self.workspace_root_identity,
+            Some(&self.workspace_identity),
+            None,
+            args.to_vec(),
+            max_output_bytes,
+        )
+        .map_err(|reason| InspectionError::new(InspectionPhase::Runtime, reason))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -810,27 +848,25 @@ impl RepositoryInspector {
         self.inspect(request, authorization, runtime)
     }
 
-    /// Cancellation is cooperative at this synchronous boundary: no cleanup
-    /// starts while the runtime callback is still using the checkout.
-    pub fn inspect_with_cancellation<F>(
+    /// Run an authorized callback while prepared checkout remains alive.
+    /// Cleanup and post-inspection revision/dirty checks happen after callback
+    /// returns, including cancellation paths.
+    pub fn inspect_prepared_with_cancellation<F>(
         &self,
-        request: &InspectionRequest,
-        authorization: &RunAuthorization,
+        workspace: PreparedWorkspace,
         cancellation: &InspectionCancellation,
         runtime: F,
     ) -> Result<InspectionResult, InspectionError>
     where
-        F: FnOnce(&Path, &InspectionCancellation) -> Result<(), String>,
+        F: FnOnce(&PreparedWorkspace, &InspectionCancellation) -> Result<(), String>,
     {
-        validate_repository_selection(request, authorization)?;
-        let workspace = self.prepare_unchecked(request)?;
         let primary_failure = if cancellation.is_cancelled() {
             Some((
                 InspectionPhase::Cancellation,
                 "inspection cancelled before runtime dispatch".to_owned(),
             ))
         } else {
-            match catch_unwind(AssertUnwindSafe(|| runtime(workspace.path(), cancellation))) {
+            match catch_unwind(AssertUnwindSafe(|| runtime(&workspace, cancellation))) {
                 Ok(Ok(())) if cancellation.is_cancelled() => Some((
                     InspectionPhase::Cancellation,
                     "inspection cancelled".to_owned(),
@@ -851,6 +887,27 @@ impl RepositoryInspector {
             }
         };
         self.finish(workspace, primary_failure)
+    }
+
+    /// Cancellation is cooperative at this synchronous boundary: no cleanup
+    /// starts while the runtime callback is still using the checkout.
+    pub fn inspect_with_cancellation<F>(
+        &self,
+        request: &InspectionRequest,
+        authorization: &RunAuthorization,
+        cancellation: &InspectionCancellation,
+        runtime: F,
+    ) -> Result<InspectionResult, InspectionError>
+    where
+        F: FnOnce(&Path, &InspectionCancellation) -> Result<(), String>,
+    {
+        validate_repository_selection(request, authorization)?;
+        let workspace = self.prepare_unchecked(request)?;
+        self.inspect_prepared_with_cancellation(
+            workspace,
+            cancellation,
+            |workspace, cancellation| runtime(workspace.path(), cancellation),
+        )
     }
 
     fn lock_for(&self, repository_id: &str) -> Arc<Mutex<()>> {
@@ -2160,6 +2217,81 @@ fn sanitize_local_git_config(
         }
     }
     Ok(())
+}
+
+fn git_output_bounded<I, S>(
+    current_dir: &Path,
+    root: &Path,
+    expected_root_identity: FsIdentity,
+    workspace_identity: Option<&WorkspaceIdentity>,
+    additional_root: Option<(&Path, FsIdentity)>,
+    args: I,
+    max_output_bytes: usize,
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let args = args
+        .into_iter()
+        .map(|argument| argument.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let mut command = Command::new("git");
+    validate_git_spawn_scope(
+        current_dir,
+        root,
+        expected_root_identity,
+        workspace_identity,
+    )?;
+    if let Some((additional_root, identity)) = additional_root {
+        validate_root_identity(additional_root, identity)?;
+    }
+    let host_config_overrides = git_host_config_overrides();
+    sanitize_git_environment(&mut command);
+    apply_git_config_overrides(&mut command, &host_config_overrides);
+    command.current_dir(current_dir).args(&args);
+    validate_git_spawn_scope(
+        current_dir,
+        root,
+        expected_root_identity,
+        workspace_identity,
+    )?;
+    if let Some((additional_root, identity)) = additional_root {
+        validate_root_identity(additional_root, identity)?;
+    }
+    let operation = args.first().map(String::as_str).unwrap_or("command");
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("run git {operation}: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("run git {operation}: stdout pipe was unavailable"))?;
+    let mut output = Vec::new();
+    let read_result = stdout
+        .take(max_output_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut output);
+    if let Err(error) = read_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("read git {operation} output: {error}"));
+    }
+    if output.len() > max_output_bytes {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!(
+            "git {operation} output exceeded bounded size of {max_output_bytes} bytes"
+        ));
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("wait for git {operation}: {error}"))?;
+    if !status.success() {
+        return Err(format!("git {operation} failed with {status}"));
+    }
+    Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
 fn git_output<I, S>(

@@ -320,6 +320,9 @@ async fn start(args: &[String]) -> Result<(), CliError> {
                                 )
                                 .map_err(|error| CliError(format!("finish cancellation: {error}")))?;
                             emit_runtime_actions(&outbound, &scheduler, actions).await?;
+                            scheduler
+                                .finish_followup(&command)
+                                .map_err(|error| CliError(format!("cleanup cancellation runtime: {error}")))?;
                         }
                         RuntimeFollowup::RescheduleCancellation(command) => scheduler
                             .schedule_runtime(command)
