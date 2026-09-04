@@ -16,7 +16,21 @@ concurrency:
 jobs:
   sonarqube:
     name: SonarQube analysis
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: north
+          POSTGRES_PASSWORD: north
+          POSTGRES_DB: north
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U north -d north"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -30,7 +44,11 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - name: Generate Rust coverage (lcov)
-        run: cargo llvm-cov --workspace --lcov --output-path rust-lcov.info
+        env:
+          NORTH_TEST_DATABASE_URL: postgres://north:north@127.0.0.1:5432/north
+        run: >-
+          cargo llvm-cov --workspace --lcov --output-path rust-lcov.info --
+          --include-ignored
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
