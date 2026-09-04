@@ -7,7 +7,7 @@ use crate::journal::{CommandProcessResult, Journal, JournalError, RuntimeExecuto
 use north_protocol::{
     CommandEnvelope, DaemonFrame, Event, ReconcileSnapshot, ServerFrame, SCHEMA_VERSION,
 };
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, sync::Arc};
 
 #[derive(Debug)]
 pub enum CoordinationError {
@@ -46,24 +46,48 @@ pub struct HandshakeActions {
     pub replay: Vec<DaemonFrame>,
 }
 
+#[derive(Debug, Default)]
+pub struct RuntimeActions {
+    pub frames: Vec<DaemonFrame>,
+    pub commands: Vec<CommandEnvelope>,
+}
+
 /// Durable coordinator for one daemon identity.
 pub struct DaemonCoordinator<E> {
     journal: Journal,
-    executor: E,
+    executor: Arc<E>,
 }
 
 impl<E: RuntimeExecutor> DaemonCoordinator<E> {
     pub fn new(journal: Journal, executor: E) -> Self {
-        Self { journal, executor }
+        Self {
+            journal,
+            executor: Arc::new(executor),
+        }
     }
 
     pub fn journal(&self) -> &Journal {
         &self.journal
     }
 
+    pub fn executor(&self) -> Arc<E> {
+        self.executor.clone()
+    }
+
+    /// Recover commands without running long-lived runtime work before the
+    /// transport is active. Received commands are durably marked for dispatch;
+    /// dispatch-started commands remain non-resubmittable and become unknown.
+    pub fn recover_for_scheduler(&self) -> Result<RuntimeActions, CoordinationError> {
+        let recovery = self.journal.recover_for_scheduler(self.executor.as_ref())?;
+        Ok(RuntimeActions {
+            frames: command_results_to_frames(recovery.results),
+            commands: recovery.commands,
+        })
+    }
+
     /// Recover local records before application traffic is released.
     pub fn recover(&self) -> Result<Vec<DaemonFrame>, CoordinationError> {
-        let results = self.journal.recover(&self.executor)?;
+        let results = self.journal.recover(self.executor.as_ref())?;
         Ok(command_results_to_frames(results))
     }
 
@@ -84,6 +108,76 @@ impl<E: RuntimeExecutor> DaemonCoordinator<E> {
             );
         }
         Ok(HandshakeActions { replay })
+    }
+
+    /// Accept one server frame without entering long-running runtime work.
+    /// Durable command intake and runtime scheduling are separate operations.
+    pub fn accept_server_frame(
+        &self,
+        frame: ServerFrame,
+    ) -> Result<RuntimeActions, CoordinationError> {
+        match frame {
+            ServerFrame::Command(command) => match self.accept_command(command) {
+                Ok(actions) => Ok(actions),
+                Err(CoordinationError::Journal(JournalError::IdentityConflict(reason))) => {
+                    Ok(RuntimeActions {
+                        frames: vec![protocol_error("command_identity_conflict", reason)],
+                        commands: Vec::new(),
+                    })
+                }
+                Err(CoordinationError::Journal(JournalError::GapOverflow {
+                    session_id,
+                    limit,
+                })) => Err(CoordinationError::RetryableGap { session_id, limit }),
+                Err(error) => Err(error),
+            },
+            ServerFrame::EventAck(ack) => {
+                let session_id = ack.session_id.clone();
+                match self.journal.acknowledge_event(ack) {
+                    Ok(()) => {
+                        self.journal.compact_session(&session_id)?;
+                        Ok(RuntimeActions::default())
+                    }
+                    Err(JournalError::IdentityConflict(reason)) => Ok(RuntimeActions {
+                        frames: vec![protocol_error("event_ack_identity_conflict", reason)],
+                        commands: Vec::new(),
+                    }),
+                    Err(error) => Err(CoordinationError::Journal(error)),
+                }
+            }
+            ServerFrame::ProtocolError(error) => Err(CoordinationError::TerminalProtocol {
+                code: error.code,
+                message: error.message,
+            }),
+            ServerFrame::Welcome(_) | ServerFrame::Reconcile(_) => Ok(RuntimeActions::default()),
+        }
+    }
+
+    /// Finalize one worker result in the durable journal and expose the next
+    /// same-session command, if command sequencing now permits it.
+    pub fn finish_runtime(
+        &self,
+        session_id: &str,
+        command_id: &str,
+        outcome: crate::journal::DispatchOutcome,
+        runtime_events: Vec<Event>,
+    ) -> Result<RuntimeActions, CoordinationError> {
+        let emitted = self
+            .journal
+            .complete_command(command_id, outcome, runtime_events)?;
+        let mut actions = RuntimeActions {
+            frames: emitted.into_iter().map(DaemonFrame::Event).collect(),
+            commands: Vec::new(),
+        };
+        if let Some(accepted) = self.journal.accept_next_ready_command(session_id)? {
+            actions
+                .frames
+                .extend(command_result_to_frames(accepted.result));
+            if let Some(command) = accepted.command {
+                actions.commands.push(command);
+            }
+        }
+        Ok(actions)
     }
 
     /// Process one server frame after handshake readiness. A command ACK is
@@ -139,16 +233,33 @@ impl<E: RuntimeExecutor> DaemonCoordinator<E> {
         ))
     }
 
+    fn accept_command(
+        &self,
+        command: CommandEnvelope,
+    ) -> Result<RuntimeActions, CoordinationError> {
+        let accepted = if matches!(&command.command, north_protocol::Command::SessionCancel(_)) {
+            self.journal.accept_control_command(command)?
+        } else {
+            self.journal.accept_command(command)?
+        };
+        Ok(RuntimeActions {
+            frames: command_result_to_frames(accepted.result),
+            commands: accepted.command.into_iter().collect(),
+        })
+    }
+
     fn process_command(
         &self,
         command: CommandEnvelope,
     ) -> Result<Vec<DaemonFrame>, CoordinationError> {
         let session_id = command.session_id.clone();
-        let result = self.journal.process_command(command, &self.executor)?;
+        let result = self
+            .journal
+            .process_command(command, self.executor.as_ref())?;
         let mut frames = command_result_to_frames(result);
         frames.extend(
             self.journal
-                .process_ready(&session_id, &self.executor)?
+                .process_ready(&session_id, self.executor.as_ref())?
                 .into_iter()
                 .flat_map(command_result_to_frames),
         );

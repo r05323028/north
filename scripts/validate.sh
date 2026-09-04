@@ -33,6 +33,10 @@ web_full() {
   (cd apps/web && npm run lint && npm run typecheck && npm run check:repository-settings && npm run build)
 }
 
+web_e2e() {
+  (cd apps/web && npm run test:e2e)
+}
+
 rust_full() {
   cargo fmt --all --check
   cargo clippy --workspace --all-targets -- -D warnings
@@ -49,6 +53,7 @@ database_integration() {
     cargo test -p north-persistence --all-targets
   fi
   cargo test -p north-server --test requirements -- --ignored
+  cargo test -p north-server --test events -- --ignored
   cargo test -p north-server --test conversations_readiness -- --ignored
   cargo test -p north-server --test daemon_runtime -- --ignored
   cargo test -p north-server --test migration_upgrade -- --ignored
@@ -82,8 +87,8 @@ integration)
   database_integration
   ;;
 e2e)
-  # Full user-workflow tests across assembled North (Playwright when UI lands).
-  unsupported
+  # Browser-boundary workflows for implemented web surfaces.
+  web_e2e
   ;;
 smoke)
   # Start-and-serve probes (server boots, migrations apply, health responds).

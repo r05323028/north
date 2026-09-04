@@ -128,6 +128,7 @@ pub async fn post_message(
         .post_requester_message(&requirement_id, &actor.user().id, body)
         .await
         .map_err(ConversationHttpError::from)?;
+    state.events().conversation_changed(requirement_id);
     Ok((StatusCode::CREATED, Json(message.into())))
 }
 

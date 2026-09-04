@@ -2,8 +2,8 @@
 
 ## Why
 
-Requesters need a fast view of Requirement work and a precise way to find it.
-Board and list are the smallest requester-facing surface for that workflow.
+Users need a fast view of Requirement work and a precise way to find it.
+Board and list are the smallest user-facing surface for that workflow.
 
 ## Existing backend capability
 
@@ -14,17 +14,25 @@ needs:
 - `GET /requirements/{id}` retrieves a complete Requirement;
 - `GET /requirements` supports server-side `search`, `status`, `created_by`,
   and updated-time sorting; and
-- responses include canonical lifecycle status, `revision`, and
-  `state_version`.
+- responses include canonical lowercase lifecycle status identifiers
+  (`draft`, `discussing`, `ready`, `accepted`, `rejected`), `revision`, and
+  `state_version`. At the browser boundary, `revision` and `state_version`
+  remain JSON numbers and are valid only as positive JavaScript safe integers
+  (`Number.isSafeInteger(value) && value >= 1`); no string wire redesign is
+  introduced.
 
-This change does not reimplement, paginate, or redesign those APIs.
+The frontend keeps those identifiers as its wire/domain values and maps them to
+human-readable title-case labels only for presentation. This change does not
+reimplement, paginate, or redesign those APIs.
 
 ## What Changes
 
 - Next.js Board view with one column per lifecycle state, compact cards, create
-  action, and navigation to detail.
+action, and navigation to the Board-owned detail shell.
 - List view with server-backed search, status/creator filters, updated sorting,
-  status/ownership columns, and the same navigation.
+creator columns, and the same navigation.
+- Minimal read-only Requirement detail shell at `/requirements/[id]`, using the
+existing `GET /requirements/{id}` response and no clarification dependency.
 - Minimal title+description creation flow that opens the created Requirement.
 - HTTP reads plus the shared authenticated SSE notification endpoint. This
   change owns the base `GET /events` mechanism and initial
@@ -59,23 +67,26 @@ north-server canonical commit
 The endpoint is notification-only, non-authoritative, non-durable, and not a
 WebSocket or replay log. `Last-Event-ID` is not required for correctness;
 missed, duplicate, delayed, or out-of-order hints are harmless because HTTP
-refetch wins. `introduce-agent-requirement-clarification` extends this same
+refetch wins. If the server detects that an SSE subscriber missed broadcast
+notifications, it closes that stream so native EventSource reconnect/refetch
+restores canonical state. `introduce-agent-requirement-clarification` extends this same
 producer with clarification categories after its canonical transactions. It
 does not create another endpoint or event store.
 
 ## UI scope
 
-Keep board by lifecycle state, list search/filter/sort, minimal creation,
-detail navigation, and frontend tests. Do not add labels, attachments,
-advanced prioritization, drag-and-drop lifecycle mutation, or unrelated admin
-functionality.
+Keep board by lifecycle state, list search/filter/sort, minimal creation, the
+minimal read-only Requirement detail shell, and frontend tests. Do not add
+clarification, runtime status, activity, readiness interaction, editing,
+labels, attachments, advanced prioritization, drag-and-drop lifecycle mutation,
+or unrelated admin functionality.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `requirement-board-ui`: requester board/list rendering, query controls,
-  creation, navigation, and notification-driven refetch.
+- `requirement-board-ui`: board/list rendering, query controls, creation,
+  minimal read-only detail shell, navigation, and notification-driven refetch.
 
 ### Modified Capabilities
 
@@ -84,23 +95,27 @@ None. Requirement HTTP semantics already exist.
 ## Impact and dependencies
 
 - Established prerequisites: requirement domain/concurrency and role contracts.
-- This change owns the base authenticated `/events` producer and
-  `requirement.changed`; board/list does not depend on clarification or local
-  repository inspection.
-- Clarification extends this endpoint with clarification categories;
-  conversation/detail UI consumes the shared endpoint plus clarification reads.
-- `introduce-runtime-retry-and-failure-state` is not required for board/list.
+- This change owns the Board/list/create surface, the minimal read-only
+  `/requirements/[id]` detail route/shell, the base authenticated `/events`
+  producer, and `requirement.changed`; it does not depend on clarification or
+  local repository inspection.
+- Clarification extends the shared endpoint with clarification categories;
+  conversation/detail UI extends this change's existing detail shell and
+  consumes clarification reads.
+- `introduce-runtime-retry-and-failure-state` is not required for board/list or
+  the base detail shell.
 
 Dependency graph:
 
 ```text
 introduce-requirement-board
+  ├─ board/list/create/minimal read-only detail
   └─ base GET /events + requirement.changed
 
 introduce-local-repository-inspection
   └─> introduce-agent-requirement-clarification
-       └─ extends Board's shared /events categories
 
 introduce-requirement-board + introduce-agent-requirement-clarification
   └─> introduce-requirement-conversation-ui
+       extends the existing detail shell
 ```

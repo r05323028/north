@@ -1,0 +1,33 @@
+---
+name: PR Agent
+
+"on":
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, review_requested]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: PR-Agent review
+    if: github.event.sender.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run PR-Agent
+        uses: the-pr-agent/pr-agent@ab6ec54bfeb37933ddb74259338752e9272016c6
+        env:
+          OPENAI_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          "github_action_config.auto_review": "true"
+          "github_action_config.auto_describe": "false"
+          "github_action_config.auto_improve": "false"
+          "github_action_config.pr_actions": >-
+            ["opened", "synchronize", "reopened", "ready_for_review",
+            "review_requested"]

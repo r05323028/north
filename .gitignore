@@ -9,7 +9,10 @@ next-env.d.ts
 
 # Agentic development
 graphify-out
+.ua
 .pi
+
+.ruff_cache
 
 # Local pi agent state (never publish)
 .pi/
@@ -17,5 +20,7 @@ graphify-out
 # coverage
 coverage/
 apps/web/coverage/
+apps/web/playwright-report/
+apps/web/test-results/
 rust-lcov.info
 lcov.info

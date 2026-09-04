@@ -507,3 +507,62 @@ fn browser_never_opens_websockets() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn requirement_board_stays_presentation_only() {
+    let root = repo_root();
+    let source_paths = [
+        "apps/web/lib/requirements.ts",
+        "apps/web/lib/requirement-events.ts",
+        "apps/web/lib/use-requirement-collection.tsx",
+        "apps/web/components/requirement-card.tsx",
+        "apps/web/components/requirement-board.tsx",
+        "apps/web/components/requirement-list.tsx",
+        "apps/web/components/requirement-create.tsx",
+        "apps/web/components/requirement-detail.tsx",
+        "apps/web/components/requirement-workspace.tsx",
+    ];
+    let forbidden_markers = [
+        "new WebSocket",
+        "ws://",
+        "wss://",
+        "onDrag",
+        "onDrop",
+        "draggable",
+        "/begin-discussion",
+        "/accept",
+        "/reject",
+        "/request-changes",
+        "/reopen",
+        "clarification",
+        "Pi",
+        "runtime",
+        "activity",
+        "attachment",
+        "labels",
+        "admin",
+        "owner",
+        "assignee",
+    ];
+    let mut violations = Vec::new();
+    for relative in source_paths {
+        let path = root.join(relative);
+        assert!(path.exists(), "Board source is missing: {}", path.display());
+        let text = fs::read_to_string(&path).expect("read Board source");
+        for marker in forbidden_markers {
+            // Shared EventSource adapter may name non-authoritative activity
+            // invalidations; Board components remain free of that domain term.
+            if relative == "apps/web/lib/requirement-events.ts" && marker == "activity" {
+                continue;
+            }
+            if text.contains(marker) {
+                violations.push(format!("{relative} contains `{marker}`"));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Board frontend must stay HTTP/SSE presentation-only:\n{}",
+        violations.join("\n")
+    );
+}

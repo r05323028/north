@@ -969,6 +969,7 @@ dependencies = [
  "north-daemon",
  "north-protocol",
  "north-server",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
 ]

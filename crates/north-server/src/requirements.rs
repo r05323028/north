@@ -202,6 +202,7 @@ pub async fn create_requirement(
         .create_requirement(&title, &description, &actor.user().id)
         .await
         .map_err(RequirementHttpError::from)?;
+    state.events().requirement_changed(requirement.id.clone());
     Ok((StatusCode::CREATED, Json(requirement.into())))
 }
 
@@ -260,6 +261,9 @@ pub async fn edit_requirement(
         )
         .await
         .map_err(RequirementHttpError::from)?;
+    if requirement.state_version > expected_state_version {
+        state.events().requirement_changed(requirement.id.clone());
+    }
     Ok(Json(requirement.into()))
 }
 
@@ -321,6 +325,7 @@ async fn transition(
         )
         .await
         .map_err(RequirementHttpError::from)?;
+    state.events().requirement_changed(requirement.id.clone());
     Ok(Json(requirement.into()))
 }
 

@@ -6,9 +6,11 @@ use std::{error::Error, fmt};
 
 pub mod assessment;
 pub mod auth;
+pub mod clarification;
 pub mod context;
 pub mod conversations;
 pub mod daemon;
+pub mod events;
 pub mod repositories;
 pub mod requirements;
 pub mod roles;

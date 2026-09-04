@@ -37,7 +37,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Forbidden crate dependency edges absent (normal/dev/build/target kinds) | Enforced | archtests via effective cargo metadata graph |
 | No dumping-ground crates | Enforced | archtests directory scan |
 | Browser never opens WebSockets | Enforced | `browser_never_opens_websockets` structural test |
-| Browser SSE is notification; reconnect refetches canonical API state | Specified | harden-distributed-system-architecture; board/detail E2E pending |
+| Browser SSE is notification; reconnect/refocus/hints refetch canonical API state | Partially Enforced | authenticated `/events`, post-commit identity hints, lagged-stream termination, web unit/Playwright coverage; full server-backed Board/detail E2E pending |
 | Daemon reports facts/events; server owns business transitions | Partially Enforced | crate edges now; server-side transition validation lands with requirement-domain change |
 | Server is sole owner of durable business state | Partially Enforced | dependency boundaries; server/persistence implementation and integration tests pending |
 | Setup approval state changes require authenticated same-origin POST | Enforced | read-only approval GET, Origin/Host validation, and PostgreSQL HTTP-boundary tests |

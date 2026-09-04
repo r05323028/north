@@ -24,7 +24,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::auth::AuthState;
+use crate::{auth::AuthState, events::BrowserEventHub};
 
 /// Convert typed protocol evidence into the domain assessment.
 /// `north-protocol` remains independent of `north-domain`.
@@ -90,24 +90,16 @@ pub async fn process_requirement_assessed(
     daemon_event_seq: u64,
     payload: &RequirementAssessed,
 ) -> Result<EventAck, AssessmentError> {
-    let assessment = readiness_assessment_from_wire(payload, now_ms())
-        .map_err(AssessmentError::InvalidPayload)?;
-    let result = store
-        .record_readiness_assessment(
-            event_id,
-            session_id,
-            daemon_event_seq,
-            &payload.requirement_id,
-            &assessment,
-        )
-        .await
-        .map_err(AssessmentError::Persistence)?;
-    Ok(event_ack(
-        &result.record.event_id,
-        &result.record.session_id,
-        result.record.daemon_event_seq,
-        &result,
-    ))
+    process_requirement_assessed_inner(
+        store,
+        event_id,
+        session_id,
+        daemon_event_seq,
+        payload,
+        None,
+        None,
+    )
+    .await
 }
 
 pub async fn process_requirement_assessed_with_event_digest(
@@ -118,19 +110,64 @@ pub async fn process_requirement_assessed_with_event_digest(
     payload: &RequirementAssessed,
     event_digest: &str,
 ) -> Result<EventAck, AssessmentError> {
+    process_requirement_assessed_inner(
+        store,
+        event_id,
+        session_id,
+        daemon_event_seq,
+        payload,
+        Some(event_digest),
+        None,
+    )
+    .await
+}
+
+async fn process_requirement_assessed_inner(
+    store: &AuthStore,
+    event_id: &str,
+    session_id: &str,
+    daemon_event_seq: u64,
+    payload: &RequirementAssessed,
+    event_digest: Option<&str>,
+    events: Option<&BrowserEventHub>,
+) -> Result<EventAck, AssessmentError> {
     let assessment = readiness_assessment_from_wire(payload, now_ms())
         .map_err(AssessmentError::InvalidPayload)?;
-    let result = store
-        .record_readiness_assessment_with_event_digest(
-            event_id,
-            session_id,
-            daemon_event_seq,
-            &payload.requirement_id,
-            &assessment,
-            event_digest,
-        )
-        .await
-        .map_err(AssessmentError::Persistence)?;
+    let result = match event_digest {
+        Some(event_digest) => {
+            store
+                .record_readiness_assessment_with_event_digest(
+                    event_id,
+                    session_id,
+                    daemon_event_seq,
+                    &payload.requirement_id,
+                    &assessment,
+                    event_digest,
+                )
+                .await
+        }
+        None => {
+            store
+                .record_readiness_assessment(
+                    event_id,
+                    session_id,
+                    daemon_event_seq,
+                    &payload.requirement_id,
+                    &assessment,
+                )
+                .await
+        }
+    }
+    .map_err(AssessmentError::Persistence)?;
+    match events {
+        Some(events)
+            if !result.duplicate
+                && matches!(result.record.outcome, AssessmentOutcome::Accepted) =>
+        {
+            events.requirement_changed(payload.requirement_id.clone());
+        }
+        _ => {}
+    }
     Ok(event_ack(
         &result.record.event_id,
         &result.record.session_id,
@@ -145,19 +182,36 @@ pub async fn handle_requirement_assessed(
     store: &AuthStore,
     envelope: &EventEnvelope,
 ) -> Result<EventAck, AssessmentError> {
+    handle_requirement_assessed_inner(store, envelope, None).await
+}
+
+pub async fn handle_requirement_assessed_with_events(
+    store: &AuthStore,
+    envelope: &EventEnvelope,
+    events: &BrowserEventHub,
+) -> Result<EventAck, AssessmentError> {
+    handle_requirement_assessed_inner(store, envelope, Some(events)).await
+}
+
+async fn handle_requirement_assessed_inner(
+    store: &AuthStore,
+    envelope: &EventEnvelope,
+    events: Option<&BrowserEventHub>,
+) -> Result<EventAck, AssessmentError> {
     let Event::RequirementAssessed(payload) = &envelope.event else {
         return Err(AssessmentError::NotAssessmentEvent);
     };
     let value = serde_json::to_value(envelope)
         .map_err(|error| AssessmentError::InvalidPayload(FrameError::Json(error)))?;
     let digest = north_persistence::canonical_payload_digest(&value);
-    process_requirement_assessed_with_event_digest(
+    process_requirement_assessed_inner(
         store,
         &envelope.event_id,
         &envelope.session_id,
         envelope.daemon_event_seq,
         payload,
-        &digest,
+        Some(&digest),
+        events,
     )
     .await
 }

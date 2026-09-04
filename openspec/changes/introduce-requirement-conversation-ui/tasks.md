@@ -2,19 +2,19 @@
 
 ## 1. Route and canonical reads
 
-- [ ] 1.1 Add deep-linkable `/requirements/[id]` shell with Conversation, Overview, and Activity tabs.
-- [ ] 1.2 Add API client/load state for Requirement, existing paged conversation, clarification readiness, coarse activity, and minimal session/runtime reads.
-- [ ] 1.3 Render structured Requirement fields, lifecycle status, content revision, current assessment/repository citations, and minimal session status from HTTP responses only.
+- [ ] 1.1 Extend the Board-owned `/requirements/[id]` Requirement detail shell with Conversation, Overview, and Activity tabs; do not create a second route or replace the Board shell.
+- [ ] 1.2 Add API client/load state for Requirement, existing paged conversation, clarification readiness, coarse activity, and the public session projection (`run_id`, `start_message_id`, `phase`, `status`, `cancel_requested`, safe timestamps).
+- [ ] 1.3 Render structured Requirement fields, lifecycle status, content revision, current assessment/repository citations, and public session `phase`/`status`/cancellation intent from HTTP responses only; never use daemon details.
 
 ## 2. Conversation
 
-- [ ] 2.1 Render persisted requester/agent/system messages; keep `POST /requirements/{id}/conversation/messages` persistence-only and preserve returned message identity.
-- [ ] 2.2 Use canonical latest `/session` state to choose no-run initial `start`, same-message retry for a reusable unassigned run, later-message `dispatch` for an assigned active run, or new `start` for a terminal/inapplicable run; always send `expected_state_version` on start and never submit the start message as `message.send`.
-- [ ] 2.3 For a later persisted message, call `POST /requirements/{id}/clarification/messages/{message_id}/dispatch`; prove repeated dispatch reuses one command mapping and creates no second message.
-- [ ] 2.4 Call `POST /requirements/{id}/clarification/cancel` for cancellation; render returned operational status without changing Requirement content/lifecycle.
-- [ ] 2.5 Preserve persisted messages and refetch the detail bundle on start HTTP 409 or operational unavailability; never retry with a newer state version or invent a local run.
+- [ ] 2.1 Render persisted requester/agent/system messages; keep `POST /requirements/{requirement_id}/conversation/messages` persistence-only and preserve returned message identity.
+- [ ] 2.2 Use latest `/session` only to guide presentation; use `phase` and `cancel_requested` to allow no-run `start`, awaiting-assignment same-message retry/cancel, active-run dispatch only when `cancel_requested=false`, active cancellation-pending idempotent cancel without dispatch or another start while the sequential clarification slot is occupied, or terminal-run new `start`; retain returned/public `run_id` and `start_message_id`, require known `run_id` for every later dispatch/cancel, and always send `expected_state_version` on start while relying on server arbitration to apply it only to a genuinely new logical start.
+- [ ] 2.3 For a later persisted message, call `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch` only for known assigned `phase=active`, `cancel_requested=false` `run_id`; prove run binding, repeated dispatch reuse, no second message, no status-only action inference, no dispatch during cancellation-pending state, and no retargeting to a newer run.
+- [ ] 2.4 Call `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel` with known `run_id`; render separate `cancel_requested` intent, keep assigned `phase=active` through `command_ack`, reject later dispatch while cancellation is pending, render unassigned immediate `phase=terminal`, and never substitute latest-run identity.
+- [ ] 2.5 Preserve persisted messages and refetch the detail bundle on a stale genuinely new-start HTTP 409 or operational unavailability; render a matching concurrent same-message result as canonical run reuse rather than stale failure; use phase/status to distinguish awaiting-assignment retry, sequential clarification slot retention, and terminal new-start eligibility; if cancellation wins after message persistence, preserve the message and do not dispatch it; never retry with a newer state version or invent a local run.
 - [ ] 2.6 Add reconnect/refocus refetch for conversation and prove agent messages survive missed SSE hints.
-- [ ] 2.7 Add UI coverage for sequential run creation after completion/cancellation, active-run concurrent-start conflict, and same-message unavailable-start reuse.
+- [ ] 2.7 Add UI coverage for reload retry using canonical `start_message_id`, Draft/state_version same-message start resolution without stale-new-start failure, phase-driven unavailable handling, concurrent same-message start resolution, concurrent different-message conflict with loser-message history preservation, awaiting retry versus different-message conflict, assigned cancellation after `command_ack` without new run, terminal runtime release, sequential run creation, and explicit run identity preservation.
 
 ## 3. Overview and concurrency
 
@@ -25,15 +25,15 @@
 ## 4. Activity and minimal status
 
 - [ ] 4.1 Add Activity tab backed by canonical HTTP coarse-activity reads; SSE only triggers refetch and raw diagnostics never render.
-- [ ] 4.2 Add minimal latest-run starting/running/completed/unavailable status and separate `cancel_requested`; do not add run-history UI, retry budget, attempt, backoff, or final execution-failure UI.
+- [ ] 4.2 Add public latest-run `phase` (`awaiting_assignment`, `active`, `terminal`), coarse starting/running/completed/unavailable status, separate `cancel_requested`, and safe timestamps; phase drives legal actions, with no run-history UI or later retry budget/attempt/backoff/failure policy.
 - [ ] 4.3 Show readiness outcome/current flag and repository ID/full SHA citations without exposing checkout paths or runtime internals.
 
 ## 5. Reconnect and privacy tests
 
-- [ ] 5.1 Refetch Requirement, conversation, readiness, activity, and session status after initial load, focus/refocus, reload, SSE disconnect, reconnect, and relevant hints.
+- [ ] 5.1 Refetch Requirement, conversation, readiness, activity, and the complete session projection (`run_id`, `start_message_id`, `phase`, `status`, `cancel_requested`, timestamps) after initial load, focus/refocus, reload, SSE disconnect, reconnect, and relevant hints.
 - [ ] 5.2 Add fault-injection coverage proving missing transcript does not alter Overview and missed activity hints recover through HTTP.
 - [ ] 5.3 Add snapshot/structural checks for no chain-of-thought, raw tool/runtime diagnostics, credentials, checkout paths, or browser WebSocket.
-- [ ] 5.4 Add E2E coverage for duplicate/delayed hints, durable requester post, agent reply recovery, sequential start selection, and conflict refetch behavior.
+- [ ] 5.4 Add E2E coverage for duplicate/delayed hints, durable requester post, agent reply recovery, reload-safe awaiting-assignment retry, phase-driven active/terminal actions, explicit run-scoped dispatch/cancel URLs, cancellation-pending dispatch rejection and persisted-message race behavior, cancellation intent versus terminal completion, stale run A versus newer run B isolation, and conflict refetch behavior.
 
 ## 6. Validation
 

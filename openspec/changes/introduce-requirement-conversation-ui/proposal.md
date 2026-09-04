@@ -8,16 +8,27 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
 
 ## What Changes
 
-- Deep-linkable `/requirements/[id]` route with Conversation, Overview, and
-  Activity tabs.
+- Extend the Board-owned `/requirements/[id]` Requirement detail shell with
+  Conversation, Overview, and Activity tabs.
 - Conversation uses the persisted conversation API for requester and agent
-  messages. After persistence, canonical latest-run state selects explicit
-  `start`, same-message unavailable-start retry, later-message `dispatch`, or a
-  new sequential start after a terminal/inapplicable run. SSE only hints that a
-  refetch may be useful; transcript contents never select the operation.
+  messages. The identity-creating `start` operation may create/reuse a
+  sequential run and returns the public `run_id` and `start_message_id`.
+  Explicit run-scoped dispatch/cancellation use known `run_id`. The public
+  `phase` projection determines legal intent: no session starts a run,
+  `awaiting_assignment` permits only same-start retry or cancellation,
+  `active` with `cancel_requested=false` permits later dispatch or
+  cancellation, while active `cancel_requested=true` permits only idempotent
+  cancellation and remains in the sequential clarification slot, and `terminal`
+  permits a new start. `status` remains display-only coarse
+  health/result. Latest-session reads may guide presentation, but never supply
+  an implicit mutation target; SSE only hints that a refetch may be useful and
+  transcript contents never select the operation. Concurrent start requests are
+  not arbitrated by the browser; server/persistence authority returns one
+  canonical run or conflict under the clarification slot contract.
 - Overview renders canonical Requirement fields, readiness/repository evidence,
   lifecycle status, content revision, and the minimal clarification session
-  status supplied by the backend.
+  `phase`, coarse `status`, cancellation intent, and timestamps supplied by the
+  backend.
 - Structured edits send the actual `expected_state_version` write token and
   render the server's returned status/revision/state_version. A 409 conflict
   refetches and explains that the Requirement changed; it never blindly retries.
@@ -28,25 +39,37 @@ after reconnects and must never expose raw model reasoning or tool telemetry.
 
 ## Backend contract consumed
 
-This change consumes existing `GET /requirements/{id}` and paged conversation
-reads plus the existing persistence-only
-`POST /requirements/{id}/conversation/messages`. It then uses clarification's
-explicit authenticated `start`, message `dispatch`, and `cancel` mutations,
-plus its canonical readiness, activity, and latest-run reads. The latest-run
-read selects no-run start, reusable same-message start retry, active-run later
-message dispatch, or new start after terminal/inapplicable state. It consumes
-the Board-owned shared `GET /events` endpoint and clarification's added
-categories; it does not interpret daemon frames, SSE replay, or a future retry
-state machine as product truth.
+This change extends the Board-owned `/requirements/[id]` Requirement detail
+shell; it does not create or take ownership of that route. It consumes existing
+`GET /requirements/{id}` and paged conversation reads plus the existing
+persistence-only `POST /requirements/{id}/conversation/messages`. It then uses
+clarification's explicit authenticated `start`, run-scoped message dispatch,
+and run-scoped cancellation mutations, plus its canonical readiness, activity,
+and latest-run reads. The public session projection includes `run_id`,
+`start_message_id`, `phase`, `status`, `cancel_requested`, and safe timestamps,
+so reload can retry an `awaiting_assignment` run using its persisted start
+message. The UI uses `phase` and `cancel_requested`, not coarse `status` alone,
+for legal intent; later dispatch is allowed only for active runs with
+`cancel_requested=false`, while an active cancellation-pending run remains in the
+sequential clarification slot and rejects dispatch. The URL's explicit `run_id`, not latest-read
+recency, determines every later mutation target. Latest-run reads may guide presentation but MUST NOT supply an
+implicit target, and the UI never performs dispatch or cancellation without a
+known `run_id`. Existing protocol `session_id` carries the same identity
+(`session_id = run_id`). It consumes the Board-owned shared `GET /events`
+endpoint and clarification's added categories; it does not interpret daemon
+frames, SSE replay, or a future retry state machine as product truth.
 
 ## Execution-status boundary
 
-The initial UI may show `starting`, `running`, `completed`, or `unavailable`
-when returned by the minimal clarification session read model. It does not
-require, render, or define the later `Idle`/`Running`/`Retrying`/`Failed` retry
-machine, retry budget, attempt count, or final execution failure semantics.
-A later change may extend the status badge without changing the canonical
-conversation/Requirement read flow.
+The initial UI may show the minimal clarification session projection:
+`phase` is `awaiting_assignment`, `active`, or `terminal`; coarse `status` is
+`starting`, `running`, `completed`, or `unavailable`; and `cancel_requested` is
+separate intent. The UI uses `phase`, not `status` alone, to decide whether to
+retry the same `start_message_id`, dispatch/cancel an explicit `run_id`, or
+start a new run. It does not require, render, or define the later
+`Idle`/`Running`/`Retrying`/`Failed` retry machine, retry budget, attempt count,
+or final execution failure semantics. A later change may extend the status
+badge without changing the canonical conversation/Requirement read flow.
 
 ## Scope exclusions
 
@@ -70,11 +93,11 @@ advanced execution controls, or new Requirement business transitions.
 - Upstream: archived conversation/readiness/concurrency contracts and current
   Requirement/conversation HTTP APIs.
 - Required backend: `introduce-agent-requirement-clarification` provides
-  persisted agent messages, explicit clarification mutations, readiness read
-  model, coarse activity, and latest-run status.
-- `introduce-requirement-board` provides the shared authenticated `GET /events`
-  infrastructure and `requirement.changed`; this detail UI consumes it but does
-  not depend on Board rendering code.
+  persisted agent messages, explicit run-scoped clarification mutations,
+  readiness read model, coarse activity, and latest-run status.
+- `introduce-requirement-board` owns the shared authenticated `GET /events`
+  infrastructure, `requirement.changed`, and the base read-only
+  `/requirements/[id]` detail shell; this change extends that shell.
 - Clarification extends Board's `/events` categories with conversation,
   readiness, activity, and session hints.
 - `introduce-runtime-retry-and-failure-state` is a later UI extension, not an
@@ -84,12 +107,13 @@ Dependency graph:
 
 ```text
 introduce-requirement-board
+  ├─ board/list/create/minimal read-only detail
   └─ base GET /events + requirement.changed
 
 introduce-local-repository-inspection
   └─> introduce-agent-requirement-clarification
-       └─ extends shared /events categories
 
 introduce-requirement-board + introduce-agent-requirement-clarification
   └─> introduce-requirement-conversation-ui
+       extends the existing detail shell
 ```
