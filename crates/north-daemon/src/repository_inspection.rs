@@ -979,7 +979,15 @@ impl RepositoryInspector {
         authorization: &RunAuthorization,
         cancellation: &InspectionCancellation,
     ) -> Result<PreparedWorkspace, InspectionError> {
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled before repository authorization",
+        )?;
         validate_repository_selection(request, authorization)?;
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled after repository authorization",
+        )?;
         self.prepare_unchecked(request, cancellation)
     }
 
@@ -1082,7 +1090,15 @@ impl RepositoryInspector {
     where
         F: FnOnce(&Path, &InspectionCancellation) -> Result<(), String>,
     {
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled before repository authorization",
+        )?;
         validate_repository_selection(request, authorization)?;
+        ensure_not_cancelled(
+            cancellation,
+            "inspection cancelled after repository authorization",
+        )?;
         let workspace = self.prepare_unchecked(request, cancellation)?;
         self.inspect_prepared_with_cancellation(
             workspace,
@@ -1142,8 +1158,14 @@ impl RepositoryInspector {
             validate_cache_path(&self.cache_root, self.cache_root_identity, &cache)
                 .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
             ensure_not_cancelled(cancellation, "inspection cancelled before cache validation")?;
-            sanitize_local_git_config(&cache, &self.cache_root, self.cache_root_identity, None)
-                .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+            sanitize_local_git_config(
+                &cache,
+                &self.cache_root,
+                self.cache_root_identity,
+                None,
+                InspectionPhase::Cache,
+                cancellation,
+            )?;
             let remote = git_output_for_phase(
                 &cache,
                 &self.cache_root,
@@ -1417,8 +1439,14 @@ impl RepositoryInspector {
         // Canonical source.git is never disposable cleanup; failed post-install
         // validation leaves it for the next identity-checked recovery attempt.
         ensure_not_cancelled(cancellation, "inspection cancelled before cache completion")?;
-        sanitize_local_git_config(&cache, &self.cache_root, self.cache_root_identity, None)
-            .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
+        sanitize_local_git_config(
+            &cache,
+            &self.cache_root,
+            self.cache_root_identity,
+            None,
+            InspectionPhase::Cache,
+            cancellation,
+        )?;
         ensure_not_cancelled(cancellation, "inspection cancelled after cache preparation")?;
         Ok(cache)
     }
@@ -2186,8 +2214,14 @@ fn create_checkout(
         .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
     restrict_root_permissions(workspace)
         .map_err(|error| InspectionError::new(InspectionPhase::Workspace, error.to_string()))?;
-    sanitize_local_git_config(workspace, workspace_root, workspace_root_identity, None)
-        .map_err(|reason| InspectionError::new(InspectionPhase::Workspace, reason))?;
+    sanitize_local_git_config(
+        workspace,
+        workspace_root,
+        workspace_root_identity,
+        None,
+        InspectionPhase::Workspace,
+        cancellation,
+    )?;
     ensure_not_cancelled(
         cancellation,
         "inspection cancelled after checkout sanitization",
@@ -2420,63 +2454,115 @@ fn sanitize_local_git_config(
     root: &Path,
     expected_root_identity: FsIdentity,
     workspace_identity: Option<&WorkspaceIdentity>,
-) -> Result<(), String> {
+    phase: InspectionPhase,
+    cancellation: &InspectionCancellation,
+) -> Result<(), InspectionError> {
+    ensure_not_cancelled(
+        cancellation,
+        "inspection cancelled before local Git config inspection",
+    )?;
     for pattern in LOCAL_GIT_CONFIG_BLOCKLIST {
         let mut query = Command::new("git");
         sanitize_git_path_environment(&mut query);
         remove_git_config_environment(&mut query);
-        validate_git_spawn_scope(repository, root, expected_root_identity, workspace_identity)?;
-        let output = query
-            .current_dir(repository)
-            .args([
-                "config",
-                "--local",
-                "--no-includes",
-                "--get-regexp",
-                pattern,
-            ])
-            .output()
-            .map_err(|error| format!("inspect local Git config: {error}"))?;
-        if !output.status.success() {
-            if matches!(output.status.code(), Some(1 | 5)) {
+        validate_git_spawn_scope(repository, root, expected_root_identity, workspace_identity)
+            .map_err(|reason| InspectionError::new(phase, reason))?;
+        query.current_dir(repository).args([
+            "config",
+            "--local",
+            "--no-includes",
+            "--get-regexp",
+            pattern,
+        ]);
+        let output = match run_git_child(
+            query,
+            format!("config --local --get-regexp {pattern}"),
+            Some(cancellation),
+            Some(MAX_GIT_COMMAND_OUTPUT_BYTES),
+            false,
+        ) {
+            Ok(output) => output,
+            Err(GitCommandError::Cancelled) => {
+                return Err(InspectionError::new(
+                    InspectionPhase::Cancellation,
+                    "inspection cancelled during local Git config inspection",
+                ));
+            }
+            Err(GitCommandError::Exited { status, .. }) if matches!(status.code(), Some(1 | 5)) => {
                 continue;
             }
-            return Err(format!(
-                "inspect local Git config failed with {}",
-                output.status
-            ));
-        }
-        let keys = String::from_utf8_lossy(&output.stdout)
+            Err(error) => {
+                return Err(InspectionError::new(
+                    phase,
+                    format!("inspect local Git config: {error}"),
+                ));
+            }
+        };
+        let keys = String::from_utf8_lossy(&output.bytes)
             .lines()
             .filter_map(|line| line.split_once(char::is_whitespace))
             .map(|(key, _)| key.to_owned())
             .collect::<HashSet<_>>();
         for key in keys {
+            ensure_not_cancelled(
+                cancellation,
+                "inspection cancelled before local Git config cleanup",
+            )?;
             let mut unset = Command::new("git");
             sanitize_git_path_environment(&mut unset);
             remove_git_config_environment(&mut unset);
-            validate_git_spawn_scope(repository, root, expected_root_identity, workspace_identity)?;
-            let output = unset
-                .current_dir(repository)
-                .args(["config", "--local", "--no-includes", "--unset-all", &key])
-                .output()
-                .map_err(|error| format!("remove local Git config {key}: {error}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "remove local Git config {key} failed with {}",
-                    output.status
-                ));
+            validate_git_spawn_scope(repository, root, expected_root_identity, workspace_identity)
+                .map_err(|reason| InspectionError::new(phase, reason))?;
+            unset.current_dir(repository).args([
+                "config",
+                "--local",
+                "--no-includes",
+                "--unset-all",
+                &key,
+            ]);
+            match run_git_child(
+                unset,
+                format!("config --local --unset-all {key}"),
+                Some(cancellation),
+                Some(MAX_GIT_COMMAND_OUTPUT_BYTES),
+                false,
+            ) {
+                Ok(_) => {}
+                Err(GitCommandError::Cancelled) => {
+                    return Err(InspectionError::new(
+                        InspectionPhase::Cancellation,
+                        "inspection cancelled during local Git config cleanup",
+                    ));
+                }
+                Err(error) => {
+                    return Err(InspectionError::new(
+                        phase,
+                        format!("remove local Git config {key}: {error}"),
+                    ));
+                }
             }
         }
     }
-    Ok(())
+    ensure_not_cancelled(
+        cancellation,
+        "inspection cancelled after local Git config cleanup",
+    )
 }
 
 #[derive(Debug)]
 enum GitCommandError {
     Cancelled,
-    TimedOut { operation: String },
-    OutputExceeded { operation: String, max: usize },
+    TimedOut {
+        operation: String,
+    },
+    OutputExceeded {
+        operation: String,
+        max: usize,
+    },
+    Exited {
+        operation: String,
+        status: ExitStatus,
+    },
     Failed(String),
 }
 
@@ -2491,6 +2577,9 @@ impl fmt::Display for GitCommandError {
                 formatter,
                 "git {operation} output exceeded bounded size of {max} bytes"
             ),
+            Self::Exited { operation, status } => {
+                write!(formatter, "git {operation} failed with {status}")
+            }
             Self::Failed(reason) => formatter.write_str(reason),
         }
     }
@@ -2709,7 +2798,7 @@ fn run_git_child(
             }
         }
     };
-    let output = match reader.join() {
+    let mut output = match reader.join() {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             if wait_result.is_ok() {
@@ -2739,11 +2828,14 @@ fn run_git_child(
             max: max_output_bytes.unwrap_or_default(),
         });
     }
+    if truncated {
+        if let Some(max) = max_output_bytes {
+            output.truncate(max);
+        }
+    }
     if let Some(status) = status {
         if !status.success() {
-            return Err(GitCommandError::Failed(format!(
-                "git {operation} failed with {status}"
-            )));
+            return Err(GitCommandError::Exited { operation, status });
         }
     }
     Ok(BoundedGitOutput {

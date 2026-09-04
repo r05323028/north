@@ -416,6 +416,7 @@ impl PiClarificationAdapter {
             .collect::<Result<Vec<_>, _>>()?;
         let authorization = RunAuthorization::new(input.session_id.clone(), sources.clone())
             .map_err(RuntimeOperationError::from)?;
+        let cancellation = InspectionCancellation::from_shared_flag(control.cancellation_flag());
         let mut reviewed = Vec::with_capacity(start.repositories.len());
         let mut evidence = Vec::with_capacity(start.repositories.len());
         let mut total_evidence_bytes = 0usize;
@@ -423,7 +424,7 @@ impl PiClarificationAdapter {
         for source in sources {
             check_cancellation(control)?;
             let (review, bundle) =
-                self.inspect_repository(input, source, &authorization, control)?;
+                self.inspect_repository(input, source, &authorization, control, &cancellation)?;
             let (bundle_bytes, bundle_files) = evidence_size(&bundle);
             total_evidence_bytes = total_evidence_bytes.saturating_add(bundle_bytes);
             total_evidence_files = total_evidence_files.saturating_add(bundle_files);
@@ -500,13 +501,13 @@ impl PiClarificationAdapter {
         source: RepositorySource,
         authorization: &RunAuthorization,
         control: &RuntimeControl,
+        cancellation: &InspectionCancellation,
     ) -> Result<(RepositoryReview, RepositoryEvidence), RuntimeOperationError> {
         check_cancellation(control)?;
         let request = InspectionRequest::new(&input.session_id, &input.operation_id, source);
-        let cancellation = InspectionCancellation::from_shared_flag(control.cancellation_flag());
         let workspace = self
             .inspector
-            .prepare_authorized_with_cancellation(&request, authorization, &cancellation)
+            .prepare_authorized_with_cancellation(&request, authorization, cancellation)
             .map_err(|error| classify_inspection_error(control, error))?;
         if control.is_cancellation_requested() {
             cancellation.cancel();
@@ -516,7 +517,7 @@ impl PiClarificationAdapter {
             .inspector
             .inspect_prepared_with_cancellation(
                 workspace,
-                &cancellation,
+                cancellation,
                 |workspace, inspection_cancellation| {
                     self.preparation_checkpoint(workspace.repository_id(), workspace.path());
                     if control.is_cancellation_requested() {
@@ -2250,6 +2251,7 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
             &cancellation,
         )?;
         assert!(listing.truncated, "fixture must exceed listing bound");
+        assert!(listing.bytes.len() <= MAX_EVIDENCE_LIST_BYTES);
         let binary = workspace.read_git_bounded_with_cancellation(
             &authorization,
             &[
