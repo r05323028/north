@@ -35,7 +35,9 @@ use std::{
 
 const MAX_PI_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_SESSION_CONTEXT_BYTES: usize = 128 * 1024;
-const MAX_EVIDENCE_LIST_BYTES: usize = 64 * 1024;
+const MAX_EVIDENCE_CANDIDATES: usize = 256;
+const MAX_REASONABLE_PATH_BYTES: usize = 4096;
+const MAX_EVIDENCE_LIST_BYTES: usize = MAX_EVIDENCE_CANDIDATES * (MAX_REASONABLE_PATH_BYTES + 1);
 const MAX_EVIDENCE_BYTES: usize = 32 * 1024;
 const MAX_EVIDENCE_FILE_BYTES: usize = 8 * 1024;
 const MAX_EVIDENCE_FILES: usize = 32;
@@ -250,6 +252,32 @@ struct SourceFileEvidence {
     content: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EvidenceBudget {
+    max_candidates: usize,
+    max_files: usize,
+    max_bytes: usize,
+}
+
+impl EvidenceBudget {
+    #[cfg(test)]
+    fn maximum() -> Self {
+        Self {
+            max_candidates: MAX_EVIDENCE_CANDIDATES,
+            max_files: MAX_EVIDENCE_FILES,
+            max_bytes: MAX_EVIDENCE_BYTES,
+        }
+    }
+
+    fn bounded(self) -> Self {
+        Self {
+            max_candidates: self.max_candidates.min(MAX_EVIDENCE_CANDIDATES),
+            max_files: self.max_files.min(MAX_EVIDENCE_FILES),
+            max_bytes: self.max_bytes.min(MAX_EVIDENCE_BYTES),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct PiAssessment {
     #[serde(default, alias = "content", alias = "answer", alias = "summary")]
@@ -419,22 +447,45 @@ impl PiClarificationAdapter {
         let cancellation = InspectionCancellation::from_shared_flag(control.cancellation_flag());
         let mut reviewed = Vec::with_capacity(start.repositories.len());
         let mut evidence = Vec::with_capacity(start.repositories.len());
-        let mut total_evidence_bytes = 0usize;
-        let mut total_evidence_files = 0usize;
+        let mut remaining_evidence_bytes = MAX_TOTAL_EVIDENCE_BYTES;
+        let mut remaining_evidence_files = MAX_TOTAL_EVIDENCE_FILES;
+        let mut remaining_repositories = sources.len();
         for source in sources {
             check_cancellation(control)?;
-            let (review, bundle) =
-                self.inspect_repository(input, source, &authorization, control, &cancellation)?;
+            let budget = allocate_repository_evidence_budget(
+                remaining_evidence_bytes,
+                remaining_evidence_files,
+                remaining_repositories,
+            )?;
+            let (review, bundle) = self.inspect_repository(
+                input,
+                source,
+                &authorization,
+                control,
+                &cancellation,
+                budget,
+            )?;
             let (bundle_bytes, bundle_files) = evidence_size(&bundle);
-            total_evidence_bytes = total_evidence_bytes.saturating_add(bundle_bytes);
-            total_evidence_files = total_evidence_files.saturating_add(bundle_files);
-            if total_evidence_bytes > MAX_TOTAL_EVIDENCE_BYTES
-                || total_evidence_files > MAX_TOTAL_EVIDENCE_FILES
-            {
+            if bundle_bytes > budget.max_bytes || bundle_files > budget.max_files {
                 return Err(RuntimeOperationError::Failed(RuntimeError::new(
-                    "clarification repository evidence exceeded run bounds",
+                    "internal clarification repository evidence budget invariant violated",
                 )));
             }
+            remaining_evidence_bytes = remaining_evidence_bytes
+                .checked_sub(bundle_bytes)
+                .ok_or_else(|| {
+                    RuntimeOperationError::Failed(RuntimeError::new(
+                        "internal clarification repository evidence byte accounting underflow",
+                    ))
+                })?;
+            remaining_evidence_files = remaining_evidence_files
+                .checked_sub(bundle_files)
+                .ok_or_else(|| {
+                    RuntimeOperationError::Failed(RuntimeError::new(
+                        "internal clarification repository evidence file accounting underflow",
+                    ))
+                })?;
+            remaining_repositories -= 1;
             reviewed.push(review);
             evidence.push(bundle);
         }
@@ -502,6 +553,7 @@ impl PiClarificationAdapter {
         authorization: &RunAuthorization,
         control: &RuntimeControl,
         cancellation: &InspectionCancellation,
+        budget: EvidenceBudget,
     ) -> Result<(RepositoryReview, RepositoryEvidence), RuntimeOperationError> {
         check_cancellation(control)?;
         let request = InspectionRequest::new(&input.session_id, &input.operation_id, source);
@@ -529,6 +581,7 @@ impl PiClarificationAdapter {
                         authorization,
                         control,
                         inspection_cancellation,
+                        budget,
                     )?;
                     if control.is_cancellation_requested() {
                         inspection_cancellation.cancel();
@@ -956,16 +1009,45 @@ fn evidence_size(evidence: &RepositoryEvidence) -> (usize, usize) {
     (bytes, evidence.files.len())
 }
 
+fn allocate_repository_evidence_budget(
+    remaining_bytes: usize,
+    remaining_files: usize,
+    remaining_repositories: usize,
+) -> Result<EvidenceBudget, RuntimeOperationError> {
+    if remaining_repositories == 0
+        || remaining_bytes < remaining_repositories
+        || remaining_files < remaining_repositories
+    {
+        return Err(RuntimeOperationError::Failed(RuntimeError::new(
+            "clarification repository evidence budget cannot cover all authorized repositories",
+        )));
+    }
+    let max_bytes = (remaining_bytes / remaining_repositories).min(MAX_EVIDENCE_BYTES);
+    let max_files = (remaining_files / remaining_repositories).min(MAX_EVIDENCE_FILES);
+    if max_bytes == 0 || max_files == 0 {
+        return Err(RuntimeOperationError::Failed(RuntimeError::new(
+            "clarification repository evidence budget cannot cover all authorized repositories",
+        )));
+    }
+    Ok(EvidenceBudget {
+        max_candidates: MAX_EVIDENCE_CANDIDATES,
+        max_files,
+        max_bytes,
+    })
+}
+
 fn extract_repository_evidence(
     workspace: &PreparedWorkspace,
     authorization: &RunAuthorization,
     control: &RuntimeControl,
     cancellation: &InspectionCancellation,
+    budget: EvidenceBudget,
 ) -> Result<RepositoryEvidence, String> {
     if control.is_cancellation_requested() {
         cancellation.cancel();
         return Err("inspection cancelled".into());
     }
+    let budget = budget.bounded();
     let listing = workspace
         .read_git_bounded_with_cancellation(
             authorization,
@@ -983,21 +1065,34 @@ fn extract_repository_evidence(
     let mut paths = listing_records
         .into_iter()
         .filter(|path| !path.is_empty())
-        .filter_map(|path| String::from_utf8(path.to_vec()).ok())
+        .map(|path| path.to_vec())
         .collect::<Vec<_>>();
     paths.sort_unstable();
     let had_paths = !paths.is_empty();
-    let mut files = Vec::new();
-    let mut evidence_bytes = 0usize;
-    for path in paths.into_iter().take(MAX_EVIDENCE_FILES) {
+    let mut files = Vec::with_capacity(budget.max_files);
+    let mut evidence_bytes = workspace.repository_id().len() + workspace.commit_sha().len();
+    for path_bytes in paths.into_iter().take(budget.max_candidates) {
+        if files.len() >= budget.max_files || evidence_bytes >= budget.max_bytes {
+            break;
+        }
         if control.is_cancellation_requested() {
             cancellation.cancel();
             return Err("inspection cancelled".into());
         }
+        let Ok(path) = String::from_utf8(path_bytes) else {
+            continue;
+        };
         if path.bytes().any(|byte| byte == 0) {
             return Err("repository file path contains NUL".into());
         }
         let object = format!("{}:{path}", workspace.commit_sha());
+        let content_limit = budget
+            .max_bytes
+            .saturating_sub(evidence_bytes)
+            .min(MAX_EVIDENCE_FILE_BYTES);
+        if content_limit == 0 {
+            break;
+        }
         let content = workspace
             .read_git_bounded_with_cancellation(
                 authorization,
@@ -1007,7 +1102,7 @@ fn extract_repository_evidence(
                     "--no-ext-diff".into(),
                     object,
                 ],
-                MAX_EVIDENCE_FILE_BYTES,
+                content_limit,
                 cancellation,
             )
             .map_err(|error| error.to_string())?;
@@ -1020,8 +1115,8 @@ fn extract_repository_evidence(
             continue;
         };
         let entry_bytes = path.len().saturating_add(content.len());
-        if evidence_bytes.saturating_add(entry_bytes) > MAX_EVIDENCE_BYTES {
-            break;
+        if evidence_bytes.saturating_add(entry_bytes) > budget.max_bytes {
+            continue;
         }
         evidence_bytes = evidence_bytes.saturating_add(entry_bytes);
         files.push(SourceFileEvidence { path, content });
@@ -1030,7 +1125,9 @@ fn extract_repository_evidence(
         return Err("repository contains no tracked source files".into());
     }
     if files.is_empty() {
-        return Err("repository source evidence exceeded bounded size".into());
+        return Err(
+            "no usable repository source evidence found within bounded candidate scan".into(),
+        );
     }
     if control.is_cancellation_requested() {
         cancellation.cancel();
@@ -1839,6 +1936,68 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         Ok((repository, sha))
     }
 
+    fn commit_fixture_files(
+        repository: &std::path::Path,
+        files: impl IntoIterator<Item = (String, Vec<u8>)>,
+        message: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        use std::{fs, process::Command as GitCommand};
+
+        for (relative_path, content) in files {
+            let path = repository.join(relative_path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(path, content)?;
+        }
+        let run = |args: &[&str]| -> Result<String, Box<dyn std::error::Error>> {
+            let output = GitCommand::new("git")
+                .current_dir(repository)
+                .args(args)
+                .output()?;
+            if !output.status.success() {
+                return Err(std::io::Error::other(format!(
+                    "git {args:?} failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ))
+                .into());
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        };
+        run(&["add", "."])?;
+        run(&["commit", "--quiet", "-m", message])?;
+        Ok(run(&["rev-parse", "HEAD"])?.trim().to_owned())
+    }
+
+    fn append_repository_context(start: &mut Command, repository_id: &str, url: &str) {
+        let Command::SessionStart(context) = start else {
+            panic!("session start command")
+        };
+        context
+            .repositories
+            .push(north_protocol::RepositoryContext {
+                repository_id: repository_id.into(),
+                name: format!("{repository_id} repository"),
+                url: url.into(),
+                description: "server-selected source".into(),
+            });
+    }
+
+    fn prompt_evidence(
+        path: &std::path::Path,
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+        let prompt = std::fs::read_to_string(path)?;
+        let json = prompt
+            .split_once('\n')
+            .map_or(prompt.as_str(), |(_, json)| json);
+        let value: serde_json::Value = serde_json::from_str(json)?;
+        value
+            .get("repository_source_evidence")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("missing repository source evidence").into())
+    }
+
     #[cfg(unix)]
     fn fake_pi(root: &std::path::Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
         use std::{fs, os::unix::fs::PermissionsExt};
@@ -2211,9 +2370,12 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
             vec![b'x'; MAX_EVIDENCE_FILE_BYTES + 1],
         )?;
         fs::create_dir_all(repository.join("zz"))?;
+        let suffix = "x".repeat(220);
         for index in 0..5_000 {
             fs::write(
-                repository.join("zz").join(format!("file-{index:04}.txt")),
+                repository
+                    .join("zz")
+                    .join(format!("file-{index:04}-{suffix}.txt")),
                 b"listing filler",
             )?;
         }
@@ -2278,8 +2440,13 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         assert!(oversized.truncated);
 
         let control = RuntimeControl::new("session-bounded", "task-bounded");
-        let result =
-            extract_repository_evidence(&workspace, &authorization, &control, &cancellation);
+        let result = extract_repository_evidence(
+            &workspace,
+            &authorization,
+            &control,
+            &cancellation,
+            EvidenceBudget::maximum(),
+        );
         inspector.dispose(workspace)?;
         let evidence = result.map_err(std::io::Error::other)?;
         assert!(evidence
@@ -2294,6 +2461,279 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
             .files
             .iter()
             .any(|file| file.path == "src/oversized.txt"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_candidate_scan_reaches_later_usable_file() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::fs;
+
+        let directory = tempfile::tempdir()?;
+        let (repository, _) = git_fixture(
+            directory.path(),
+            "candidate-scan-repository",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let mut unusable = Vec::new();
+        for index in 0..16 {
+            unusable.push((format!("000-binary-{index:02}.bin"), vec![0_u8, 1, 2, 3]));
+            unusable.push((
+                format!("001-oversized-{index:02}.txt"),
+                vec![b'x'; MAX_EVIDENCE_FILE_BYTES + 1],
+            ));
+        }
+        let sha = commit_fixture_files(&repository, unusable, "unusable prefix")?;
+        let adapter = PiClarificationAdapter::new(
+            RepositoryInspector::new(
+                directory.path().join("cache"),
+                directory.path().join("workspaces"),
+            )?,
+            directory.path().join("sessions"),
+        )?
+        .with_agent_command(fake_pi(directory.path())?);
+        let start = start_command("candidate-scan", repository.to_string_lossy().into_owned());
+        let outcome = crate::journal::RuntimeExecutor::dispatch_for_session_with_control(
+            &adapter,
+            "session-candidate-scan",
+            "operation-candidate-scan",
+            "command-candidate-scan",
+            &start,
+            RuntimeControl::new("session-candidate-scan", "command-candidate-scan"),
+        );
+        assert_eq!(outcome, crate::journal::DispatchOutcome::DispatchSucceeded);
+        let events =
+            crate::journal::RuntimeExecutor::take_events(&adapter, "session-candidate-scan");
+        let assessment = events
+            .iter()
+            .find_map(|event| match event {
+                Event::RequirementAssessed(assessment) => Some(assessment),
+                _ => None,
+            })
+            .ok_or("missing assessment")?;
+        assert_eq!(
+            assessment.repositories_reviewed,
+            vec![ReviewedRepositoryWire {
+                repository_id: "candidate-scan".into(),
+                commit_sha: sha,
+            }]
+        );
+        let prompt = fs::read_to_string(directory.path().join("pi-prompt"))?;
+        assert!(prompt.contains("src/domain.rs"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multi_repository_file_budget_is_allocated_before_inspection(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (repository_a, _) = git_fixture(
+            directory.path(),
+            "file-budget-a",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let (repository_b, _) = git_fixture(
+            directory.path(),
+            "file-budget-b",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let (repository_c, _) = git_fixture(
+            directory.path(),
+            "file-budget-c",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let fixture_files = || {
+            (0..32)
+                .map(|index| {
+                    (
+                        format!("src/evidence-{index:02}.rs"),
+                        format!("fn evidence_{index}() {{}}\n").into_bytes(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let sha_a = commit_fixture_files(&repository_a, fixture_files(), "file budget A")?;
+        let sha_b = commit_fixture_files(&repository_b, fixture_files(), "file budget B")?;
+        let sha_c = commit_fixture_files(&repository_c, fixture_files(), "file budget C")?;
+        let adapter = PiClarificationAdapter::new(
+            RepositoryInspector::new(
+                directory.path().join("cache"),
+                directory.path().join("workspaces"),
+            )?,
+            directory.path().join("sessions"),
+        )?
+        .with_agent_command(fake_pi(directory.path())?);
+        let mut start = start_command("file-budget-a", repository_a.to_string_lossy().into_owned());
+        append_repository_context(&mut start, "file-budget-b", &repository_b.to_string_lossy());
+        append_repository_context(&mut start, "file-budget-c", &repository_c.to_string_lossy());
+        let outcome = crate::journal::RuntimeExecutor::dispatch_for_session_with_control(
+            &adapter,
+            "session-file-budget",
+            "operation-file-budget",
+            "command-file-budget",
+            &start,
+            RuntimeControl::new("session-file-budget", "command-file-budget"),
+        );
+        assert_eq!(outcome, crate::journal::DispatchOutcome::DispatchSucceeded);
+        let events = crate::journal::RuntimeExecutor::take_events(&adapter, "session-file-budget");
+        let assessment = events
+            .iter()
+            .find_map(|event| match event {
+                Event::RequirementAssessed(assessment) => Some(assessment),
+                _ => None,
+            })
+            .ok_or("missing assessment")?;
+        assert_eq!(
+            assessment.repositories_reviewed,
+            vec![
+                ReviewedRepositoryWire {
+                    repository_id: "file-budget-a".into(),
+                    commit_sha: sha_a,
+                },
+                ReviewedRepositoryWire {
+                    repository_id: "file-budget-b".into(),
+                    commit_sha: sha_b,
+                },
+                ReviewedRepositoryWire {
+                    repository_id: "file-budget-c".into(),
+                    commit_sha: sha_c,
+                },
+            ]
+        );
+        let evidence = prompt_evidence(&directory.path().join("pi-prompt"))?;
+        assert_eq!(evidence.len(), 3);
+        let total_files = evidence
+            .iter()
+            .map(|bundle| {
+                bundle
+                    .get("files")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or_default()
+            })
+            .sum::<usize>();
+        assert_eq!(total_files, MAX_TOTAL_EVIDENCE_FILES);
+        assert!(evidence.iter().all(|bundle| {
+            bundle
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|files| !files.is_empty())
+        }));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multi_repository_byte_budget_is_allocated_before_inspection(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let (repository_a, _) = git_fixture(
+            directory.path(),
+            "byte-budget-a",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let (repository_b, _) = git_fixture(
+            directory.path(),
+            "byte-budget-b",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let (repository_c, _) = git_fixture(
+            directory.path(),
+            "byte-budget-c",
+            "NORTH_AUTHORIZED_REPOSITORY_MARKER",
+        )?;
+        let fixture_files = || {
+            (0..4)
+                .map(|index| (format!("src/large-{index:02}.txt"), vec![b'x'; 7_000]))
+                .collect::<Vec<_>>()
+        };
+        let sha_a = commit_fixture_files(&repository_a, fixture_files(), "byte budget A")?;
+        let sha_b = commit_fixture_files(&repository_b, fixture_files(), "byte budget B")?;
+        let sha_c = commit_fixture_files(&repository_c, fixture_files(), "byte budget C")?;
+        let adapter = PiClarificationAdapter::new(
+            RepositoryInspector::new(
+                directory.path().join("cache"),
+                directory.path().join("workspaces"),
+            )?,
+            directory.path().join("sessions"),
+        )?
+        .with_agent_command(fake_pi(directory.path())?);
+        let mut start = start_command("byte-budget-a", repository_a.to_string_lossy().into_owned());
+        append_repository_context(&mut start, "byte-budget-b", &repository_b.to_string_lossy());
+        append_repository_context(&mut start, "byte-budget-c", &repository_c.to_string_lossy());
+        let outcome = crate::journal::RuntimeExecutor::dispatch_for_session_with_control(
+            &adapter,
+            "session-byte-budget",
+            "operation-byte-budget",
+            "command-byte-budget",
+            &start,
+            RuntimeControl::new("session-byte-budget", "command-byte-budget"),
+        );
+        assert_eq!(outcome, crate::journal::DispatchOutcome::DispatchSucceeded);
+        let events = crate::journal::RuntimeExecutor::take_events(&adapter, "session-byte-budget");
+        let assessment = events
+            .iter()
+            .find_map(|event| match event {
+                Event::RequirementAssessed(assessment) => Some(assessment),
+                _ => None,
+            })
+            .ok_or("missing assessment")?;
+        assert_eq!(
+            assessment.repositories_reviewed,
+            vec![
+                ReviewedRepositoryWire {
+                    repository_id: "byte-budget-a".into(),
+                    commit_sha: sha_a,
+                },
+                ReviewedRepositoryWire {
+                    repository_id: "byte-budget-b".into(),
+                    commit_sha: sha_b,
+                },
+                ReviewedRepositoryWire {
+                    repository_id: "byte-budget-c".into(),
+                    commit_sha: sha_c,
+                },
+            ]
+        );
+        let evidence = prompt_evidence(&directory.path().join("pi-prompt"))?;
+        assert_eq!(evidence.len(), 3);
+        let mut total_bytes = 0usize;
+        for bundle in &evidence {
+            let repository_id = bundle
+                .get("repository_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("missing evidence repository id")?;
+            let commit_sha = bundle
+                .get("commit_sha")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("missing evidence commit sha")?;
+            let files = bundle
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .ok_or("missing evidence files")?;
+            assert!(!files.is_empty());
+            let bytes = repository_id.len()
+                + commit_sha.len()
+                + files
+                    .iter()
+                    .map(|file| {
+                        file.get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::len)
+                            .unwrap_or_default()
+                            + file
+                                .get("content")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::len)
+                                .unwrap_or_default()
+                    })
+                    .sum::<usize>();
+            assert!(bytes <= MAX_EVIDENCE_BYTES);
+            total_bytes += bytes;
+        }
+        assert!(total_bytes <= MAX_TOTAL_EVIDENCE_BYTES);
         Ok(())
     }
 }
