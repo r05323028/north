@@ -20,6 +20,27 @@ checks, never replacements.
 Branch protection should require exactly one check: **`gate`** — internal job
 structure may evolve without touching rulesets.
 
+## PR-Agent advisory review
+
+North includes an advisory PR-Agent workflow at
+`.github/workflows/pr-agent.yml`. It reviews pull requests on
+`opened`, `synchronize`, `reopened`, `ready_for_review`, and
+`review_requested` events, but it is not part of `gate` and must not be added
+as a required branch-protection check.
+
+Repository administrators must add an `OPENCODE_API_KEY` Actions secret under
+**Settings → Secrets and variables → Actions**. The workflow maps that secret
+to PR-Agent's `OPENAI_KEY` input and routes
+`openai/muse-spark-1.3-contributor` through OpenCode Go's OpenAI-compatible
+endpoint. The workflow uses `pull_request_target` so fork pull requests can
+use that secret. It does not checkout or execute pull-request code, grants
+only `contents: read`, `issues: write`, and `pull-requests: write`, and pins
+PR-Agent to release `v0.44.0` by commit SHA. Review `the-pr-agent/pr-agent`
+before changing that pin.
+
+PR-Agent review is advisory. To roll it back, disable/remove the workflow and
+revoke `OPENCODE_API_KEY`; existing CI and `gate` remain unchanged.
+
 ## Required repository settings (owner applies)
 
 GitHub branch protection / ruleset for `main`:
