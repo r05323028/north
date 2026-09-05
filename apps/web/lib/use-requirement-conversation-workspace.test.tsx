@@ -112,10 +112,12 @@ function response(value: unknown, status = 200) {
 
 function deferred<T>() {
   let resolve: (value: T | PromiseLike<T>) => void = () => undefined;
-  const promise = new Promise<T>((complete) => {
+  let reject: (reason?: unknown) => void = () => undefined;
+  const promise = new Promise<T>((complete, fail) => {
     resolve = complete;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 let currentRequirement = { ...requirement };
@@ -170,9 +172,10 @@ function Probe({ beforeRefresh }: { beforeRefresh?: (count: number) => void }) {
           refreshing: state.refreshing,
           loadingConversationMore: state.loadingConversationMore,
           loadingActivityMore: state.loadingActivityMore,
-          conversation:
-            state.conversation?.messages.map(({ id }) => id) ?? [],
+          conversation: state.conversation?.messages.map(({ id }) => id) ?? [],
           activities: state.activities.map(({ id }) => id),
+          initialError: state.initialError,
+          refreshError: state.refreshError,
           resourceErrors: state.resourceErrors,
         })}
       </output>
@@ -202,6 +205,8 @@ type ProbeState = {
   loadingActivityMore: boolean;
   conversation: string[];
   activities: number[];
+  initialError: string | null;
+  refreshError: string | null;
   resourceErrors: Record<string, string>;
 };
 
@@ -454,13 +459,9 @@ describe("useRequirementConversationWorkspace", () => {
       ) {
         const offset = Number(url.searchParams.get("offset") ?? 0);
         if (offset === 0)
-          return Promise.resolve(
-            response(conversationPage(["N", "A"], 4)),
-          );
+          return Promise.resolve(response(conversationPage(["N", "A"], 4)));
         if (offset === 4)
-          return Promise.resolve(
-            response(conversationPage(["B", "C"], null)),
-          );
+          return Promise.resolve(response(conversationPage(["B", "C"], null)));
       }
       if (
         loadingMore &&
@@ -513,9 +514,7 @@ describe("useRequirementConversationWorkspace", () => {
       refreshing: false,
       loadingConversationMore: true,
     });
-    conversationMore.resolve(
-      response(conversationPage(["B", "C"], null)),
-    );
+    conversationMore.resolve(response(conversationPage(["B", "C"], null)));
     await act(async () => {
       await settle();
     });
@@ -554,13 +553,9 @@ describe("useRequirementConversationWorkspace", () => {
       ) {
         const offset = Number(url.searchParams.get("offset") ?? 0);
         if (offset === 0)
-          return Promise.resolve(
-            response(conversationPage(["N", "A"], 4)),
-          );
+          return Promise.resolve(response(conversationPage(["N", "A"], 4)));
         if (offset === 4)
-          return Promise.resolve(
-            response(conversationPage(["B", "C"], null)),
-          );
+          return Promise.resolve(response(conversationPage(["B", "C"], null)));
       }
       if (
         loadingMore &&
@@ -604,19 +599,17 @@ describe("useRequirementConversationWorkspace", () => {
     });
     expect(probeState(container)).toMatchObject({
       refreshing: true,
-      loadingConversationMore: true,
+      loadingConversationMore: false,
     });
 
-    conversationMore.resolve(
-      response(conversationPage(["B", "C"], null)),
-    );
+    conversationMore.resolve(response(conversationPage(["B", "C"], null)));
     await act(async () => {
       await settle();
     });
     expect(probeState(container)).toMatchObject({
       refreshing: true,
       loadingConversationMore: false,
-      conversation: ["A", "B", "C"],
+      conversation: ["A", "B"],
     });
     bundleRequirement.resolve(
       response({ ...currentRequirement, title: "Canonical after focus" }),
@@ -711,7 +704,7 @@ describe("useRequirementConversationWorkspace", () => {
     });
     expect(probeState(container)).toMatchObject({
       refreshing: true,
-      loadingActivityMore: true,
+      loadingActivityMore: false,
     });
 
     activityMore.resolve(
@@ -723,7 +716,7 @@ describe("useRequirementConversationWorkspace", () => {
     expect(probeState(container)).toMatchObject({
       refreshing: true,
       loadingActivityMore: false,
-      activities: [1, 2],
+      activities: [1],
     });
     bundleRequirement.resolve(
       response({ ...currentRequirement, title: "Canonical activity repair" }),
@@ -827,6 +820,349 @@ describe("useRequirementConversationWorkspace", () => {
     );
     expect(state.resourceErrors.readiness).toBeUndefined();
     expect(state.conversation).toEqual(["A", "B", "C"]);
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it.each(["after", "before"] as const)(
+    "ignores same-offset conversation pagination when stale page resolves %s repair",
+    async (timing) => {
+      setupPages();
+      const staleMore = deferred<ReturnType<typeof response>>();
+      const repairRequirement = deferred<ReturnType<typeof response>>();
+      let repairStarted = false;
+      let staleMoreStarted = false;
+      fetchMock.mockImplementation((path: string) => {
+        const url = new URL(path, "http://north.test");
+        if (
+          repairStarted &&
+          url.pathname === "/requirements/requirement-1" &&
+          url.search === ""
+        ) {
+          return repairRequirement.promise;
+        }
+        if (
+          repairStarted &&
+          url.pathname === "/requirements/requirement-1/conversation"
+        ) {
+          const offset = Number(url.searchParams.get("offset") ?? 0);
+          if (offset === 0)
+            return Promise.resolve(response(conversationPage(["X", "A"], 2)));
+          if (offset === 2)
+            return Promise.resolve(
+              response(conversationPage(["B", "C"], null)),
+            );
+        }
+        if (
+          !repairStarted &&
+          url.pathname === "/requirements/requirement-1/conversation" &&
+          Number(url.searchParams.get("offset") ?? 0) === 2
+        ) {
+          staleMoreStarted = true;
+          return staleMore.promise;
+        }
+        return Promise.resolve(response(valueFor(path)));
+      });
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(<Probe />);
+        await settle();
+      });
+      const refresh = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "refresh",
+      );
+      const loadConversation = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "load conversation",
+      );
+      if (!refresh || !loadConversation)
+        throw new Error("conversation controls missing");
+
+      await act(async () => {
+        loadConversation.click();
+        await Promise.resolve();
+      });
+      expect(staleMoreStarted).toBe(true);
+      repairStarted = true;
+      await act(async () => {
+        refresh.click();
+        await Promise.resolve();
+      });
+      expect(probeState(container)).toMatchObject({
+        refreshing: true,
+        loadingConversationMore: false,
+      });
+
+      if (timing === "before") {
+        staleMore.reject(new Error("stale conversation pagination failed"));
+        await act(async () => {
+          await settle();
+        });
+        expect(probeState(container)).toMatchObject({
+          refreshing: true,
+          loadingConversationMore: false,
+          conversation: ["A", "B"],
+        });
+        expect(
+          probeState(container).resourceErrors.conversation,
+        ).toBeUndefined();
+      }
+
+      repairRequirement.resolve(
+        response({ ...currentRequirement, title: `Canonical ${timing}` }),
+      );
+      await act(async () => {
+        await settle();
+      });
+      expect(probeState(container)).toMatchObject({
+        refreshing: false,
+        loadingConversationMore: false,
+        conversation: ["X", "A", "B", "C"],
+      });
+
+      if (timing === "after") {
+        staleMore.resolve(response(conversationPage(["D", "E"], null)));
+        await act(async () => {
+          await settle();
+        });
+      }
+      const state = probeState(container);
+      expect(state.conversation).toEqual(["X", "A", "B", "C"]);
+      expect(new Set(state.conversation).size).toBe(state.conversation.length);
+      expect(container.textContent).toContain(`Canonical ${timing}`);
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  );
+
+  it.each(["after", "before"] as const)(
+    "ignores same-offset activity pagination when stale page resolves %s repair",
+    async (timing) => {
+      setupPages();
+      activityPages = new Map([
+        [0, { activities: [activity(1)], next_offset: 2 }],
+        [2, { activities: [activity(2)], next_offset: null }],
+      ]);
+      const staleMore = deferred<ReturnType<typeof response>>();
+      const repairRequirement = deferred<ReturnType<typeof response>>();
+      let repairStarted = false;
+      let staleMoreStarted = false;
+      fetchMock.mockImplementation((path: string) => {
+        const url = new URL(path, "http://north.test");
+        if (
+          repairStarted &&
+          url.pathname === "/requirements/requirement-1" &&
+          url.search === ""
+        ) {
+          return repairRequirement.promise;
+        }
+        if (
+          repairStarted &&
+          url.pathname === "/requirements/requirement-1/activity"
+        ) {
+          const offset = Number(url.searchParams.get("offset") ?? 0);
+          if (offset === 0)
+            return Promise.resolve(
+              response({ activities: [], next_offset: 2 }),
+            );
+          if (offset === 2)
+            return Promise.resolve(
+              response({
+                activities: [activity(10), activity(11)],
+                next_offset: null,
+              }),
+            );
+        }
+        if (
+          !repairStarted &&
+          url.pathname === "/requirements/requirement-1/activity" &&
+          Number(url.searchParams.get("offset") ?? 0) === 2
+        ) {
+          staleMoreStarted = true;
+          return staleMore.promise;
+        }
+        return Promise.resolve(response(valueFor(path)));
+      });
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      await act(async () => {
+        root.render(<Probe />);
+        await settle();
+      });
+      const refresh = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "refresh",
+      );
+      const loadActivity = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "load activity",
+      );
+      if (!refresh || !loadActivity)
+        throw new Error("activity controls missing");
+
+      await act(async () => {
+        loadActivity.click();
+        await Promise.resolve();
+      });
+      expect(staleMoreStarted).toBe(true);
+      repairStarted = true;
+      await act(async () => {
+        refresh.click();
+        await Promise.resolve();
+      });
+      expect(probeState(container)).toMatchObject({
+        refreshing: true,
+        loadingActivityMore: false,
+      });
+
+      if (timing === "before") {
+        staleMore.reject(new Error("stale activity pagination failed"));
+        await act(async () => {
+          await settle();
+        });
+        expect(probeState(container)).toMatchObject({
+          refreshing: true,
+          loadingActivityMore: false,
+          activities: [1],
+        });
+        expect(probeState(container).resourceErrors.activity).toBeUndefined();
+      }
+
+      repairRequirement.resolve(
+        response({
+          ...currentRequirement,
+          title: `Canonical activity ${timing}`,
+        }),
+      );
+      await act(async () => {
+        await settle();
+      });
+      expect(probeState(container)).toMatchObject({
+        refreshing: false,
+        loadingActivityMore: false,
+        activities: [10, 11],
+      });
+
+      if (timing === "after") {
+        staleMore.resolve(
+          response({ activities: [activity(2)], next_offset: null }),
+        );
+        await act(async () => {
+          await settle();
+        });
+      }
+      const state = probeState(container);
+      expect(state.activities).toEqual([10, 11]);
+      expect(new Set(state.activities).size).toBe(state.activities.length);
+      expect(container.textContent).toContain(`Canonical activity ${timing}`);
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  );
+
+  it("clears initial error after a fully successful explicit retry", async () => {
+    setupPages();
+    let recovered = false;
+    fetchMock.mockImplementation((path: string) => {
+      const url = new URL(path, "http://north.test");
+      if (
+        !recovered &&
+        url.pathname === "/requirements/requirement-1/conversation"
+      ) {
+        return Promise.reject(new Error("initial conversation offline"));
+      }
+      return Promise.resolve(response(valueFor(path)));
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <Probe
+          beforeRefresh={() => {
+            recovered = true;
+          }}
+        />,
+      );
+      await settle();
+    });
+    let state = probeState(container);
+    expect(state.initialError).toContain("initial conversation offline");
+    expect(state.refreshError).toBeNull();
+    expect(state.resourceErrors.conversation).toContain(
+      "initial conversation offline",
+    );
+
+    const refresh = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "refresh",
+    );
+    if (!refresh) throw new Error("refresh control missing");
+    await act(async () => {
+      refresh.click();
+      await settle();
+    });
+    state = probeState(container);
+    expect(state.initialError).toBeNull();
+    expect(state.refreshError).toBeNull();
+    expect(state.resourceErrors).toEqual({});
+    expect(state.conversation).toEqual(["A", "B"]);
+    expect(container.textContent).not.toContain("initial conversation offline");
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("retains initial error when explicit retry remains partially failed", async () => {
+    setupPages();
+    let phase: "initial" | "retry" = "initial";
+    fetchMock.mockImplementation((path: string) => {
+      const url = new URL(path, "http://north.test");
+      if (url.pathname === "/requirements/requirement-1/conversation") {
+        return Promise.reject(new Error(`${phase} conversation offline`));
+      }
+      return Promise.resolve(response(valueFor(path)));
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <Probe
+          beforeRefresh={() => {
+            phase = "retry";
+          }}
+        />,
+      );
+      await settle();
+    });
+    const initialState = probeState(container);
+    expect(initialState.initialError).toContain("initial conversation offline");
+
+    const refresh = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "refresh",
+    );
+    if (!refresh) throw new Error("refresh control missing");
+    await act(async () => {
+      refresh.click();
+      await settle();
+    });
+    const retryState = probeState(container);
+    expect(retryState.initialError).toContain("initial conversation offline");
+    expect(retryState.refreshError).toContain("retry conversation offline");
+    expect(retryState.resourceErrors.conversation).toContain(
+      "retry conversation offline",
+    );
     await act(async () => {
       root.unmount();
     });

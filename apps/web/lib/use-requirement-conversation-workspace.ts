@@ -226,6 +226,8 @@ export function useRequirementConversationWorkspace(requirementId: string) {
     async (initial: boolean): Promise<void> => {
       const lifecycle = lifecycleGeneration.current;
       const generation = ++bundleGeneration.current;
+      conversationMoreGeneration.current += 1;
+      activityMoreGeneration.current += 1;
       const previous = stateRef.current;
       const previousConversation = initial ? null : previous.conversation;
       const previousActivity = initial ? null : previous.activityHistory;
@@ -234,6 +236,8 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         ...current,
         loading: initial,
         refreshing: !initial,
+        loadingConversationMore: false,
+        loadingActivityMore: false,
         initialError: initial ? null : current.initialError,
         refreshError: initial ? current.refreshError : null,
         resourceErrors: initial ? {} : current.resourceErrors,
@@ -299,14 +303,17 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         recordFailure(5, "current_user", "Current user");
 
         const failures = Object.values(resourceErrors);
+        const initialError =
+          failures.length === 0
+            ? null
+            : initial
+              ? failures.join(" · ")
+              : current.initialError;
         return {
           ...next,
           loading: false,
           refreshing: false,
-          initialError:
-            initial && failures.length > 0
-              ? failures.join(" · ")
-              : current.initialError,
+          initialError,
           refreshError:
             !initial && failures.length > 0 ? failures.join(" · ") : null,
           resourceErrors,
