@@ -57,11 +57,11 @@ readiness, or Requirement entities.
 - **WHEN** the same message is returned by a paged response, a duplicate hint, or two overlapping canonical refetches
 - **THEN** it appears once, at its server-defined position, with its server-provided author, kind, body, and timestamp
 
-#### Scenario: Offset boundary shifts omit neither history nor identity
+#### Scenario: Previously loaded contiguous range repairs without omission
 
-- **GIVEN** the workspace has loaded multiple pages through boundary B and has cached every returned stable message ID
-- **WHEN** new messages shift an offset page boundary before reconnect, focus repair, or a relevant SSE hint
-- **THEN** repair restarts at offset 0, follows the canonical `next_offset` chain through the shifted boundary until prior IDs are re-observed, and reassembles every previously loaded message plus newly returned messages exactly once, with no omission caused by trusting an old offset slice
+- **GIVEN** the client successfully loaded contiguous history from offset 0 through exclusive `prior_loaded_end_offset=4` over pages at offsets 0 and 2, with stable IDs A, B, C, and D
+- **WHEN** a new message shifts an offset page position before reconnect, focus repair, or a relevant SSE hint
+- **THEN** repair discards cached slices, restarts at offset 0, follows server-returned `next_offset` until the rebuilt range reaches at least 4 and IDs A-D are re-observed (fetching beyond numeric offset 4 if needed), then reassembles A-D and the new message exactly once with no omission from trusting an old offset slice
 
 #### Scenario: Expanded history repairs after reconnect or focus
 
@@ -109,19 +109,7 @@ HTTP. A displayed connection state SHALL reflect actual EventSource state; it
 shall not claim connected while disconnected. HTTP refetch remains the
 correctness mechanism even while SSE is connected.
 
-Because the existing conversation endpoint is offset-based and returns
-`next_offset`, a repair after pages through boundary B have been loaded SHALL
-discard cached page slices and start at `offset=0`. It SHALL follow contiguous
-`next_offset` pages using the bounded API limit, rather than independently
-trusting or refetching previously cached offsets. Repair SHALL continue at least
-through B and until every stable message ID present in the cached pages has been
-re-observed; if shifted boundaries require more pages, it SHALL follow the
-returned chain until those IDs are found or the server reports its end. If the
-previously loaded range reached the server's end, repair SHALL follow newly
-returned `next_offset` pages through the current end so expanded history is not
-omitted. The final union SHALL deduplicate by stable message ID and sort by the
-server's `(created_at, id)` order. This is a client repair contract; it does not
-introduce cursor pagination or a new backend endpoint.
+Because the existing conversation endpoint is offset-based and returns `next_offset`, define `prior_loaded_end_offset` as the exclusive numeric offset immediately after the last message in the largest contiguous history range the client successfully loaded from offset 0. It is not a page index or arbitrary cached-page marker. Before repair, the client SHALL retain that range's stable message IDs and whether its final page returned `next_offset: null`. A canonical repair SHALL discard cached page slices, restart at `offset=0`, and let each server-returned `next_offset` control the next bounded-page request. It SHALL continue until the rebuilt range reaches at least `prior_loaded_end_offset` and every stable ID from the prior range has been re-observed. If shifted page positions require it, repair SHALL follow `next_offset` beyond the old numeric end until those IDs appear or the server reports its end. If the prior range reached the server's end, repair SHALL follow newly returned `next_offset` pages through the current end so messages added after the prior load are not omitted. The client MUST NOT independently reissue stale historical offsets or trust their cached page slices. The final union SHALL deduplicate by stable message ID and sort by authoritative `(created_at, id)` order. Each repair generation owns its result, so an older repair cannot overwrite a newer completed repair. This is a client repair contract; it does not introduce cursor pagination or a new backend endpoint.
 
 #### Scenario: Initial bundle uses canonical endpoints
 

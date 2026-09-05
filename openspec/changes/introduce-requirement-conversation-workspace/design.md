@@ -146,18 +146,7 @@ canonical bundle refetch follows intent mutations and all relevant SSE hints.
 
 Fetch the existing bounded conversation page shape. If `next_offset` exists,
 provide an explicit load-more action. Merge pages by message ID and render the
-server's `(created_at, id)` order. Because this API is offset-based, a repair
-that has loaded pages through boundary B SHALL discard cached page slices, start
-at `offset=0`, and follow the contiguous `next_offset` chain using the bounded
-limit. It SHALL continue at least through B and until every stable message ID
-from the cached pages has been re-observed; if a new message shifted a boundary,
-follow additional returned pages until those IDs appear or the server reports
-its end. If the loaded range had reached the prior end, follow newly returned
-`next_offset` pages through the current end so expanded history is not omitted.
-Deduplicate the refreshed union by ID, sort by `(created_at, id)`, and never
-synthesize a gap-filling message from an SSE payload. A repair generation owns
-its result, so an older page chain cannot replace a newer repair. Activity uses
-the same bounded-page approach and displays only activity text/timestamps.
+server's `(created_at, id)` order. Define `prior_loaded_end_offset` as the exclusive numeric offset immediately after the last message in the largest contiguous history range the client successfully loaded starting at offset 0. It is not a page index or arbitrary cached-page marker; for complete pages at offsets 0 and L, where L is the requested limit, it is 2L, while a short final page uses its actual offset plus message count. Before repair, retain that range's stable message IDs and whether its final page returned `next_offset: null`. A canonical repair SHALL discard cached page slices, request `offset=0`, and let each response's server-returned `next_offset` choose the next request using the bounded limit. It SHALL continue until the rebuilt range reaches at least `prior_loaded_end_offset` and every stable ID from the prior range has been re-observed. If shifted page positions require more requests, it SHALL follow `next_offset` beyond the old numeric end until those IDs appear or the server reports its end. If the prior range reached the server's end, it SHALL follow newly returned `next_offset` pages through the current end so messages added after the prior load are not omitted. The client MUST NOT independently reissue stale historical offsets or trust their cached page slices. Deduplicate the refreshed union by stable ID, sort by authoritative `(created_at, id)` order, and never synthesize a message from an SSE payload. Each repair has a generation; an older generation cannot replace a newer completed repair. Activity uses the same bounded-page approach and displays only activity text/timestamps.
 
 A relevant event is one of the five named categories whose
 `requirement_id === id`. Coalesce synchronous bursts into one bundle refetch.

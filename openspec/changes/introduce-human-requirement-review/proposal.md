@@ -33,4 +33,4 @@ and structurally incapable of approving a stale assessment.
 - Affected docs: docs/product/requirement-lifecycle.md (review ownership),
   docs/development/invariants.md (stale-approval row).
 - Dependencies on earlier changes: introduce-readiness-assessment,
-  introduce-requirement-conversation-ui.
+  introduce-requirement-conversation-workspace.
