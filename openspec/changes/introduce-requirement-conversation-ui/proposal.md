@@ -1,5 +1,7 @@
 # Introduce Requirement conversation/detail UX
 
+> **Status: Superseded.** This planning artifact is superseded by `introduce-requirement-conversation-workspace`. Do not implement this artifact or merge its contract/task set; use the workspace change as the sole canonical successor.
+
 ## Why
 
 The requester's primary workflow is a detail view that shows conversation beside
@@ -114,6 +116,6 @@ introduce-local-repository-inspection
   └─> introduce-agent-requirement-clarification
 
 introduce-requirement-board + introduce-agent-requirement-clarification
-  └─> introduce-requirement-conversation-ui
-       extends the existing detail shell
+  └─> introduce-requirement-conversation-workspace
+       canonical successor; supersedes this historical detail-UI predecessor
 ```

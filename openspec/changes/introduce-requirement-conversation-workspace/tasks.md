@@ -13,8 +13,8 @@
 - [ ] 2.1 Replace only the Board-owned `/requirements/[id]` detail body with the new workspace while preserving direct links, refresh, Board/List navigation, and not adding a second route.
 - [ ] 2.2 Implement one detail-bundle load state for Requirement, loaded conversation pages, readiness, activity, latest run, current user, loading/refreshing/error state, and actual SSE connection state.
 - [ ] 2.3 Load the initial bundle from canonical HTTP responses, keep each response scoped to its own resource, retain successful stale data during non-initial refresh errors, and ignore older bundle responses after newer requests complete.
-- [ ] 2.4 Add explicit paged conversation/activity loading using existing `next_offset`; merge conversation pages by stable message ID and render deterministic server order without stream-payload insertion.
-- [ ] 2.5 Add component tests for direct-route loading, complete bundle rendering, stale-response protection, refresh-error retention, page merge/deduplication, and missing assessment/history.
+- [ ] 2.4 Add explicit paged conversation/activity loading using existing `next_offset`; retain loaded-page boundaries, but on canonical repair discard cached conversation slices, restart at `offset=0`, follow contiguous returned `next_offset` pages through the highest previously loaded boundary until every prior stable message ID is re-observed, and continue through the new end when the prior range had reached end. Merge by stable ID and render deterministic server order without stream-payload insertion.
+- [ ] 2.5 Add component tests for direct-route loading, complete bundle rendering, stale-response protection, refresh-error retention, new-message page-boundary shifts, duplicate overlap, no-omission repair, reconnect/focus repair after history expansion, and missing assessment/history.
 - [ ] 2.6 Validate this slice with focused Vitest coverage plus `npm run lint` and `npm run typecheck` in `apps/web`.
 
 ## 3. Conversation and responsive presentation
@@ -40,10 +40,10 @@
 
 - [ ] 5.1 Render title, description, summary, criteria, assumptions, open questions, lifecycle status, creator, timestamps, revision, and state version only from the canonical Requirement response.
 - [ ] 5.2 Render readiness verdict/currentness/blockers/assumptions and retained repository ID/full SHA only from the canonical readiness response; never infer Ready from transcript, activity, or run completion and never expose checkout paths/credentials.
-- [ ] 5.3 Add inline structured editing only through the existing PATCH contract, sending displayed `expected_state_version`, applying the returned Requirement, showing canonical Ready-to-Discussing demotion, and refusing optimistic local lifecycle prediction.
-- [ ] 5.4 Handle edit 409 by retaining unsaved draft, refetching the complete bundle, and requiring user reconciliation; show terminal edit refusal and other server errors without local bypass.
+- [ ] 5.3 Keep inline structured editing in this slice because the canonical `conversations` requirement makes conversation-surface edits part of North 0.1; use only the existing PATCH contract with displayed `expected_state_version`, apply the returned Requirement, show canonical Ready-to-Discussing demotion, and refuse optimistic lifecycle/readiness prediction.
+- [ ] 5.4 Handle structured-edit 409 by retaining unsaved draft, refetching the complete bundle, and requiring user reconciliation; show terminal edit refusal and other server errors without local bypass. Do not add reviewer, readiness, or restricted-lifecycle controls to this editor.
 - [ ] 5.5 Load `/auth/me` through the shared contract, label the current requester from canonical ID/email/role when needed, remove hard-coded person/email/role assumptions from the workspace and shell, and keep reviewer affordances cosmetic only.
-- [ ] 5.6 Add tests for canonical-only rendering, readiness currentness, repository citation privacy, Ready edit response, stale edit reconciliation, terminal refusal, and all four role affordance matrices.
+- [ ] 5.6 Add tests for canonical-only rendering, readiness currentness, repository citation privacy, structured-content edit response, stale edit reconciliation, terminal refusal, Requester rejection of reviewer/readiness operations, and precise role affordances.
 - [ ] 5.7 Validate this slice with focused Vitest coverage, `npm run lint`, and `npm run typecheck` in `apps/web`.
 
 ## 6. Realtime invalidation and honest connection state
@@ -57,7 +57,7 @@
 
 ## 7. Server-authority and end-to-end contract proofs
 
-- [ ] 7.1 Add or extend authenticated integration coverage proving all four roles can view/converse/cancel and edit non-terminal workspace Requirements, while Requester review attempts remain forbidden and no per-Requirement creator ACL is introduced.
+- [ ] 7.1 Add or extend authenticated integration coverage proving workspace-wide view/conversation/cancel/begin-discussion policy, and separately proving the existing non-terminal structured-content edit contract (currently Requester, Requirement Manager, Admin, and Owner) without treating it as generic lifecycle editing; prove Requester review/readiness/restricted-lifecycle attempts remain forbidden and no per-Requirement creator ACL is introduced.
 - [ ] 7.2 Verify existing server integration coverage for message persistence without runtime lookup, same-message start reuse, different-message conflict, awaiting/active/terminal phase rules, cancellation command identity, readiness currentness, and no Requirement mutation on runtime failure; add only backward-compatible server projection fixes if a required safe field is genuinely missing.
 - [ ] 7.3 Add browser-boundary E2E coverage for direct route load, durable requester post, explicit start/dispatch/cancel URLs, active unavailable state, cancellation pending, terminal completion, failure before assessment, reload retry, and conflict/refetch behavior.
 - [ ] 7.4 Add privacy/structural checks proving no chain-of-thought, raw prompts/tool traces, daemon/provider IDs, credentials, checkout paths, command payloads, browser WebSocket, duplicate local canonical entity types, or second SSE source exists in the workspace.
@@ -65,7 +65,7 @@
 
 ## 8. Compatibility documentation and completion gate
 
-- [ ] 8.1 Perform a compatibility review against `openspec/specs/requirements`, `conversations`, `readiness`, `roles`, `browser-reconnect`, `distributed-delivery`, `daemon-protocol`, `session-ownership`, `execution-retry-authority`, `repository-isolation`, and the active clarification/runtime changes; record any duplicate name, enum, field meaning, or identity mapping decision in the design or implementation notes.
-- [ ] 8.2 Confirm the active `introduce-requirement-conversation-ui` predecessor is not applied alongside this change; retire/archive that planning artifact through separate change-management work before claiming one implemented detail UI.
+- [ ] 8.1 Perform a compatibility review against `openspec/specs/requirements`, `conversations`, `readiness`, `roles`, `browser-reconnect`, `distributed-delivery`, `daemon-protocol`, `session-ownership`, `execution-retry-authority`, `repository-isolation`, and the active clarification/runtime changes; record any duplicate name, enum, field meaning, or identity mapping decision in the design or implementation notes. Include the predecessor's superseded status.
+- [x] 8.2 Mark `introduce-requirement-conversation-ui` superseded in its proposal, design, tasks, and capability spec; use `introduce-requirement-conversation-workspace` as the sole canonical successor and do not execute or merge the predecessor task/spec set.
 - [ ] 8.3 Update landed canonical behavior in `docs/product/requirement-lifecycle.md`, `docs/product/roles-and-permissions.md`, `docs/architecture/overview.md`, `docs/architecture/persistence.md`, `docs/development/testing.md`, and proven rows in `docs/development/invariants.md`; do not mark unexecuted E2E or smoke coverage complete.
 - [ ] 8.4 Review the complete diff, run `./scripts/validate.sh fast`, run `openspec validate --all --strict`, and run `./scripts/pre-push-validation.sh` because implementation/source/test changes are present; skip pre-push only if the final Git changed-file union is strictly documentation-only under `AGENTS.md`.

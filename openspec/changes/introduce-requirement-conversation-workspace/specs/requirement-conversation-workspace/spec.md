@@ -37,8 +37,7 @@ truth.
 
 ### Requirement: Conversation uses the existing durable model
 
-The workspace SHALL use the one durable Conversation associated with R. Its minimum North 0.1 projection is a stable `conversation_id`, `requirement_id`, and creation timestamp, plus durable Messages with stable `message_id`, `conversation_id`, optional author-user identity, one existing kind (`requester`, `agent`, or `system`), bounded user-facing body, and creation timestamp; the server may retain a source-event/idempotency key for deduplication. A message relates to a clarification Run only through the existing start/dispatch correlation, not through a new product lifecycle field. The existing message kinds It SHALL display
-messages in the server's deterministic `(created_at, id)` order and deduplicate
+The workspace SHALL use the one durable Conversation associated with R. Its minimum North 0.1 projection is a stable `conversation_id`, `requirement_id`, and creation timestamp, plus durable Messages with stable `message_id` (wire `id`), `conversation_id`, optional author-user identity, one existing kind (`requester`, `agent`, or `system`), bounded user-facing body, and creation timestamp; the server may retain a source-event/idempotency key for deduplication. A message relates to a clarification Run only through the existing start/dispatch correlation, not through a new product lifecycle field. It SHALL display messages in the server's deterministic `(created_at, id)` order and deduplicate
 by stable message ID when pages or refetches overlap. An agent clarification
 question SHALL be displayed as an ordinary `agent` message; North 0.1 SHALL NOT
 add a `clarification_question` message kind or infer canonical Requirement
@@ -57,6 +56,18 @@ readiness, or Requirement entities.
 
 - **WHEN** the same message is returned by a paged response, a duplicate hint, or two overlapping canonical refetches
 - **THEN** it appears once, at its server-defined position, with its server-provided author, kind, body, and timestamp
+
+#### Scenario: Offset boundary shifts omit neither history nor identity
+
+- **GIVEN** the workspace has loaded multiple pages through boundary B and has cached every returned stable message ID
+- **WHEN** new messages shift an offset page boundary before reconnect, focus repair, or a relevant SSE hint
+- **THEN** repair restarts at offset 0, follows the canonical `next_offset` chain through the shifted boundary until prior IDs are re-observed, and reassembles every previously loaded message plus newly returned messages exactly once, with no omission caused by trusting an old offset slice
+
+#### Scenario: Expanded history repairs after reconnect or focus
+
+- **GIVEN** the previously loaded range reached the conversation endpoint's end and new messages arrive while SSE is disconnected
+- **WHEN** EventSource reconnect, browser focus, visibility return, or explicit repair runs
+- **THEN** the workspace follows the refreshed contiguous page chain through its new `next_offset` end, includes the new messages, deduplicates overlap, and ignores any older repair that completes later
 
 #### Scenario: Durable history survives client and daemon restart
 
@@ -97,6 +108,20 @@ the workspace SHALL retain last-known data where possible and repair through
 HTTP. A displayed connection state SHALL reflect actual EventSource state; it
 shall not claim connected while disconnected. HTTP refetch remains the
 correctness mechanism even while SSE is connected.
+
+Because the existing conversation endpoint is offset-based and returns
+`next_offset`, a repair after pages through boundary B have been loaded SHALL
+discard cached page slices and start at `offset=0`. It SHALL follow contiguous
+`next_offset` pages using the bounded API limit, rather than independently
+trusting or refetching previously cached offsets. Repair SHALL continue at least
+through B and until every stable message ID present in the cached pages has been
+re-observed; if shifted boundaries require more pages, it SHALL follow the
+returned chain until those IDs are found or the server reports its end. If the
+previously loaded range reached the server's end, repair SHALL follow newly
+returned `next_offset` pages through the current end so expanded history is not
+omitted. The final union SHALL deduplicate by stable message ID and sort by the
+server's `(created_at, id)` order. This is a client repair contract; it does not
+introduce cursor pagination or a new backend endpoint.
 
 #### Scenario: Initial bundle uses canonical endpoints
 
@@ -407,14 +432,17 @@ repository citations may show retained repository identity and full commit SHA
 but SHALL not show checkout paths or credentials. Conversation text SHALL never
 be summarized into structured fields.
 
-If the existing structured-edit contract is exposed in the workspace, every
-save SHALL send the displayed `state_version` as `expected_state_version` and
-shall use the server response as the next canonical Requirement. The panel
-SHALL not optimistically predict a Ready-to-Discussing demotion. A 409 SHALL
-keep the unsaved draft available for user reconciliation, refetch the canonical
-bundle, and explain that the Requirement changed; it SHALL not blindly retry.
-Accepted and Rejected Requirements remain subject to the existing terminal edit
-rules, and no new lifecycle transition is introduced by this workspace.
+The workspace SHALL expose the existing structured Requirement edit contract in
+this slice because the canonical conversations requirement makes structured
+edits through the conversation surface part of North 0.1. This adds no new
+backend edit semantics. Every save SHALL send the displayed `state_version` as
+`expected_state_version` and shall use the server response as the next canonical
+Requirement. The panel SHALL not optimistically predict a Ready-to-Discussing
+demotion. A 409 SHALL keep the unsaved draft available for user reconciliation,
+refetch the canonical bundle, and explain that the Requirement changed; it SHALL
+not blindly retry. Accepted and Rejected Requirements remain subject to the
+existing terminal edit rules, and no new lifecycle transition is introduced by
+this workspace.
 
 #### Scenario: Transcript cannot alter structured panel
 
@@ -445,18 +473,27 @@ rules, and no new lifecycle transition is introduced by this workspace.
 
 All authenticated users in North 0.1.0 SHALL have workspace-wide access to view
 Requirements and conversations, append requester messages, cancel an accessible
-clarification run, begin discussion through the existing operation, and edit
-non-terminal Requirements, regardless of creator identity. The workspace SHALL
-not infer per-Requirement ownership or ACLs.
+clarification run, and begin discussion through the existing operation,
+regardless of creator identity. The workspace SHALL not infer per-Requirement
+ownership or ACLs.
+
+For structured content edits, the workspace SHALL use the existing Requirement
+mutation contract: Requester, Requirement Manager, Admin, and Owner are each
+allowed to edit non-terminal structured fields in the current North 0.1.0
+policy, subject to validation, `expected_state_version`, and server terminality
+rules. This permission changes canonical content only. It does not grant any
+role authority to calculate or accept readiness, make review decisions, perform
+reviewer-only lifecycle transitions, or mutate other server-owned state merely
+because the workspace displays edit controls.
 
 Role permissions SHALL remain:
 
-| Role | View/converse/cancel | Edit non-terminal | Begin discussion | Review lifecycle |
+| Role | View/converse/cancel | Edit non-terminal structured content | Begin discussion | Review lifecycle |
 | --- | --- | --- | --- | --- |
-| Requester | allowed | allowed | allowed | forbidden |
-| Requirement Manager | allowed | allowed | allowed | allowed |
-| Admin | allowed | allowed | allowed | allowed |
-| Owner | allowed | allowed | allowed | allowed |
+| Requester | allowed | existing Requirement mutation contract | allowed | forbidden |
+| Requirement Manager | allowed | existing Requirement mutation contract | allowed | allowed |
+| Admin | allowed | existing Requirement mutation contract | allowed | allowed |
+| Owner | allowed | existing Requirement mutation contract | allowed | allowed |
 
 Accept, Reject, Request Changes, and Reopen SHALL continue to use their existing
 server-side reviewer guard. The workspace MAY hide or disable review affordances
@@ -471,13 +508,13 @@ fallback.
 
 #### Scenario: Requester collaborates across ownership
 
-- **WHEN** an authenticated Requester opens and posts to another user's non-terminal Requirement
-- **THEN** the server permits workspace view/conversation behavior subject to canonical validation, and the UI does not require creator matching
+- **WHEN** an authenticated Requester opens, posts to, or edits structured content on another user's non-terminal Requirement
+- **THEN** the server applies the existing workspace collaboration and Requirement mutation contracts subject to canonical validation, and the UI does not require creator matching
 
 #### Scenario: Reviewer role receives review affordance
 
 - **WHEN** the current user is Requirement Manager, Admin, or Owner and R is reviewable
-- **THEN** the workspace may expose the existing reviewer route/action, while the server remains responsible for readiness-generation and state-version checks
+- **THEN** the workspace may expose the existing reviewer route/action, while the server remains responsible for reviewer authorization, readiness-generation, lifecycle, and state-version checks
 
 #### Scenario: Requester cannot review by forging UI
 
@@ -488,6 +525,11 @@ fallback.
 
 - **WHEN** the current-user response identifies user U with role Q
 - **THEN** requester-facing identity and role labels use U/Q, and no hard-coded identity is shown
+
+#### Scenario: Requester edit does not grant reviewer authority
+
+- **WHEN** a Requester uses the workspace structured editor and then attempts readiness calculation/acceptance, Accept, Reject, Request Changes, Reopen, or another restricted lifecycle operation
+- **THEN** the existing server guards allow only the permitted content edit and reject the reviewer or restricted operation before server-owned state changes
 
 #### Scenario: Terminality remains server-enforced
 

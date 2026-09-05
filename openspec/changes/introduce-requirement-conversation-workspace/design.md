@@ -29,10 +29,11 @@ keeps the existing wire wrapper for compatibility and gives browser code one
 run concept. The browser remains HTTP/SSE-only; WebSocket, daemon, protocol,
 retry-policy, and repository credentials stay outside this surface.
 
-The active `introduce-requirement-conversation-ui` change is an overlapping,
-unchecked predecessor. This change is the selected successor; its route and
-workspace implementation must not be applied alongside that predecessor's
-contract.
+The `introduce-requirement-conversation-ui` change was an overlapping,
+unimplemented predecessor. It is marked superseded in its artifacts. This change is
+the selected canonical successor; its route, capability, and task set are the
+only ones implementation agents may apply. The predecessor contract and tasks
+MUST NOT be implemented or merged alongside this change.
 
 ## Goals / Non-Goals
 
@@ -40,6 +41,10 @@ contract.
 
 - Replace read-only detail rendering with one durable Conversation + Live
   Requirement workspace while preserving route ownership and Board navigation.
+- Keep the existing inline structured Requirement edit interaction in this
+  vertical slice because canonical `conversations` requires edits through the
+  conversation surface in North 0.1; consume its PATCH/state-version contract
+  without adding reviewer, readiness, or lifecycle semantics.
 - Give every requester message one explicit server-owned outcome: persisted
   history, start of a known run, dispatch to a known active run, or a visible
   blocked/unavailable state.
@@ -140,11 +145,19 @@ refresh error. A successful mutation response may update its own resource, but a
 canonical bundle refetch follows intent mutations and all relevant SSE hints.
 
 Fetch the existing bounded conversation page shape. If `next_offset` exists,
-provide an explicit load-more action; merge pages by message ID and render the
-server's `(created_at, id)` order. On repair, refetch all pages already loaded
-(or the initial page when no extra page was requested), deduplicate by ID, and
-never synthesize a gap-filling message from an SSE payload. Activity uses the
-same bounded-page approach and displays only activity text/timestamps.
+provide an explicit load-more action. Merge pages by message ID and render the
+server's `(created_at, id)` order. Because this API is offset-based, a repair
+that has loaded pages through boundary B SHALL discard cached page slices, start
+at `offset=0`, and follow the contiguous `next_offset` chain using the bounded
+limit. It SHALL continue at least through B and until every stable message ID
+from the cached pages has been re-observed; if a new message shifted a boundary,
+follow additional returned pages until those IDs appear or the server reports
+its end. If the loaded range had reached the prior end, follow newly returned
+`next_offset` pages through the current end so expanded history is not omitted.
+Deduplicate the refreshed union by ID, sort by `(created_at, id)`, and never
+synthesize a gap-filling message from an SSE payload. A repair generation owns
+its result, so an older page chain cannot replace a newer repair. Activity uses
+the same bounded-page approach and displays only activity text/timestamps.
 
 A relevant event is one of the five named categories whose
 `requirement_id === id`. Coalesce synchronous bursts into one bundle refetch.
@@ -215,10 +228,13 @@ projection and subsequent refetch determine completion.
 Read `/auth/me` in the workspace and compare its ID to requester message
 `author_user_id` only when showing a current-user label such as “You”; unknown
 other requesters remain “Requester” rather than being guessed from IDs. Use the
-role only for cosmetic affordances. The server remains authoritative for:
-workspace-wide access, message append, cancellation/run binding, non-terminal
-structured edits, begin discussion, terminality, and reviewer-only Accept,
-Reject, Request Changes, and Reopen.
+role only for cosmetic affordances. The server remains authoritative for
+workspace-wide access, message append, cancellation/run binding, the existing
+non-terminal structured-content edit contract, begin discussion, terminality,
+readiness calculation/acceptance, and reviewer-only Accept, Reject, Request
+Changes, and Reopen. Structured-content edit permission does not authorize a
+Requester to perform those reviewer, readiness, or restricted-lifecycle
+operations.
 
 Render message bodies as text. Render only server-published coarse activity,
 readiness verdict/currentness/blockers/assumptions, retained repository ID/full
@@ -238,14 +254,16 @@ read-only detail renderer; it does not delete messages or alter run state.
 
 After implementation, update the named canonical product/architecture/testing
 pages from the proposal and change the invariant ledger only to statuses proven
-by runnable tests. The active predecessor change must be retired separately
-before anyone claims both UI changes are implemented.
+by runnable tests. The predecessor is already marked superseded and is not an
+implementation input; no second detail UI may be claimed or merged from it.
 
 ## Risks / Trade-offs
 
-- **[Risk] Offset pagination shifts while new messages arrive.** → Merge by
-  stable message ID, sort by the server's `(created_at, id)`, and repair loaded
-  pages from HTTP; never append SSE data.
+- **[Risk] Offset pagination shifts while new messages arrive.** → Discard
+  cached slices on repair, restart at offset 0, follow contiguous `next_offset`
+  pages far enough to re-observe every previously loaded ID (and through the new
+  end when the prior range reached end), then deduplicate and sort by the server's
+  `(created_at, id)`; never append SSE data or trust stale page offsets.
 - **[Risk] A refresh error makes old Requirement data look current.** → Keep it
   visible for continuity, label it stale/refresh-failed, and clear the warning
   only after a successful canonical read.

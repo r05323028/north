@@ -28,9 +28,12 @@ and later retry-state UI are added.
   at-most-one non-terminal sequential run, durable command identity, and all
   existing cancellation/unavailability semantics.
 - **[Invariant]** Render Live Requirement fields, readiness currentness, and
-  version tokens from canonical HTTP reads. Inline structured edits, where
-  allowed by the existing contract, send `expected_state_version` and never
-  predict Ready demotion or overwrite a newer server response.
+  version tokens from canonical HTTP reads. Keep the existing inline structured
+  Requirement edit contract in this workspace because the canonical
+  `conversations` requirement makes conversation-surface edits part of North
+  0.1. Edits send `expected_state_version`, use the returned canonical
+  response, and never predict Ready demotion or overwrite a newer response;
+  they do not grant reviewer, readiness, or restricted-lifecycle authority.
 - **[Invariant]** Treat `requirement.changed`, `conversation.changed`,
   `readiness.changed`, `activity.changed`, and `session.changed` as invalidation
   hints only. Initial load, relevant hints, SSE reconnect, browser focus, and
@@ -42,10 +45,13 @@ and later retry-state UI are added.
   stale write, create a browser-side run, or start a second run during an
   occupied sequential slot.
 - **[Invariant]** Obtain current-user identity and role from `/auth/me` for
-  requester-facing labels and affordances. All authenticated roles retain
-  workspace-wide view/conversation/edit capabilities from the existing policy;
-  review transitions remain server-gated to Requirement Manager, Admin, and
-  Owner. UI checks are cosmetic.
+  requester-facing labels and affordances. Authenticated users retain the
+  existing workspace-wide view/conversation policy. The existing Requirement
+  mutation contract permits Requester, Requirement Manager, Admin, and Owner to
+  edit non-terminal structured content, subject to validation, state version, and
+  terminality; that content permission does not grant readiness, review, or
+  restricted-lifecycle authority. Review transitions remain server-gated to
+  Requirement Manager, Admin, and Owner. UI checks are cosmetic.
 - **[Implementation suggestion]** Consolidate touched browser API calls behind a
   small shared client and runtime validators for Requirement, Conversation,
   Message, ClarificationRun, Readiness, Activity, and current-user responses;
@@ -71,11 +77,11 @@ provider/runtime abstraction, a new retry budget/attempt state machine,
 automatic daemon migration, per-Requirement ACLs, new Requirement lifecycle
 transitions, or replacing the human-review surface.
 
-The active `introduce-requirement-conversation-ui` change is an earlier,
-planning-only detail-UI predecessor with overlapping scope. This change is its
-workspace successor; implementation MUST select one contract rather than apply
-both. Retiring or archiving that predecessor is separate change-management
-work.
+The `introduce-requirement-conversation-ui` change is an earlier,
+planning-only detail-UI predecessor with overlapping scope. It is superseded by
+this change and is explicitly marked superseded in its artifacts. This workspace
+change is the sole canonical successor: implementation MUST use this contract
+and MUST NOT execute or merge the predecessor task/spec set.
 
 ## Capabilities
 
