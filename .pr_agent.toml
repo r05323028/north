@@ -1,5 +1,7 @@
 [config]
 model = "openai/muse-spark-1.3-contributor"
+fallback_models = []
+custom_model_max_tokens = 32000
 
 [openai]
 api_base = "https://opencode.ai/zen/go/v1"

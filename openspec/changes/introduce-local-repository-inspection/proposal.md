@@ -94,7 +94,7 @@ introduce-local-repository-inspection
        └─ extends Board's shared /events categories
 
 introduce-requirement-board + introduce-agent-requirement-clarification
-  └─> introduce-requirement-conversation-ui
+  └─> introduce-requirement-conversation-workspace
 ```
 
 Board's base browser invalidation is independent of repository inspection and

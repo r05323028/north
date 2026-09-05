@@ -38,3 +38,12 @@ perform reviewer-only lifecycle actions.
 
 Permission checks are centrally enforced (domain helpers + server-side checks);
 UI hiding is cosmetic, never the security boundary.
+
+## Workspace identity and authorization
+
+The workspace reads `/auth/me` for current ID, email, and instance role. Those
+values drive labels only; hiding an affordance never replaces server
+authorization. Requester structured-content editing is separate from reviewer
+operations: Requesters may edit non-terminal content and converse, but only
+Requirement Managers, Admins, and Owners may perform Accept, Reject, Request
+Changes, Reopen, or other readiness/review mutations.

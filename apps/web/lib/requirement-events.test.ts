@@ -55,6 +55,45 @@ describe("requirement SSE subscription", () => {
     FakeEventSource.instances = [];
   });
 
+  it("filters malformed and unrelated hints while exposing connection transitions", () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const onChange = vi.fn();
+    const states: string[] = [];
+    const unsubscribe = subscribeToRequirementEvents({
+      onChange,
+      onStateChange: (state) => states.push(state),
+      requirementId: "r-1",
+    });
+    const source = FakeEventSource.instances[0];
+
+    source.emit(
+      REQUIREMENT_CHANGED_EVENT,
+      JSON.stringify({
+        category: REQUIREMENT_CHANGED_EVENT,
+        requirement_id: "r-1",
+      }),
+    );
+    source.emit(
+      REQUIREMENT_CHANGED_EVENT,
+      JSON.stringify({
+        category: REQUIREMENT_CHANGED_EVENT,
+        requirement_id: "r-2",
+      }),
+    );
+    source.emit(REQUIREMENT_CHANGED_EVENT, "not-json");
+    source.emit(
+      REQUIREMENT_CHANGED_EVENT,
+      JSON.stringify({ category: "activity.changed", requirement_id: "r-1" }),
+    );
+    source.fail();
+    source.open();
+
+    expect(onChange).toHaveBeenCalledOnce();
+    expect(states).toEqual(["connecting", "reconnecting", "connected"]);
+    unsubscribe();
+    expect(states.at(-1)).toBe("closed_or_error");
+  });
+
   it("uses same-origin /events, refetches named hints, and detects reconnects", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const onChange = vi.fn();

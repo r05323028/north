@@ -67,7 +67,7 @@ member so `cargo test --workspace` executes it.
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
 | Unit (Web) | Implemented — Vitest via `npm test` in `apps/web` |
 | Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, durable coordination, and post-commit browser notification coverage; execute with `NORTH_TEST_DATABASE_URL` |
-| E2E | Partial — Playwright web-boundary coverage exists for Board/List/create/detail and SSE invalidation; full server-backed assembled workflow remains pending |
+| E2E | Partial — Playwright web-boundary coverage exists for Board/List/create/direct workspace and SSE invalidation; full server-backed assembled workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
 PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it.
@@ -84,7 +84,7 @@ PostgreSQL integration also exercises legacy readiness schema upgrades and migra
 | server retry authority and restart-persistent attempts | Integration | runtime-retry-and-failure-state |
 | concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
 | soft-disable history, disabled-name recovery, and disabled-repo citation rules | Integration | configured-repositories |
-| Full server-backed SSE disconnect/missed hint/duplicate/delayed hint refetch | E2E | requirement-board + requirement-conversation-ui |
+| Full server-backed SSE disconnect/missed hint/duplicate/delayed hint refetch | E2E | requirement-board + requirement-conversation-workspace |
 
 Documentation, OpenSpec checkboxes, and architecture tests do not prove these
 runtime guarantees. Do not mark their implementation tasks complete until the
@@ -113,6 +113,18 @@ Playwright (`npm run test:e2e`) and run in merge-gate job `web-e2e` on
 `ubuntu-latest`; this mocked-route suite does not prove assembled server/browser
 behavior. Install its browser locally with `npx playwright install chromium`.
 Coverage generation/upload remains CI-specific (`npm run test:coverage`).
+
+## Requirement workspace coverage
+
+Web unit coverage proves strict browser parsing, canonical bundle loading,
+offset boundary repair, stable-ID deduplication, stale response suppression,
+requester persistence-before-intent, explicit run identity, cancellation and
+structured-edit conflicts. Playwright coverage proves direct workspace load,
+canonical panes, durable message POST, initial start without duplicate dispatch,
+active run dispatch, explicit cancellation URLs, reload-safe same-start retry,
+awaiting/cancellation-pending states, terminal restart, 503 unavailability, and
+409 edit reconciliation. Full assembled server-backed E2E and smoke coverage
+remain separate obligations and are not claimed here.
 
 ## Specs
 

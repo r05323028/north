@@ -1,3 +1,7 @@
+# requirement-detail-ui Specification
+
+> **Status: Superseded.** This planning artifact is superseded by `introduce-requirement-conversation-workspace`. Do not implement this artifact or merge its contract/task set; use the workspace change as the sole canonical successor.
+
 ## Purpose
 
 Renders a Requirement detail surface from canonical server reads: persisted

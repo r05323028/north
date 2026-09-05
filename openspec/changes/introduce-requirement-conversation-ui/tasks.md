@@ -1,5 +1,8 @@
 # Tasks
 
+> **Status: Superseded.** This planning artifact is superseded by `introduce-requirement-conversation-workspace`. Do not implement this artifact or merge its contract/task set; use the workspace change as the sole canonical successor.
+> **Historical tasks — MUST NOT be executed.** Checkboxes below are retained for context only; implement the successor task set instead.
+
 ## 1. Route and canonical reads
 
 - [ ] 1.1 Extend the Board-owned `/requirements/[id]` Requirement detail shell with Conversation, Overview, and Activity tabs; do not create a second route or replace the Board shell.
