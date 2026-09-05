@@ -22,7 +22,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Editing Ready demotes to Discussing and advances both tokens | Enforced | `apply_edit` + integration tests |
 | Review packet binds Requirement revision/state version and assessment identity | Enforced | `ReviewPacket::project`, locked packet query, stale-review integration test; generation equality is scoped to Ready reviewability |
 | Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Enforced | `Role::can_review` + server guard + assessment-bound transition integration tests |
-| Review UI uses only canonical workspace + Review Packet and explicit stale repair | Specified | introduce-human-requirement-review; browser/API tests pending |
+| Review UI uses only canonical workspace + Review Packet and explicit stale repair/acknowledgement | Specified | introduce-human-requirement-review; browser/API tests pending |
 | Requirement access is workspace-wide in 0.1.0; no per-Requirement ACL | Enforced | authenticated routes and cross-requester integration test |
 | First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
 | Verification codes cannot be brute-forced past a bounded attempt budget | Enforced | locked transactional failed-attempt counter, five-failure consumption, PostgreSQL concurrency test |
@@ -44,7 +44,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Daemon reports facts/events; server owns business transitions | Partially Enforced | crate edges now; server-side transition validation lands with requirement-domain change |
 | Server is sole owner of durable business state | Partially Enforced | dependency boundaries; server/persistence implementation and integration tests pending |
 | Setup approval state changes require authenticated same-origin POST | Enforced | read-only approval GET, Origin/Host validation, and PostgreSQL HTTP-boundary tests |
-| Public auth/setup request endpoints have resource-aware abuse limits | Specified | `harden-public-endpoint-abuse-protection`; proxy, quota, 429, and concurrency proofs pending |
+| Public auth/setup request endpoints have resource-aware abuse limits | Specified | `harden-public-endpoint-abuse-protection`; fixed network identity, durable setup keys, proxy, quota, 429, and concurrency proofs pending |
 | Every server command is durable before dispatch and idempotent at daemon boundary | Enforced | immutable outbox transaction, payload digest, daemon Journal, stable command/runtime identity, and duplicate suppression |
 | Command ACK means durable daemon acceptance, not runtime completion | Enforced | daemon `received` journal commit precedes `command_ack`; runtime outcome is separate |
 | Command/event ids and independent directional sequences detect gaps and harmless duplicates | Enforced | server watermarks/event ledger plus bounded daemon Journal identity and sequence checks |

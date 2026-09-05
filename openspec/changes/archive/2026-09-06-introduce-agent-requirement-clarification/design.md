@@ -599,8 +599,8 @@ introduce-requirement-board
   -> clarification SSE-category extension
 
 introduce-requirement-board + introduce-agent-requirement-clarification
-     -> introduce-requirement-conversation-workspace
-     canonical successor; extends the existing detail shell
+  -> introduce-requirement-conversation-ui
+     extends the existing detail shell
 
 introduce-runtime-retry-and-failure-state
   -> later optional status/read-model extension

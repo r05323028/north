@@ -137,8 +137,10 @@ never auto-resubmits. Requirement lifecycle remains separate.
 
 WebSocket reconnect/backoff, journal replay, ACK retry, and event replay are
 transport recovery and consume no business attempt. Setup request creation is
-also subject to the public endpoint client bucket and pending quota; setup
-approval/claim credentials remain outside the browser response.
+also subject to the public endpoint client bucket and transactional pending
+quota on the persisted typed IPv4 `/24` or IPv6 `/64` network key; process-local
+buckets reset on restart, while unexpired unclaimed setup rows remain durable.
+Setup approval/claim credentials remain outside the browser response.
 
 Setup/login follows the browser-assisted CLI flow. A normal browser GET
 returns an HTML confirmation page with daemon label and state, an explicit

@@ -36,10 +36,17 @@ Review controls are derived from those responses and `/auth/me` only for UX.
 The browser never infers Ready from transcript text, activity, or an assessment
 message and never reconstructs packet evidence from another read.
 
-Initial load and every repair fetch Requirement and review packet as one logical
-bundle. The packet may be absent when the Requirement is not Ready; that is a
-normal non-reviewable state, not permission to synthesize one. Packet errors
-remain visible and disable review actions.
+Loading is conditional and generation-aware. The workspace first loads the
+canonical Requirement. Only when that response says `Ready` does it request
+`GET /requirements/{id}/review-packet`. Draft, Discussing, Accepted, and other
+non-Ready states do not require a packet request; Rejected renders Reopen from
+Requirement state/version alone. A Ready packet fetch failure is surfaced as a
+review-load error and disables Ready actions.
+
+On repair, the browser refetches Requirement first or coordinates responses
+under one request generation, then fetches a packet only if the refreshed
+Requirement is Ready. A refreshed non-Ready state drops the old packet. An old
+packet is never submitted against refreshed Requirement state.
 
 SSE `requirement.changed`/readiness hints, reconnect, focus/visibility return,
 and an explicit refresh button schedule/refetch canonical HTTP state. SSE does
@@ -62,8 +69,9 @@ trimmed/validated according to the existing server contract; it is not sent for
 other actions.
 
 The workspace does not optimistically change lifecycle, readiness, state
-version, or packet identity. On success it refetches the canonical workspace
-bundle and renders the server result.
+version, or packet identity. On success it refetches canonical Requirement and
+all applicable reads; it fetches Review Packet only when the refreshed
+Requirement is Ready and renders the server result.
 
 ## Permission matrix
 
@@ -92,8 +100,12 @@ The browser follows this exact flow:
 6. Browser refetches Requirement and packet, marks the old packet unusable, and
    shows a stale/review-required notice.
 7. Any unsent Request Changes textarea remains intact.
-8. Reviewer explicitly inspects the refreshed packet before a new submission is
-   enabled.
+8. Browser keeps review mutations disabled behind an explicit accessible
+   acknowledgement for the refreshed canonical state: `Review refreshed packet`
+   when Ready, or `Review refreshed Requirement` when Rejected/Reopen is shown.
+   Refetch/render completion alone is not inspection; acknowledgement clears the
+   gate only for the current Requirement generation and, when Ready, packet
+   generation. Any later hint or refetch sets the gate again.
 
 A successful refetch that is no longer Ready removes Ready actions. A stale
 response cannot be used with a refreshed Requirement, even if the old action

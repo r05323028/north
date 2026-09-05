@@ -14,13 +14,13 @@ or attacker-controlled daemon labels.
 - Add one `public-endpoint-abuse-protection` capability covering only the two
   unauthenticated creation endpoints.
 - Define canonical socket/proxy client identity with trusted `X-Forwarded-For`
-  handling, IPv4/IPv6 normalization, IPv4-mapped normalization, and optional
-  subnet grouping.
+  handling, IPv4/IPv6 normalization, IPv4-mapped normalization, and fixed IPv4
+  `/24` / IPv6 `/64` network grouping.
 - Add process-local coarse client token buckets plus existing/durable
   resource-specific controls. No Redis, provider registry, HA, or generic
   abuse platform.
-- Key request-code resource protection by normalized email. Key daemon setup
-  protection by canonical client/network identity and bounded pending setup
+- Key request-code resource protection by normalized email. Persist daemon setup's
+  typed canonical network key and enforce bounded unexpired-unclaimed setup
   quota, never by an attacker-controlled daemon label alone.
 - Preserve one active code, cooldown, supersession, bounded verification-failure
   budget, generic auth errors, and secret-free responses.

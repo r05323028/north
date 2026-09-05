@@ -90,10 +90,12 @@ Requirement/readiness entity. Accept, Reject, and Request Changes send
 `assessment_id` plus `expected_state_version`; Reopen sends only
 `expected_state_version`. HTTP 409 triggers canonical Requirement/packet
 refetch, preserves unsent Request Changes feedback, invalidates the old packet,
-and requires explicit reviewer inspection before retry. Requesters may read but
-never receive actionable reviewer controls; server authorization remains
-authoritative. Current durable review audit rows remain server-owned; this
-workspace does not invent a browser history projection.
+and requires an explicit accessible refreshed-state acknowledgement for the
+current generation before retry (`Review refreshed packet` for Ready decisions,
+`Review refreshed Requirement` for Reopen). Requesters may read but never receive
+actionable reviewer controls; server authorization remains authoritative. Current
+durable review audit rows remain server-owned; this workspace does not invent a
+browser history projection.
 
 ## Execution state is separate
 

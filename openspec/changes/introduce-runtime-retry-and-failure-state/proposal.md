@@ -22,8 +22,10 @@ cancellation, and public clarification projection ambiguous.
 - Extend the existing clarification projection with `active/retrying` and
   terminal `failed` mappings plus safe attempt/retry fields. Do not expose a
   second Idle/Running/Retrying/Failed browser truth or raw runtime details.
-- Preserve `execution_outcome_unknown`: no automatic resubmission; any later
-  attempt is an explicit server command with a new identity.
+- Preserve `execution_outcome_unknown`: once it terminalizes a logical run, that
+  run can never receive `session.resume`. Later execution creates a new logical
+  run with a new `run_id`/protocol `session_id`, current context, new
+  `session.start`, and normal slot/state-version rules.
 
 ## Capabilities
 

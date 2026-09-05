@@ -17,7 +17,10 @@
 - [ ] Add narrow `execution_attempts` persistence with unique session/attempt,
       command, and failure-event identities; add due-retry index.
 - [ ] Make initial `session.start` and every `session.resume` commit command,
-      attempt row, and counter update atomically.
+      attempt row, counter update, and current-attempt identity atomically.
+- [ ] Make accepted `session.failed` close/clear current attempt N before
+      entering Retrying or terminal Failed; due scheduling requires no current
+      attempt and makes N+1 current.
 - [ ] Backfill existing sessions conservatively and document restart behavior.
 
 ## 3. Attempt identity/accounting
@@ -34,7 +37,9 @@
 - [ ] Process `session.failed` as an attempt fact after event identity/sequence
       validation and classify to bounded safe reasons.
 - [ ] Implement known-failure retry/exhaustion transitions without Requirement
-      mutation; preserve `execution_outcome_unknown` no-auto-resubmit.
+      mutation. Once unknown outcome terminalizes a run, prohibit all later
+      `session.resume`; cover new-run/new-start recovery with current context and
+      normal slot/state-version rules.
 - [ ] Make duplicate/replayed failure facts return the original ACK/outcome and
       perform no second budget, schedule, resume, or terminal effect.
 
@@ -44,16 +49,20 @@
       not make in-memory timers authoritative.
 - [ ] Claim due work with database row locking/conditional state checks and
       `SKIP LOCKED` batching; prove concurrent workers create one resume.
-- [ ] Create resumes for disconnected registered pinned owners through the
-      durable outbox; never migrate. Define terminal handling for revoked owners.
-- [ ] Prove reconnect delivery and due-worker races do not create extra attempts.
+- [ ] Define owner validity separately from owner liveness: valid offline owners
+      stay pinned and receive queued outbox resumes; invalid/revoked owners get
+      terminal `owner_unavailable` policy with no migration.
+- [ ] Create resumes for valid offline pinned owners through the durable outbox;
+      never migrate. Prove reconnect delivery and due-worker races do not create
+      extra attempts.
 
 ## 6. Clarification lifecycle and cancellation
 
 - [ ] Keep Retrying runs active and sequential-slot occupying until retry policy
       terminalizes them.
-- [ ] Define running, retry-waiting, due, daemon-unavailable, unknown-outcome,
-      and cancellation races; stale work must not resurrect a run.
+- [ ] Define running, retry-waiting, due, owner-valid/offline,
+      owner-invalid/revoked, unknown-outcome, and cancellation races; stale work
+      must not resurrect a run or resume a terminal run.
 - [ ] Preserve explicit run identity and make cancellation unable to affect a
       newer run.
 

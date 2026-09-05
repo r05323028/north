@@ -12,8 +12,17 @@ command identity, and terminal failure. The daemon reports facts and performs
 only transport/local recovery. The existing `daemon-protocol` delivery boundary
 is retained, but this change adds its explicit handoff from generic event
 receipt to the owning clarification/runtime projection; wire schemas and
-transport sequencing do not change. `session.failed.recoverable` is not a retry
-instruction and cannot make a run permanently failed.
+transport sequencing do not change.
+
+Pinned-owner validity and liveness are separate. An owner is **valid** when its
+registration still exists, it remains the persisted session owner, and it is not
+revoked or otherwise permanently invalid. An owner is **live** only when a
+current authenticated connection and heartbeat satisfy liveness requirements.
+Retry eligibility checks validity, not liveness. A valid offline owner remains
+pinned and can receive a durable outbox resume for later reconnect delivery;
+an invalid/revoked owner cannot receive new retry work and follows terminal
+`owner_unavailable` policy. No owner is migrated. The daemon's `session.failed.recoverable` value is not a
+retry instruction and cannot make a run permanently failed.
 
 Keep the existing persisted successful terminal value `Completed`. This change
 specifies the retry decision states `Idle`, `Running`, `Retrying`, and `Failed`
@@ -27,10 +36,12 @@ and a pending policy decision, `Failed` is terminal logical execution, and
 `max_attempts` means total durable execution-attempt commands, including the
 initial `session.start`; default is 3 and is snapshotted on run creation. A
 retry is eligible only while `attempt_count < max_attempts`, the run is not
-cancelled, the failed outcome is known, and the pinned daemon remains an
-eligible owner. Backoff uses server configuration (default base 5 seconds,
-maximum 5 minutes, bounded 0–25% jitter); the calculated due timestamp is
-persisted, so restart never recomputes an already selected delay.
+cancelled, the failed outcome is known, the logical run is non-terminal, and the
+pinned owner remains valid. Owner liveness affects delivery/availability only; a
+valid offline owner does not trigger migration or suppress durable outbox
+creation. Backoff uses server configuration (default base 5 seconds, maximum 5
+minutes, bounded 0–25% jitter); the calculated due timestamp is persisted, so
+restart never recomputes an already selected delay.
 
 | Event/condition | Durable server result | Logical run/slot |
 | --- | --- | --- |
@@ -73,6 +84,14 @@ same transaction. Initial `session.start` creation and each `session.resume`
 creation use the same transaction-aware persistence path. A helper that creates
 a command in one transaction and increments the counter later is forbidden.
 
+When an attempt command commits, its attempt row, command-outbox row, and
+`current_attempt_id` commit together. A valid `session.failed` transaction
+records attempt N's outcome and clears/closes `current_attempt_id` before it
+either enters `Retrying` with `next_retry_at` or terminal `Failed`. A due worker
+requires `state=Retrying`, `current_attempt_id IS NULL`, and other policy
+preconditions; its new resume attempt N+1 sets the new current identity in the
+same transaction.
+
 Existing event identity/sequence dedupe remains the outer boundary. Accepted,
 rejected, and duplicate failure facts record/return their known ACK only after
 this state transaction commits.
@@ -86,18 +105,19 @@ Startup therefore recovers future and already-due retries from PostgreSQL.
 
 A worker claims work with a session row lock (or equivalent conditional update)
 and `SKIP LOCKED` for batch discovery. Inside one transaction it verifies:
-state is `Retrying`, due time has arrived, cancellation is false, no current
-attempt exists, and budget remains; then it creates exactly one durable
-`session.resume`, attempt row, and counter update. The unique constraints and
-row lock make two workers/request paths harmless. A stale timer sees the new
-state and does nothing.
+state is `Retrying`, due time has arrived, cancellation is false,
+`current_attempt_id IS NULL`, and budget remains; then it creates exactly one
+durable `session.resume`, attempt row, and counter update while setting the new
+current attempt identity. The unique constraints and row lock make two
+workers/request paths harmless. A stale timer sees the new state and does
+nothing.
 
-A disconnected but still registered pinned daemon does not block durable command
-creation: the resume is addressed to its immutable owner and remains in the
-outbox for reconnect delivery. Reconnect only replays that command; it never
-creates an attempt. If the owner is revoked/no longer eligible, the server does
-not migrate the run and applies the terminal `owner_unavailable` policy result.
-A reconnect and due worker race is serialized by the session row lock.
+A valid but offline pinned owner does not block durable command creation: the
+resume is addressed to that immutable owner and remains in the outbox for
+reconnect delivery. Reconnect only replays that command; it never creates an
+attempt. If the owner is invalid/revoked, the server does not migrate the run
+and applies terminal `owner_unavailable` policy. A reconnect and due-worker race
+is serialized by the session row lock.
 
 The scheduler is a single bounded worker loop plus existing outbox machinery,
 not a general job/scheduler abstraction. Multiple server workers/processes use
@@ -136,8 +156,9 @@ Cancellation is run-scoped and locks the explicit `run_id`:
   state and cannot resurrect it.
 - Pinned daemon unavailable: durable cancel remains addressed to that owner; no
   migration and no future resume.
-- Unknown outcome/terminal run: do not resubmit or resurrect. A cancel request is
-  idempotent/no-op against that run and cannot affect a newer run.
+- Unknown-outcome terminal run: do not resubmit or resurrect. A cancel request
+  is idempotent/no-op against that run and cannot affect a newer run; any later
+  execution uses a new logical run and `session.start`.
 
 If a due worker wins the lock first, the run becomes `Running`; cancellation
 then follows the first case. If cancellation wins first, the worker creates
@@ -145,10 +166,14 @@ nothing. A successful cancellation still uses existing `session.completed`; a
 failure/terminal cancellation uses safe `cancelled`/operational failure
 projection without introducing a `session.cancelled` frame.
 
-`execution_outcome_unknown` never gets automatic retry, even when the persisted
-attempt budget remains. Any later attempt must be a new explicit server command
-and must pass normal policy; this change exposes no browser action that silently
-does that.
+Once `execution_outcome_unknown` terminalizes logical run A, A can never receive
+another `session.resume`, even if persisted attempt budget remains. Any later
+user-driven execution creates logical run B with a new `run_id`/protocol
+`session_id`, captures the current Requirement snapshot/context, creates a new
+`session.start`, and follows normal sequential-slot and
+`expected_state_version` rules. `session.resume` is valid only for a
+non-terminal, retry-eligible logical run. No browser action silently resubmits
+an unknown outcome.
 
 ## 7. Public clarification projection
 

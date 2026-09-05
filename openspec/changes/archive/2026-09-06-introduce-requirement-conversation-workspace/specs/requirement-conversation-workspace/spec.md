@@ -358,26 +358,22 @@ ownership and legal intent:
   projected terminal runtime fact.
 
 `status` SHALL remain coarse display information (`starting`, `running`,
-`completed`, or `unavailable`) for the base workspace and SHALL not alone decide
-an action. The server-owned execution-retry extension may additionally project
-`retrying` for a policy-scheduled active run and `failed` for terminal execution
-failure/cancellation, plus safe attempt/retry fields. The workspace SHALL
-consume those fields for display only; it SHALL not own retry budget, backoff,
-automatic `session.resume`, or final execution-failure policy and SHALL never
-auto-resubmit from the browser.
+`completed`, or `unavailable`) and SHALL not alone decide an action. In
+particular, `unavailable` in awaiting and active phases has different meaning.
+The workspace SHALL not add or require the later server-owned retry state,
+attempt count, retry budget, backoff, automatic `session.resume`, or final
+execution-failure policy.
 
 Completion SHALL not imply `Ready`; only the canonical Requirement and
-readiness read decide those values. Any runtime failure SHALL be shown as an
+readiness read decide those values. A runtime failure SHALL be shown as an
 operational run failure and SHALL not mark the Requirement failed or mutate its
-revision/state version. A known retryable attempt failure leaves the run active
-and slot-occupying with `status=retrying`; terminal failure maps to
-`phase=terminal,status=failed`. An active run remains active after a
-cancellation command is acknowledged until `session.completed` or a terminal
-`session.failed` projection. Successful assigned cancellation is represented by
-existing completed status with `cancel_requested=true`; terminal cancellation
-failure is represented by safe failed status with cancellation intent, not by
-inventing a `cancelled` status. Unassigned or retry-waiting cancellation is
-terminal with no future command.
+revision/state version. An active run remains active after a cancellation command
+is acknowledged until `session.completed` or `session.failed` is projected.
+Successful assigned cancellation is represented by existing completed status
+with `cancel_requested=true`; terminal cancellation failure is represented by
+existing unavailable status with cancellation intent, not by inventing a
+`cancelled` status. Unassigned cancellation is immediately terminal with no
+command.
 
 #### Scenario: Completion without assessment is not Ready
 
@@ -406,18 +402,8 @@ terminal with no future command.
 
 #### Scenario: Runtime failure leaves Requirement lifecycle alone
 
-- **WHEN** a run reaches terminal failed state without cancellation intent
-- **THEN** the workspace shows run failure, retains any partial canonical messages and Requirement data, and does not change Requirement lifecycle, revision, or state version
-
-#### Scenario: Retry state remains active
-
-- **WHEN** server policy schedules a retry after a known attempt failure
-- **THEN** the workspace shows active/retrying, keeps the sequential slot occupied, and exposes no browser retry action or raw runtime reason
-
-#### Scenario: Terminal retry failure releases the slot
-
-- **WHEN** server policy exhausts attempts or rejects an unknown outcome
-- **THEN** the workspace shows terminal/failed, permits a later new run, and leaves Requirement lifecycle, revision, and state version unchanged
+- **WHEN** a run reaches terminal unavailable state without cancellation intent
+- **THEN** the workspace shows run failure/unavailability, retains any partial canonical messages and Requirement data, and does not change Requirement lifecycle, revision, or state version
 
 #### Scenario: Unassigned cancellation releases slot
 

@@ -15,8 +15,9 @@ remain unchanged:
   current high-entropy session and daemon credential hashing is unchanged.
 - Idempotent recovery after a committed one-shot setup claim response is lost
   remains deferred; plaintext credential recovery is not added.
-- Multi-server/HA connection ownership epochs and durable command redelivery,
-  replay, and ACK processing remain deferred where not already implemented.
+- Multi-server/HA connection ownership epochs remain deferred. Existing
+  single-server durable command redelivery, replay, and ACK processing remain
+  governed by their current contracts and are not changed by this capability.
 
 #### Scenario: Public abuse item is removed from deferred scope
 

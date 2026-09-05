@@ -15,17 +15,24 @@
 
 - [ ] Extend only `/requirements/[id]`; do not add `/requirements/[id]/review`
       or another Requirement detail route.
-- [ ] Render current packet evidence/tokens in an accessible review panel for
-      Ready Requirements and Reopen for Rejected Requirements.
+- [ ] Render current packet evidence and consume its canonical concurrency
+      identities for mutations in an accessible review panel; do not display
+      `assessment_id` or version tokens unless an intentional product/debug view
+      already exists. Render Reopen for Rejected Requirements without packet
+      dependency.
 - [ ] Keep Requesters read-only and show reviewer controls only for
       Requirement Manager/Admin/Owner when lifecycle permits.
 - [ ] Keep packet/evidence loading separate from transcript/activity rendering.
 
 ## 3. Packet loading and canonical refresh
 
-- [ ] Implement one logical Requirement + Review Packet load/refresh bundle.
-- [ ] Treat absent/non-current packet as non-reviewable; never infer packet data
-      from messages, activity, or readiness-looking text.
+- [ ] Load Requirement first; request Review Packet only for Ready.
+- [ ] Skip packet requests for non-Ready states and render Reopen for Rejected
+      from Requirement state/version alone.
+- [ ] Surface Ready packet failures as review-load errors that disable Ready
+      actions; never infer packet data from messages, activity, or text.
+- [ ] On repair, refetch Requirement under a generation, conditionally fetch
+      packet, drop old packet when non-Ready, and suppress old responses.
 - [ ] Wire SSE hints, reconnect, focus/visibility return, and explicit refresh to
       canonical refetch with request-generation/stale-response suppression.
 - [ ] Refetch after every successful review mutation.
@@ -43,9 +50,13 @@
 
 ## 5. Stale repair and concurrency
 
-- [ ] On HTTP 409, invalidate old packet, refetch Requirement and packet, show a
-      stale/review-required notice, and require explicit reviewer inspection.
-- [ ] Never auto-retry a failed review action.
+- [ ] On HTTP 409, invalidate old packet, refetch Requirement first or through a
+      coordinated generation, fetch packet only if Ready, show stale/review-
+      required notice, and keep mutations disabled until an explicit accessible
+      acknowledgement for that generation (`Review refreshed packet` for Ready,
+      `Review refreshed Requirement` for Reopen).
+- [ ] Reset that acknowledgement on every later hint/refetch; never auto-retry a
+      failed review action.
 - [ ] Add Vitest race tests for edit/lifecycle/Ready-generation/assessment
       changes, old-packet rejection, and feedback preservation.
 
@@ -63,7 +74,8 @@
 - [ ] Playwright: Ready review in canonical route; requester read-only;
       reviewer decision; Request Changes; Reopen; no duplicate route.
 - [ ] Playwright: stale 409 refetch, no optimistic transition, preserved
-      textarea, explicit re-review, missed/duplicate SSE hint repair.
+      textarea, explicit Ready-packet/Reopen-state acknowledgement, and
+      missed/duplicate SSE hint repair.
 - [ ] PostgreSQL integration: reviewer authorization, packet identity,
       assessment/state-version conflicts, atomic transitions, and durable audit
       writes.

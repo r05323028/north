@@ -504,18 +504,13 @@ send the terminal event ACK only after that projection commits:
 - `agent.activity` appends one coarse product-visible activity record;
 - `session.completed` sets `phase=terminal` and coarse status to `completed`
   without changing the Requirement; and
-- `session.failed` is an execution-attempt fact. Server retry policy either
-  keeps the logical run `phase=active` with public status `retrying`, or
-  terminalizes it with public status `failed`; neither path mutates the
-  Requirement.
+- `session.failed` sets `phase=terminal` and coarse status to `unavailable` as
+  an operational fact without choosing retry or mutating the Requirement.
 
-For an assigned run with a current attempt and `cancel_requested=true`,
-`session.completed` or `session.failed` closes that attempt/run according to
-existing cancellation semantics and cannot schedule a retry. A retrying run
-with no current attempt may be terminalized directly by the server's explicit
-cancellation transaction; no daemon fact is needed to resurrect or close a
-newer run. A `command_ack` for `session.cancel` is not a runtime fact and never
-changes `phase`. A matching duplicate/replay SHALL return the known ACK without
+For an assigned run with `cancel_requested=true`, `session.completed` and
+`session.failed` are the only existing runtime facts that close the run. A
+`command_ack` for `session.cancel` is not a runtime fact and never changes
+`phase`. A matching duplicate/replay SHALL return the known ACK without
 repeating the projection. A different payload or identity reuse remains a
 protocol conflict. Raw tool output and chain-of-thought SHALL never enter
 message/activity read models.
@@ -563,24 +558,18 @@ assessment SHALL still be a valid terminal session fact. It SHALL set
 `phase=terminal`, leave the Requirement at its current lifecycle state, and
 expose no accepted current assessment. When `cancel_requested=true`, a
 confirmed successful runtime cancellation is represented by the same existing
-`session.completed` fact; it is not a new cancellation event.
-
-A `session.failed` event is an execution-attempt fact. The server persists it
-idempotently, classifies it to a bounded safe reason, and applies the canonical
-server retry policy. A known failure with budget remaining sets the logical run
-to `Retrying`, persists `next_retry_at`, keeps `phase=active` and the
-sequential slot occupied, and later creates one explicit `session.resume`.
-Exhaustion, `execution_outcome_unknown`, revoked-owner failure, or cancellation
-terminalizes the logical run as `Failed` and releases the slot. The daemon's
-`recoverable` value never decides this policy. No completion or failure event
-shall synthesize readiness or change Requirement content/status/revision.
-Duplicate/replayed completion and failure events SHALL not repeat projections.
-Raw runtime/provider reasons SHALL not enter the public session projection.
+`session.completed` fact; it is not a new cancellation event. A `session.failed`
+event before assessment, or after failed runtime termination/cancellation, SHALL
+set `phase=terminal` and only coarse operational `status=unavailable`; its
+`recoverable` value is a daemon-local recovery fact. No completion or failure
+event SHALL synthesize readiness, consume a business retry budget, or change
+Requirement content/status/revision. Duplicate/replayed completion and failure
+events SHALL not repeat projections.
 
 #### Scenario: Failure before assessment leaves business truth intact
 
 - **WHEN** the runtime fails before producing an assessment
-- **THEN** the server persists the attempt failure fact, applies server retry policy, and leaves the Requirement's status, revision, readiness, and state_version unchanged; the run is active/retrying when budget remains or terminal/failed when policy ends it
+- **THEN** the server persists the operational failure fact, sets the run `phase=terminal` with `status=unavailable`, and the Requirement's status, revision, and state_version remain unchanged
 
 #### Scenario: Successful cancellation uses existing completion fact
 
@@ -647,12 +636,9 @@ active run remains active until a terminal runtime fact, including when its
 pinned daemon is operationally unavailable or cancellation was requested.
 
 An active run SHALL reject a different start message and SHALL create no second
-run or `session.start` command. A run is `phase=terminal` after an unassigned pre-start cancellation, a
-server cancellation of retry-waiting work, a durably projected
-`session.completed`, or a `session.failed` fact that exhausts/terminates the
-server retry policy. A known failure with retry budget remaining is not
-terminal: it remains the authoritative slot occupant while `phase=active` and
-public status `retrying`. A terminal run releases the sequential clarification
+run or `session.start` command. A run is `phase=terminal` after an unassigned
+pre-start cancellation or a durably projected `session.completed` or
+`session.failed` fact. A terminal run releases the sequential clarification
 slot; a new eligible persisted start message MAY create a new sequential run
 with a new `run_id`, the current Requirement snapshot/revision, its own
 `start_message_id`, repository set, eventual daemon pin, and independent
@@ -690,31 +676,27 @@ exactly one durable `session.cancel` for its pinned daemon, and leaves the run
 `phase=active` in the sequential clarification slot. `command_ack` only means the daemon
 recorded the command durably; it does not close the run or permit a new start.
 
-Only existing terminal runtime facts close an assigned run that has a current
-attempt: `session.completed` or a `session.failed` fact that server policy
-terminalizes, after normal session binding, event identity/sequence validation,
-and durable projection. A known retryable failure keeps the run active and
-slot-occupying; it is not closed by its attempt-level failure fact.
-`session.completed` sets `phase=terminal` and `status=completed`; it is the fact
-used when `PiClarificationAdapter` confirms successful runtime
-cancellation/termination, with no readiness assessment required. A terminal
-`session.failed` sets `phase=terminal` and public `status=failed` with a safe
-reason. No `session.cancelled` frame is introduced. `cancel_requested` remains
-true after either terminal projection. A retry-waiting run with no current
-attempt may be terminalized by the explicit server cancellation transaction.
+Only existing terminal runtime facts close an assigned run:
+`session.completed` or `session.failed`, after normal session binding, event
+identity/sequence validation, and durable projection. `session.completed` sets
+`phase=terminal` and `status=completed`; it is the fact used when
+`PiClarificationAdapter` confirms successful runtime cancellation/termination,
+with no readiness assessment required. `session.failed` sets `phase=terminal`
+and `status=unavailable` when runtime termination or cancellation fails as a
+terminal operational failure. No `session.cancelled` frame is introduced.
+`cancel_requested` remains true after either terminal projection.
 
 All dispatch and cancellation operations are run-scoped and require their
 explicit `run_id`; they SHALL not resolve the latest run. Dispatch is legal only
 for assigned `phase=active` runs with `cancel_requested=false`. An active
 run with `cancel_requested=true` remains in the sequential clarification slot, but later message dispatch
-is prohibited; repeated cancellation remains idempotent. This change SHALL expose only the small
-`awaiting_assignment`/`active`/`terminal` phase and the base coarse
+is prohibited; repeated cancellation remains idempotent. This change SHALL expose
+only the small
+`awaiting_assignment`/`active`/`terminal` phase and coarse
 `starting`/`running`/`completed`/`unavailable` status plus cancellation intent.
-The canonical execution-retry-authority extension may add public `retrying` and
-terminal `failed` projections plus safe attempt/retry fields without changing
-phase ownership or creating a browser execution-state machine. Server retry
-policy, attempt accounting, backoff, and automatic `session.resume` remain
-server-owned by that extension.
+It SHALL NOT add `Idle`/`Retrying`/final `Failed` retry policy, attempt
+accounting, retry budget, server backoff, or automatic `session.resume`; those
+belong to `introduce-runtime-retry-and-failure-state`.
 
 #### Scenario: No daemon still creates an awaiting run
 
@@ -770,32 +752,28 @@ browser UI without requiring daemon traffic or SSE replay:
 - `GET /requirements/{requirement_id}/session` for the latest clarification run
   for this Requirement, ordered by creation time. Its public projection SHALL
   include `run_id`, `requirement_id`, `start_message_id`, `phase`, `status`,
-  `cancel_requested`, `created_at`, `updated_at`, and `last_activity_at`, plus
-  safe `attempt_count`, nullable `next_retry_at`, and nullable bounded
-  `failure_reason` when the execution-retry-authority extension is active. The
+  `cancel_requested`, `created_at`, `updated_at`, and `last_activity_at`. The
   phase is `awaiting_assignment`, `active`, or `terminal` and determines
   sequential clarification slot ownership: an unassigned run with no
   `session.start` is `awaiting_assignment` and occupies the slot; an assigned
   non-terminal run, including a pinned disconnected or cancellation-requested
-  run, is `active` and occupies the slot; a policy-retrying run remains active;
-  and an unassigned cancellation or durably projected terminal
-  `session.completed`/`session.failed` run is `terminal` and releases it.
-  Base status remains `starting`/`running`/`completed`/`unavailable`; the
-  retry extension may additionally project `retrying` for active policy retry
-  and `failed` for terminal execution failure/cancellation. It SHALL return
+  run, is `active` and occupies the slot; and an unassigned cancellation or
+  durably projected `session.completed`/`session.failed` run is `terminal` and
+  releases it. Status remains the coarse
+  `starting`/`running`/`completed`/`unavailable` operational
+  health/result and may be `unavailable` in any phase. It SHALL return
   `{ "session": null }` only when no run has ever existed. An unassigned
   no-daemon run returns `phase=awaiting_assignment`, `status=unavailable`; an
-  assigned/offline current attempt returns `phase=active`, `status=unavailable`;
-  a policy retry returns `phase=active`, `status=retrying`; a normal completion
-  returns `phase=terminal`, `status=completed`; and terminal execution failure
-  returns `phase=terminal`, `status=failed`. A successful assigned
-  cancellation uses `session.completed` and therefore returns
-  terminal/completed with `cancel_requested=true`. A completed, cancelled, or
-  failed run remains readable until a newer run exists. After Run B is created,
-  it is the latest result while prior runs remain internal historical
-  persistence. `daemon_id`, retry limits, remaining budget, daemon
-  credentials/details, checkout paths, provider internals, raw runtime reasons,
-  and operation IDs are not exposed. This latest-run read is a UI convenience
+  assigned/offline run returns `phase=active`, `status=unavailable`; a normal
+  completion returns `phase=terminal`, `status=completed`; and a runtime
+  failure or unassigned cancellation returns `phase=terminal`,
+  `status=unavailable`, with `cancel_requested=true` for cancellation. A
+  successful assigned cancellation uses `session.completed` and therefore
+  returns terminal/completed with `cancel_requested=true`. A completed or
+  cancelled run remains readable until a newer run exists. After Run B is
+  created, it is the latest result while prior runs remain internal historical
+  persistence. `daemon_id`, daemon credentials/details, checkout paths, and
+  provider internals are not exposed. This latest-run read is a UI convenience
   and MUST NOT determine dispatch or cancellation identity. An explicitly
   supplied unknown or cross-Requirement `run_id` on a mutation is instead
   `404 not_found`, not `session: null`.
@@ -816,18 +794,8 @@ separate.
 
 #### Scenario: Session read returns latest run semantics
 
-- **WHEN** a requester reads `/requirements/{requirement_id}/session` after an unassigned, assigned/offline, retrying, completed, failed, or cancelled run exists
+- **WHEN** a requester reads `/requirements/{requirement_id}/session` after an unassigned, assigned/offline, completed, or cancelled run exists
 - **THEN** the server returns that latest run projection; it returns `{ "session": null }` only before any run exists, and a newer sequential run replaces the prior run as the latest result without deleting history
-
-#### Scenario: Retry projection retains the sequential slot
-
-- **WHEN** a known execution failure is retryable and the server persists a due retry
-- **THEN** the session read returns `phase=active`, `status=retrying`, safe retry fields only, and a new start cannot claim the Requirement slot
-
-#### Scenario: Terminal failure releases the slot
-
-- **WHEN** retry policy exhausts or rejects an unknown execution outcome
-- **THEN** the session read returns `phase=terminal`, `status=failed`, the Requirement remains unchanged, and a later eligible start may create a new run
 
 ### Requirement: Clarification extends Board-owned browser SSE
 
@@ -873,20 +841,17 @@ permit a new start. Repeated requests reuse the same command/result and runtime
 cancellation occurs at most once. A different start message SHALL remain a
 canonical active-run conflict until a terminal runtime fact is durably projected.
 
-Only an existing `session.completed` or a `session.failed` fact that server
-policy terminalizes closes an assigned run with a current attempt, after normal
-session binding, event identity/sequence validation, and durable projection. A
-known retryable failure keeps the run active/retrying and slot-occupying while
-its persisted due work awaits `session.resume`. If `PiClarificationAdapter`
-confirms successful runtime cancellation/termination, it emits existing
-`session.completed`; if runtime termination/cancellation ends as a terminal
-operational failure, it emits existing `session.failed`. A retry-waiting run
-with no current attempt may be terminalized directly by explicit server
-cancellation, which clears due work and creates no command. No
-`session.cancelled` protocol frame is introduced. `cancel_requested` remains
-true after terminal projection. Cancellation never mutates Requirement
-lifecycle, content, revision, or state_version and never lets the daemon decide
-retry or final-failure policy.
+Only existing `session.completed` and `session.failed` runtime facts close an
+assigned run, after normal session binding, event identity/sequence validation,
+and durable projection. Either fact sets `phase=terminal`; `session.completed`
+sets coarse `status=completed`, while `session.failed` sets
+`status=unavailable`. If `PiClarificationAdapter` confirms successful runtime
+cancellation/termination, it emits existing `session.completed`; if runtime
+termination/cancellation ends as a terminal operational failure, it emits
+existing `session.failed`. No `session.cancelled` protocol frame is introduced.
+`cancel_requested` remains true after either terminal projection. Cancellation
+never mutates Requirement lifecycle, content, revision, or state_version and
+never decides retry or final-failure policy.
 
 #### Scenario: Unassigned cancellation is immediately terminal
 

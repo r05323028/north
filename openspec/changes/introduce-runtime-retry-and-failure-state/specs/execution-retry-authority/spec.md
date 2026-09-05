@@ -22,13 +22,19 @@ increments exactly once in the same transaction that commits a new durable
 restarts and SHALL NOT increment for reconnect, command/event replay, heartbeat,
 reconciliation, ACK retry, cancellation, or local runtime recovery.
 
-A known failed attempt with remaining budget SHALL set the logical run to
-`Retrying`, persist `next_retry_at`, keep the clarification run non-terminal and
-slot-occupying, and later create one explicit `session.resume`. Exhaustion SHALL
-set logical execution to `Failed`, release the slot, and leave Requirement
-lifecycle/content/revision/readiness unchanged. `execution_outcome_unknown`
-SHALL be terminal for automatic policy purposes and SHALL never be automatically
-resubmitted.
+A known failed attempt with remaining budget, a non-cancelled run, and a valid
+pinned owner SHALL atomically close/clear the current attempt, set the logical
+run to `Retrying`, persist `next_retry_at`, keep the clarification run
+non-terminal and slot-occupying, and later create one explicit `session.resume`.
+Due scheduling SHALL require no current attempt. A cancellation request or
+invalid owner SHALL follow terminal cancellation/`owner_unavailable` policy
+instead of scheduling a resume. Exhaustion SHALL set logical execution to
+`Failed`, release the slot, and leave
+Requirement lifecycle/content/revision/readiness unchanged. Once
+`execution_outcome_unknown` terminalizes a logical run, that run SHALL never
+receive `session.resume`; later execution requires a new logical run, new
+`run_id`/protocol `session_id`, current context, a new `session.start`, and
+normal sequential-slot/state-version rules.
 
 #### Scenario: Initial command counts once
 
@@ -52,7 +58,8 @@ resubmitted.
 
 - **WHEN** a daemon reports `execution_outcome_unknown`
 - **THEN** the server records safe terminal failure, creates no automatic
-  `session.resume`, and does not allow a reconnect or replay to create one
+  `session.resume`, and permanently disallows `session.resume` for that logical
+  run; later execution must use a new run and `session.start`
 
 #### Scenario: Daemon restart does not reset attempts
 
@@ -76,8 +83,9 @@ server policy, not authority. `session.failed` is an execution-attempt fact.
 The daemon MUST NOT own a business retry budget, create a business retry, decide
 permanent execution failure, migrate a pinned run, or mutate Requirement
 lifecycle state. For `execution_outcome_unknown`, automatic daemon resubmission
-is forbidden; any later attempt is explicit, server-directed, and has a new
-command identity.
+is forbidden and the terminal logical run can never receive `session.resume`;
+any later attempt uses a new logical run and explicit `session.start` with a new
+command/run identity.
 
 #### Scenario: Reconnect is delivery only
 
@@ -127,13 +135,17 @@ conflicts retain protocol-error behavior.
 
 The server SHALL persist `next_retry_at` and discover due `Retrying` runs from
 the database after startup and during bounded polling/wakeup. A due worker SHALL
-lock/claim the session, verify cancellation/state/budget/current-attempt
-preconditions, and atomically create one pinned `session.resume`, attempt row,
-and attempt-count update. Database uniqueness and row locking SHALL make
-concurrent workers and stale timers harmless. A disconnected but registered
-pinned daemon MAY receive a durable outbox command while offline; reconnect only
-delivers it. Revoked/ineligible owners are never replaced by automatic
-migration and follow terminal owner-unavailable policy.
+lock/claim the session, verify cancellation/state/budget and
+`current_attempt_id IS NULL`, then atomically create one pinned `session.resume`,
+attempt row, new current-attempt identity, and attempt-count update. Database
+uniqueness and row locking SHALL make concurrent workers and stale timers
+harmless.
+
+Owner validity is separate from owner liveness. A valid but offline pinned owner
+MAY receive a durable outbox command for reconnect delivery; reconnect only
+delivers it. An invalid/revoked owner cannot receive new retry work, is never
+replaced by automatic migration, and follows terminal `owner_unavailable`
+policy.
 
 #### Scenario: Restart finds due retry
 
@@ -148,12 +160,18 @@ migration and follow terminal owner-unavailable policy.
 - **THEN** row locking yields one committed winner; the loser creates no second
   resume and cannot resurrect terminal cancellation
 
-#### Scenario: Pinned owner is not migrated
+#### Scenario: Pinned owner validity and liveness are distinct
 
-- **WHEN** a due retry's pinned daemon is disconnected or revoked
-- **THEN** a disconnected registered owner receives durable work for later
-  delivery, while a revoked/ineligible owner is not replaced by another daemon
-  and follows server failure policy
+- **WHEN** a due retry's owner is valid but offline
+- **THEN** server keeps ownership, queues one durable resume for reconnect, and
+  reconnect delivery creates no new attempt
+
+#### Scenario: Invalid pinned owner is not migrated
+
+- **WHEN** a due retry's owner is revoked or its registration is permanently
+  invalid
+- **THEN** server creates no new retry work, applies terminal
+  `owner_unavailable` policy, and never selects another daemon
 
 ### Requirement: Cancellation prevents future execution attempts
 

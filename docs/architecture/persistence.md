@@ -9,7 +9,7 @@ server at startup.
 | Class | Examples | Rules |
 | --- | --- | --- |
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
-| Durable coordination | daemon registrations, `session.daemon_id`, session execution state/attempts, server command outbox, event dedupe/rejection records, sequence watermarks | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
+| Durable coordination | daemon registrations/setup requests (including each new setup row's canonical client/network key; legacy rows may be null), `session.daemon_id`, session execution state/attempts, server command outbox, event dedupe/rejection records, sequence watermarks | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
 Migrations 0003–0005 implement requirements and transition audit,
 one-to-one conversations/messages, and immutable revision-bound readiness
@@ -34,11 +34,17 @@ when the retry capability lands, attempt rows, unique command/failure identities
 `attempt_count`, snapshotted limits, safe failure class, and `next_retry_at` are
 transactionally bound to the session and command outbox. Startup discovers due
 rows from the indexed database; reconnect/replay does not increment attempts.
+When public creation protection lands, its migration adds nullable setup
+`client_network_key` plus the unclaimed-key count index; pre-existing null-key
+rows retain normal expiry/claim behavior and are not counted for new keyed
+quotas.
 
 Public creation protection remains deliberately smaller: process-local client
 buckets reset on restart, while normalized-email cooldown and pending setup
-quotas remain durable. Setup quota keys use canonical client/network identity,
-not daemon labels.
+quotas remain durable. Client buckets group normalized IPv4 by `/24` and IPv6 by
+`/64`; IPv4-mapped IPv6 normalizes to IPv4. Each setup row persists its typed
+canonical network key, and unexpired unclaimed rows for that key count toward
+the pending quota; daemon labels never provide the key.
 
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.

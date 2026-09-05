@@ -102,11 +102,18 @@ mandatory and authoritative.
 
 When a review mutation returns HTTP 409 because Requirement content, lifecycle,
 Ready generation, assessment identity, or state version changed, the workspace
-SHALL leave the old packet unusable, apply no optimistic transition, refetch
-canonical Requirement and Review Packet, and require explicit reviewer
-inspection before enabling a new review mutation. It SHALL NOT automatically
-retry the failed action. Unsent Request Changes feedback SHALL survive the
-refetch and stale notice.
+SHALL leave the old packet unusable, apply no optimistic transition, refetch the
+canonical Requirement first or under one generation, and request Review Packet
+only if the refreshed Requirement is Ready. If it is no longer Ready, the old
+packet SHALL be dropped; Rejected Reopen remains Requirement-state-only. The
+workspace SHALL keep review mutations disabled until the reviewer performs
+an explicit accessible acknowledgement after stale repair: `Review refreshed
+packet` for a Ready decision, or `Review refreshed Requirement` for Reopen.
+Refetch/render completion alone is not inspection. The acknowledgement applies
+only to the current Requirement generation and, when Ready, packet generation;
+any later hint or refetch disables mutations again. The workspace SHALL NOT
+automatically retry.
+Unsent Request Changes feedback SHALL survive the refetch and stale notice.
 
 #### Scenario: Concurrent edit causes stale decision
 
@@ -114,7 +121,8 @@ refetch and stale notice.
   Requirement content, lifecycle, Ready generation, or assessment
 - **WHEN** the reviewer submits the old packet and receives HTTP 409
 - **THEN** no lifecycle transition is applied in the browser, the Requirement
-  and packet are refetched, and the old packet cannot be retried
+  and packet are refetched, the old packet cannot be retried, and mutations stay
+  disabled until the reviewer explicitly acknowledges the refreshed packet
 
 #### Scenario: Request Changes draft survives stale repair
 
@@ -122,6 +130,14 @@ refetch and stale notice.
   HTTP 409
 - **THEN** the textarea retains its text while canonical data refreshes, and no
   automatic resubmission occurs
+
+#### Scenario: Reopen stale repair uses Requirement state
+
+- **WHEN** a Reopen submission returns HTTP 409 and refreshed Requirement remains
+  Rejected
+- **THEN** the browser does not request a Review Packet, keeps Reopen disabled
+  until `Review refreshed Requirement` is acknowledged, and sends only the
+  refreshed `expected_state_version` on a later explicit retry
 
 #### Scenario: Refreshed packet is no longer reviewable
 
@@ -155,12 +171,14 @@ contract.
 
 The workspace SHALL treat SSE review/readiness hints, reconnect, focus/visibility
 return, and explicit refresh as reasons to refetch canonical Requirement and
-Review Packet state. Hints SHALL not carry or become review truth; duplicate,
+applicable Review Packet state. It SHALL refetch Requirement first or under one
+generation, request a packet only for refreshed Ready state, and drop a packet
+when state is non-Ready. Hints SHALL not carry or become review truth; duplicate,
 late, and missed hints SHALL be safe.
 
 #### Scenario: Missed hint is repaired
 
 - **WHEN** the browser reconnects or returns to focus after a possible review
   change
-- **THEN** it refetches canonical Requirement and packet state without using a
-  daemon connection or transcript inference
+- **THEN** it refetches canonical Requirement and conditionally Review Packet
+  state without using a daemon connection or transcript inference

@@ -28,11 +28,12 @@
   transport/runtime recovery.
 - Human review is rendered only in the canonical `/requirements/[id]` workspace.
   Review Packet responses own review evidence; stale 409 repair refetches
-  Requirement and packet and does not invent a browser history projection.
-- Public `/auth/request-code` and `/daemon/setup/request` use explicit socket /
-  trusted-proxy identity, process-local coarse buckets, durable resource
-  controls, and generic 429 responses; forwarding headers are ignored from
-  untrusted peers.
+  Requirement and packet, requires explicit refreshed-state acknowledgement,
+  and does not invent a browser history projection.
+- Public `/auth/request-code` and `/daemon/setup/request` use immediate socket /
+  trusted-proxy identity, fixed IPv4 `/24` / IPv6 `/64` network keys,
+  process-local coarse buckets, durable resource controls, and generic 429
+  responses; forwarding headers are ignored from untrusted peers by default.
 - Server↔daemon command/event delivery is at-least-once. Stable ids prevent
   duplicate effects; independent per-session sequence spaces detect gaps.
 

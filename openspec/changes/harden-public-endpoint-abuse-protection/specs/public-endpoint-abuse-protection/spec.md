@@ -18,10 +18,11 @@ SHALL group IPv4 by `/24` and IPv6 by `/64`.
 The server SHALL use only `X-Forwarded-For` when the immediate peer is inside
 configured `trusted_proxy_cidrs`. The default trusted-proxy set SHALL be empty.
 An untrusted peer's forwarding header SHALL be ignored. A trusted chain SHALL be
-parsed right-to-left, malformed/missing chains SHALL fall back to socket peer,
-and no valid untrusted address in the chain SHALL also fall back to socket peer.
-User-Agent, cookies, email local parts, and daemon labels SHALL NOT be client
-identity.
+parsed right-to-left as one complete comma-separated chain of IP tokens;
+malformed/missing/empty/all-trusted chains SHALL fall back to the socket peer,
+and no partial value SHALL be accepted. User-Agent, cookies, email local parts,
+and daemon labels SHALL NOT be client identity. Duplicate header fields SHALL
+be joined in wire order before validation.
 
 #### Scenario: Untrusted forwarding header is ignored
 
@@ -33,7 +34,15 @@ identity.
 - **WHEN** a configured trusted proxy supplies a valid multi-hop header containing
   trusted hops and a client address
 - **THEN** the server selects the first untrusted address from the right,
-  normalizes it, and uses its documented network bucket
+  normalizes it, derives the fixed family-specific network prefix from address
+  bits, and uses that typed bucket key
+
+#### Scenario: Mapped IPv4 identity is equivalent
+
+- **WHEN** one client reaches an endpoint once as `192.0.2.7` and once as
+  `::ffff:192.0.2.7`
+- **THEN** both requests use the same normalized IPv4 identity and typed `/24`
+  network bucket
 
 #### Scenario: Malformed forwarding input fails safe
 
@@ -46,16 +55,19 @@ identity.
 
 Only `POST /auth/request-code` and `POST /daemon/setup/request` SHALL be
 protected by this capability. Each SHALL apply a process-local, concurrency-safe
-client/network token bucket before durable creation, with documented bounded
-defaults and reset-on-process-restart behavior. The endpoints SHALL retain
+bucket keyed by endpoint plus client network before durable creation. The 0.1.0
+default for each bucket SHALL be capacity 5 with one token refilled per 120
+seconds, and buckets SHALL reset on process restart. The endpoints SHALL retain
 separate durable resource controls and SHALL NOT claim cross-process or
 cross-instance limiter guarantees, add Redis, or use a generic platform.
 
-Request-code resource control SHALL use normalized email identity. Daemon setup
-resource control SHALL use canonical client/network identity and a bounded count
-of unexpired, unclaimed pending setup rows (default maximum 3 per client/network
-in 0.1.0); daemon label alone SHALL never be a quota key. Rate-limited requests
-SHALL create no protected resource.
+Request-code resource control SHALL use normalized email identity. New daemon
+setup rows SHALL persist the canonical typed client/network key and enforce a
+bounded count of unexpired, unclaimed rows for that key (default maximum 3 per
+network key in 0.1.0). The transaction SHALL serialize count-and-insert for one
+key; daemon label alone SHALL never be a quota key. Pre-existing null-key rows
+retain claim/expiry behavior but are not counted for new keyed quotas. Rate-limited
+or quota-rejected requests SHALL create no protected resource.
 
 #### Scenario: Auth and setup buckets are isolated
 
@@ -66,8 +78,16 @@ SHALL create no protected resource.
 #### Scenario: Restart resets only process-local buckets
 
 - **WHEN** the server process restarts
-- **THEN** in-memory client buckets reset as documented while durable email
-  cooldown, code, setup-row expiry, and pending quotas remain authoritative
+- **THEN** in-memory client buckets reset as documented while the persisted
+  setup network key, durable email cooldown, code, setup-row expiry, and pending
+  quotas remain authoritative
+
+#### Scenario: Durable setup quota survives restart
+
+- **WHEN** unexpired unclaimed setup rows for one typed network key exist before
+  a process restart
+- **THEN** the pending quota still counts those rows afterward, and a rejected
+  request creates no new setup row
 
 #### Scenario: Setup labels cannot bypass pending quota
 

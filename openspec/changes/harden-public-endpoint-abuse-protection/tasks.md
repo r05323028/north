@@ -9,10 +9,11 @@
 - [ ] Walk trusted chains right-to-left, reject malformed/missing chains
       safely, and fall back to immediate peer; ignore untrusted forwarding
       headers.
-- [ ] Define IPv4 `/24` and IPv6 `/64` coarse bucket keys without using
-      User-Agent, cookies, email local parts, or daemon labels.
+- [ ] Define typed IPv4 `/24` and IPv6 `/64` network keys from address bits;
+      normalize mapped IPv6 before deriving the key and reuse the exact key for
+      process buckets and durable setup quotas.
 - [ ] Add unit tests for direct, trusted, untrusted, multi-hop, malformed,
-      all-trusted, and mapped-address cases.
+      duplicate-header, all-trusted, mapped-address, and prefix-boundary cases.
 
 ## 2. Process-local client limiter
 
@@ -30,19 +31,27 @@
 - [ ] Preserve normalized-email one-active-code, cooldown, supersession, and
       generic code-free response semantics; keep verification-attempt budget
       separate.
-- [ ] Apply client bucket and transactionally enforce bounded pending setup
-      quota (default maximum 3 unexpired/unclaimed rows per client/network) on
-      `/daemon/setup/request` using canonical client/network identity, never
-      label alone.
-- [ ] Define expired/pending row counting and retain bounded cleanup; rejected
-      requests create no setup row or credential.
+- [ ] Add migration for nullable `client_network_key` with an explicit legacy-row
+      policy: existing null-key rows retain claim/expiry behavior but are not
+      counted for new keyed quotas; require non-null keys on new rows and never
+      fabricate identities.
+- [ ] Persist the derived typed network key on new setup-request rows and
+      transactionally enforce bounded quota (default maximum 3 unexpired/unclaimed
+      rows per key) under a deterministic per-key advisory transaction lock; never
+      use label alone.
+- [ ] Add the keyed pending-count index (`client_network_key`, `expires_at`)
+      for unclaimed rows while retaining the existing expiry-cleanup index.
+- [ ] Define pending/approved/claimed/expired row counting and retain bounded
+      cleanup; rejected requests create no setup row or credential.
 - [ ] Add concurrent PostgreSQL tests for quota bypass attempts, client/resource
-      isolation, no resource creation on rejection, and legitimate success.
+      isolation, claimed/expired-row behavior, no resource creation on rejection,
+      and legitimate success.
 
 ## 4. Errors and observability
 
 - [ ] Implement stable HTTP 429 `{ "error": "rate_limited" }` and positive
-      integer `Retry-After` without disclosing which control fired.
+      integer `Retry-After` without disclosing which control fired; use the
+      maximum safe retry delay when multiple controls reject.
 - [ ] Keep invalid/auth/setup errors generic and responses free of codes,
       tokens, credentials, raw runtime details, and account enumeration clues.
 - [ ] Add safe endpoint/category/allow-reject metrics or structured events;

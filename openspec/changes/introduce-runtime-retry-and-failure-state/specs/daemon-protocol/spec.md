@@ -13,8 +13,9 @@ commit or durably reject the business fact before its terminal
 `event_ack(status=accepted|rejected)`. `session.failed` is an
 execution-attempt fact: retry policy may persist `Retrying`/`next_retry_at` or
 terminal `Failed`; it never mutates Requirement lifecycle. Duplicate facts
-remain replay-safe and inert. `session.resume` remains a server command and
-transport replay state remains in reconciliation/watermark records.
+remain replay-safe and inert. `session.resume` remains a server command only for
+eligible non-terminal runs; a terminal unknown-outcome run cannot receive it.
+Transport replay state remains in reconciliation/watermark records.
 
 #### Scenario: Runtime event reaches its owning projection
 
@@ -47,5 +48,6 @@ transport replay state remains in reconciliation/watermark records.
 #### Scenario: Unknown outcome remains a local execution fact
 
 - **WHEN** a daemon reports an unknown outcome after local reattachment fails
-- **THEN** the server records the fact, applies no automatic resubmission, and
-  any later attempt requires a new explicit server command identity
+- **THEN** the server records the fact, creates no automatic `session.resume`,
+  and any later execution uses a new logical run/protocol `session_id` and an
+  explicit `session.start` command
