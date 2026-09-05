@@ -209,6 +209,33 @@ function mount(value = workspace()) {
   return { container, root };
 }
 
+async function renderWorkspace(mounted: ReturnType<typeof mount>) {
+  await act(async () => {
+    mounted.root.render(<RequirementConversationWorkspace id={requirement.id} />);
+    await settle();
+  });
+}
+
+async function renderAndSend(
+  mounted: ReturnType<typeof mount>,
+  body: string,
+) {
+  await renderWorkspace(mounted);
+  const input = mounted.container.querySelector<HTMLTextAreaElement>(
+    "#clarification-message",
+  );
+  const send = mounted.container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Send clarification message"]',
+  );
+  if (!input || !send) throw new Error("composer controls missing");
+  await act(async () => {
+    setValue(input, body);
+    send.click();
+    await settle();
+  });
+  return input;
+}
+
 async function settle() {
   await Promise.resolve();
   await Promise.resolve();
@@ -309,22 +336,7 @@ describe("RequirementConversationWorkspace", () => {
     const value = workspace();
     const { container, root } = mount(value);
 
-    await act(async () => {
-      root.render(<RequirementConversationWorkspace id={requirement.id} />);
-      await settle();
-    });
-    const input = container.querySelector<HTMLTextAreaElement>(
-      "#clarification-message",
-    );
-    const send = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Send clarification message"]',
-    );
-    if (!input || !send) throw new Error("composer controls missing");
-    await act(async () => {
-      setValue(input, "New scope");
-      send.click();
-      await settle();
-    });
+    await renderAndSend({ container, root }, "New scope");
 
     expect(mocks.postMessage).toHaveBeenCalledWith(requirement.id, "New scope");
     expect(mocks.start).toHaveBeenCalledWith(requirement.id, {
@@ -345,24 +357,7 @@ describe("RequirementConversationWorkspace", () => {
     mocks.postMessage.mockResolvedValueOnce(persisted);
     mocks.dispatch.mockResolvedValueOnce(run({ run_id: "run-a" }));
     const mounted = mount(active);
-    await act(async () => {
-      mounted.root.render(
-        <RequirementConversationWorkspace id={requirement.id} />,
-      );
-      await settle();
-    });
-    const input = mounted.container.querySelector<HTMLTextAreaElement>(
-      "#clarification-message",
-    );
-    const send = mounted.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Send clarification message"]',
-    );
-    if (!input || !send) throw new Error("composer controls missing");
-    await act(async () => {
-      setValue(input, "Follow-up");
-      send.click();
-      await settle();
-    });
+    const input = await renderAndSend(mounted, "Follow-up");
     expect(mocks.dispatch).toHaveBeenCalledWith(
       requirement.id,
       "run-a",
@@ -371,6 +366,10 @@ describe("RequirementConversationWorkspace", () => {
     expect(mocks.start).not.toHaveBeenCalled();
 
     mocks.postMessage.mockRejectedValueOnce(new Error("network"));
+    const send = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Send clarification message"]',
+    );
+    if (!send) throw new Error("composer controls missing");
     await act(async () => {
       setValue(input, "Keep this draft");
       send.click();
@@ -450,24 +449,7 @@ describe("RequirementConversationWorkspace", () => {
       new ApiError(409, "conflict", "conflict"),
     );
     const mounted = mount(workspace({ run: run({ run_id: "run-a" }) }));
-    await act(async () => {
-      mounted.root.render(
-        <RequirementConversationWorkspace id={requirement.id} />,
-      );
-      await settle();
-    });
-    const input = mounted.container.querySelector<HTMLTextAreaElement>(
-      "#clarification-message",
-    );
-    const send = mounted.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Send clarification message"]',
-    );
-    if (!input || !send) throw new Error("composer controls missing");
-    await act(async () => {
-      setValue(input, "Follow-up");
-      send.click();
-      await settle();
-    });
+    await renderAndSend(mounted, "Follow-up");
     expect(mocks.dispatch).toHaveBeenCalledWith(
       requirement.id,
       "run-a",
@@ -495,24 +477,7 @@ describe("RequirementConversationWorkspace", () => {
     );
     const value = workspace();
     const mounted = mount(value);
-    await act(async () => {
-      mounted.root.render(
-        <RequirementConversationWorkspace id={requirement.id} />,
-      );
-      await settle();
-    });
-    const input = mounted.container.querySelector<HTMLTextAreaElement>(
-      "#clarification-message",
-    );
-    const send = mounted.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Send clarification message"]',
-    );
-    if (!input || !send) throw new Error("composer controls missing");
-    await act(async () => {
-      setValue(input, "Start");
-      send.click();
-      await settle();
-    });
+    await renderAndSend(mounted, "Start");
     expect(mocks.postMessage).toHaveBeenCalledOnce();
     expect(mocks.start).toHaveBeenCalledOnce();
     expect(mocks.dispatch).not.toHaveBeenCalled();
@@ -538,12 +503,7 @@ describe("RequirementConversationWorkspace", () => {
       }),
     );
     const mounted = mount(workspace({ run: pending }));
-    await act(async () => {
-      mounted.root.render(
-        <RequirementConversationWorkspace id={requirement.id} />,
-      );
-      await settle();
-    });
+    await renderWorkspace(mounted);
     const send = mounted.container.querySelector<HTMLButtonElement>(
       'button[aria-label="Send clarification message"]',
     );
@@ -579,24 +539,7 @@ describe("RequirementConversationWorkspace", () => {
         run: run({ run_id: "run-a", phase: "terminal", status: "completed" }),
       }),
     );
-    await act(async () => {
-      mounted.root.render(
-        <RequirementConversationWorkspace id={requirement.id} />,
-      );
-      await settle();
-    });
-    const input = mounted.container.querySelector<HTMLTextAreaElement>(
-      "#clarification-message",
-    );
-    const send = mounted.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Send clarification message"]',
-    );
-    if (!input || !send) throw new Error("composer controls missing");
-    await act(async () => {
-      setValue(input, "Next run");
-      send.click();
-      await settle();
-    });
+    await renderAndSend(mounted, "Next run");
     expect(mocks.start).toHaveBeenCalledWith(requirement.id, {
       message_id: "message-next",
       expected_state_version: requirement.state_version,

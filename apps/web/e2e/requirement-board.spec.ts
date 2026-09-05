@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 type Status = "draft" | "discussing" | "ready" | "accepted" | "rejected";
 
@@ -286,31 +286,39 @@ test("create uses canonical response and opens requirement workspace", async ({
   });
 });
 
-test("direct workspace loads canonical bundle and uses explicit start, dispatch, and cancel URLs", async ({
-  page,
-}) => {
-  const current = requirement("r-1", "draft", "Conversation requirement");
-  const messages: Array<{
-    id: string;
-    conversation_id: string;
-    author_user_id: string;
-    kind: "requester";
-    body: string;
-    created_at: string;
-  }> = [];
-  let currentRun: {
-    run_id: string;
-    requirement_id: string;
-    start_message_id: string;
-    phase: "active" | "terminal";
-    status: "starting" | "running" | "completed";
-    cancel_requested: boolean;
-    created_at: string;
-    updated_at: string;
-    last_activity_at: string;
-  } | null = null;
-  const requests: string[] = [];
+type WorkspaceMessage = {
+  id: string;
+  conversation_id: string;
+  author_user_id: string;
+  kind: "requester";
+  body: string;
+  created_at: string;
+};
 
+type WorkspaceRunFixture = {
+  run_id: string;
+  requirement_id: string;
+  start_message_id: string;
+  phase: "awaiting_assignment" | "active" | "terminal";
+  status: "starting" | "running" | "completed" | "unavailable";
+  cancel_requested: boolean;
+  created_at: string;
+  updated_at: string;
+  last_activity_at: string;
+};
+
+type WorkspaceRouteState = {
+  current: () => Requirement;
+  messages: WorkspaceMessage[];
+  requests: string[];
+  session?: () => WorkspaceRunFixture | null;
+  extra: (route: Route, url: URL) => Promise<boolean>;
+};
+
+async function installWorkspaceRoutes(
+  page: Page,
+  state: WorkspaceRouteState,
+) {
   await page.route("**/auth/me", async (route) => {
     await route.fulfill({
       body: JSON.stringify({
@@ -331,10 +339,10 @@ test("direct workspace loads canonical bundle and uses explicit start, dispatch,
       await route.continue();
       return;
     }
-    requests.push(`${request.method()} ${url.pathname}${url.search}`);
+    state.requests.push(`${request.method()} ${url.pathname}${url.search}`);
     if (request.method() === "GET" && url.pathname === "/requirements/r-1") {
       await route.fulfill({
-        body: JSON.stringify(current),
+        body: JSON.stringify(state.current()),
         headers: jsonHeaders(),
       });
       return;
@@ -347,8 +355,8 @@ test("direct workspace loads canonical bundle and uses explicit start, dispatch,
         body: JSON.stringify({
           id: "conversation-1",
           requirement_id: "r-1",
-          created_at: current.created_at,
-          messages,
+          created_at: state.current().created_at,
+          messages: state.messages,
           next_offset: null,
         }),
         headers: jsonHeaders(),
@@ -359,17 +367,16 @@ test("direct workspace loads canonical bundle and uses explicit start, dispatch,
       request.method() === "POST" &&
       url.pathname === "/requirements/r-1/conversation/messages"
     ) {
-      const body = JSON.parse(request.postData() ?? "{}");
-      const id = `message-${messages.length + 1}`;
-      const persisted = {
-        id,
+      const body = JSON.parse(request.postData() ?? "{}") as { body?: string };
+      const persisted: WorkspaceMessage = {
+        id: `message-${state.messages.length + 1}`,
         conversation_id: "conversation-1",
         author_user_id: "user-1",
-        kind: "requester" as const,
-        body: body.body,
-        created_at: `2026-01-01T00:00:0${messages.length}Z`,
+        kind: "requester",
+        body: body.body ?? "",
+        created_at: `2026-01-01T00:00:0${state.messages.length}Z`,
       };
-      messages.push(persisted);
+      state.messages.push(persisted);
       await route.fulfill({
         status: 201,
         body: JSON.stringify(persisted),
@@ -377,6 +384,7 @@ test("direct workspace loads canonical bundle and uses explicit start, dispatch,
       });
       return;
     }
+    if (await state.extra(route, url)) return;
     if (
       request.method() === "GET" &&
       url.pathname === "/requirements/r-1/readiness"
@@ -402,59 +410,81 @@ test("direct workspace loads canonical bundle and uses explicit start, dispatch,
       url.pathname === "/requirements/r-1/session"
     ) {
       await route.fulfill({
-        body: JSON.stringify({ session: currentRun }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (
-      request.method() === "POST" &&
-      url.pathname === "/requirements/r-1/clarification/start"
-    ) {
-      const body = JSON.parse(request.postData() ?? "{}");
-      currentRun = {
-        run_id: "run-a",
-        requirement_id: "r-1",
-        start_message_id: body.message_id,
-        phase: "active",
-        status: "starting",
-        cancel_requested: false,
-        created_at: "2026-01-01T00:01:00Z",
-        updated_at: "2026-01-01T00:01:00Z",
-        last_activity_at: "2026-01-01T00:01:00Z",
-      };
-      await route.fulfill({
-        status: 202,
-        body: JSON.stringify({ session: currentRun }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (request.method() === "POST" && url.pathname.endsWith("/dispatch")) {
-      if (currentRun) currentRun = { ...currentRun, status: "running" };
-      await route.fulfill({
-        status: 202,
-        body: JSON.stringify({ session: currentRun }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (request.method() === "POST" && url.pathname.endsWith("/cancel")) {
-      if (currentRun)
-        currentRun = {
-          ...currentRun,
-          phase: "terminal",
-          status: "completed",
-          cancel_requested: true,
-        };
-      await route.fulfill({
-        status: 202,
-        body: JSON.stringify({ session: currentRun }),
+        body: JSON.stringify({ session: state.session?.() ?? null }),
         headers: jsonHeaders(),
       });
       return;
     }
     await route.continue();
+  });
+}
+
+test("direct workspace loads canonical bundle and uses explicit start, dispatch, and cancel URLs", async ({
+  page,
+}) => {
+  const current = requirement("r-1", "draft", "Conversation requirement");
+  const messages: WorkspaceMessage[] = [];
+  let currentRun: WorkspaceRunFixture | null = null;
+  const requests: string[] = [];
+
+  await installWorkspaceRoutes(page, {
+    current: () => current,
+    messages,
+    requests,
+    session: () => currentRun,
+    extra: async (route, url) => {
+      const request = route.request();
+      if (
+        request.method() === "POST" &&
+        url.pathname === "/requirements/r-1/clarification/start"
+      ) {
+        const body = JSON.parse(request.postData() ?? "{}") as {
+          message_id: string;
+        };
+        currentRun = {
+          run_id: "run-a",
+          requirement_id: "r-1",
+          start_message_id: body.message_id,
+          phase: "active",
+          status: "starting",
+          cancel_requested: false,
+          created_at: "2026-01-01T00:01:00Z",
+          updated_at: "2026-01-01T00:01:00Z",
+          last_activity_at: "2026-01-01T00:01:00Z",
+        };
+        await route.fulfill({
+          status: 202,
+          body: JSON.stringify({ session: currentRun }),
+          headers: jsonHeaders(),
+        });
+        return true;
+      }
+      if (request.method() === "POST" && url.pathname.endsWith("/dispatch")) {
+        if (currentRun) currentRun = { ...currentRun, status: "running" };
+        await route.fulfill({
+          status: 202,
+          body: JSON.stringify({ session: currentRun }),
+          headers: jsonHeaders(),
+        });
+        return true;
+      }
+      if (request.method() === "POST" && url.pathname.endsWith("/cancel")) {
+        if (currentRun)
+          currentRun = {
+            ...currentRun,
+            phase: "terminal",
+            status: "completed",
+            cancel_requested: true,
+          };
+        await route.fulfill({
+          status: 202,
+          body: JSON.stringify({ session: currentRun }),
+          headers: jsonHeaders(),
+        });
+        return true;
+      }
+      return false;
+    },
   });
 
   await page.goto("/requirements/r-1");
@@ -517,18 +547,6 @@ test("direct workspace loads canonical bundle and uses explicit start, dispatch,
   ).toBeVisible();
 });
 
-type WorkspaceRunFixture = {
-  run_id: string;
-  requirement_id: string;
-  start_message_id: string;
-  phase: "awaiting_assignment" | "active" | "terminal";
-  status: "starting" | "running" | "completed" | "unavailable";
-  cancel_requested: boolean;
-  created_at: string;
-  updated_at: string;
-  last_activity_at: string;
-};
-
 test("workspace browser states support reload retry, cancellation pending, terminal starts, and conflicts", async ({
   page,
 }) => {
@@ -544,7 +562,7 @@ test("workspace browser states support reload retry, cancellation pending, termi
     updated_at: "2026-01-01T00:01:00Z",
     last_activity_at: "2026-01-01T00:01:00Z",
   };
-  const messages: Array<Record<string, unknown>> = [
+  const messages: WorkspaceMessage[] = [
     {
       id: "message-start",
       conversation_id: "conversation-1",
@@ -561,194 +579,119 @@ test("workspace browser states support reload retry, cancellation pending, termi
   let cancelCalls = 0;
   let dispatchCalls = 0;
 
-  await page.route("**/auth/me", async (route) => {
-    await route.fulfill({
-      body: JSON.stringify({
-        id: "user-1",
-        email: "user@example.com",
-        role: "Requester",
-      }),
-      headers: jsonHeaders(),
-    });
-  });
-  await page.route("**/events", async (route) => {
-    await route.fulfill({ body: ":\n\n", headers: eventHeaders });
-  });
-  await page.route("**/requirements/**", async (route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (!isApiFetch(request)) {
-      await route.continue();
-      return;
-    }
-    requests.push(`${request.method()} ${url.pathname}${url.search}`);
-    if (request.method() === "GET" && url.pathname === "/requirements/r-1") {
-      await route.fulfill({
-        body: JSON.stringify(current),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (
-      request.method() === "GET" &&
-      url.pathname === "/requirements/r-1/conversation"
-    ) {
-      await route.fulfill({
-        body: JSON.stringify({
-          id: "conversation-1",
-          requirement_id: "r-1",
-          created_at: current.created_at,
-          messages,
-          next_offset: null,
-        }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (
-      request.method() === "POST" &&
-      url.pathname === "/requirements/r-1/conversation/messages"
-    ) {
-      const body = JSON.parse(request.postData() ?? "{}");
-      const persisted = {
-        id: `message-${messages.length + 1}`,
-        conversation_id: "conversation-1",
-        author_user_id: "user-1",
-        kind: "requester",
-        body: body.body,
-        created_at: `2026-01-01T00:00:0${messages.length}Z`,
-      };
-      messages.push(persisted);
-      await route.fulfill({
-        status: 201,
-        body: JSON.stringify(persisted),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (
-      request.method() === "GET" &&
-      url.pathname === "/requirements/r-1/readiness"
-    ) {
-      await route.fulfill({
-        body: JSON.stringify({ assessment: null }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (
-      request.method() === "GET" &&
-      url.pathname === "/requirements/r-1/activity"
-    ) {
-      await route.fulfill({
-        body: JSON.stringify({ activities: [], next_offset: null }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (
-      request.method() === "GET" &&
-      url.pathname === "/requirements/r-1/session"
-    ) {
+  await installWorkspaceRoutes(page, {
+    current: () => current,
+    messages,
+    requests,
+    extra: async (route, url) => {
+      const request = route.request();
       if (
-        promoteToCancellationPending &&
-        currentRun.phase === "active" &&
-        !currentRun.cancel_requested
+        request.method() === "GET" &&
+        url.pathname === "/requirements/r-1/session"
       ) {
-        currentRun = { ...currentRun, cancel_requested: true };
-        promoteToCancellationPending = false;
+        if (
+          promoteToCancellationPending &&
+          currentRun.phase === "active" &&
+          !currentRun.cancel_requested
+        ) {
+          currentRun = { ...currentRun, cancel_requested: true };
+          promoteToCancellationPending = false;
+        }
+        await route.fulfill({
+          body: JSON.stringify({ session: currentRun }),
+          headers: jsonHeaders(),
+        });
+        return true;
       }
-      await route.fulfill({
-        body: JSON.stringify({ session: currentRun }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (request.method() === "PATCH" && url.pathname === "/requirements/r-1") {
-      patchCalls += 1;
-      current = {
-        ...current,
-        title: "Canonical title after conflict",
-        state_version: 2,
-        updated_at: "2026-01-01T00:02:00Z",
-      };
-      await route.fulfill({
-        status: 409,
-        body: JSON.stringify({ error: "state_version_conflict" }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (
-      request.method() === "POST" &&
-      url.pathname === "/requirements/r-1/clarification/start"
-    ) {
-      const body = JSON.parse(request.postData() ?? "{}");
-      startBodies.push(body);
-      if (startBodies.length === 1) {
+      if (request.method() === "PATCH" && url.pathname === "/requirements/r-1") {
+        patchCalls += 1;
+        current = {
+          ...current,
+          title: "Canonical title after conflict",
+          state_version: 2,
+          updated_at: "2026-01-01T00:02:00Z",
+        };
+        await route.fulfill({
+          status: 409,
+          body: JSON.stringify({ error: "state_version_conflict" }),
+          headers: jsonHeaders(),
+        });
+        return true;
+      }
+      if (
+        request.method() === "POST" &&
+        url.pathname === "/requirements/r-1/clarification/start"
+      ) {
+        const body = JSON.parse(request.postData() ?? "{}") as Record<
+          string,
+          unknown
+        >;
+        startBodies.push(body);
+        if (startBodies.length === 1) {
+          currentRun = {
+            ...currentRun,
+            run_id: "run-active",
+            phase: "active",
+            status: "running",
+            cancel_requested: false,
+            start_message_id: String(body.message_id ?? ""),
+          };
+          promoteToCancellationPending = true;
+          await route.fulfill({
+            status: 202,
+            body: JSON.stringify({ session: currentRun }),
+            headers: jsonHeaders(),
+          });
+        } else {
+          currentRun = {
+            run_id: "run-unavailable",
+            requirement_id: "r-1",
+            start_message_id: String(body.message_id ?? ""),
+            phase: "awaiting_assignment",
+            status: "unavailable",
+            cancel_requested: false,
+            created_at: "2026-01-01T00:03:00Z",
+            updated_at: "2026-01-01T00:03:00Z",
+            last_activity_at: "2026-01-01T00:03:00Z",
+          };
+          await route.fulfill({
+            status: 503,
+            body: JSON.stringify({
+              error: "clarification_unavailable",
+              requirement: current,
+              session: currentRun,
+            }),
+            headers: jsonHeaders(),
+          });
+        }
+        return true;
+      }
+      if (request.method() === "POST" && url.pathname.endsWith("/dispatch")) {
+        dispatchCalls += 1;
+        await route.fulfill({
+          status: 409,
+          body: JSON.stringify({ error: "unexpected_dispatch" }),
+          headers: jsonHeaders(),
+        });
+        return true;
+      }
+      if (request.method() === "POST" && url.pathname.endsWith("/cancel")) {
+        cancelCalls += 1;
         currentRun = {
           ...currentRun,
-          run_id: "run-active",
-          phase: "active",
-          status: "running",
-          cancel_requested: false,
-          start_message_id: body.message_id,
+          phase: "terminal",
+          status: "completed",
+          cancel_requested: true,
         };
-        promoteToCancellationPending = true;
         await route.fulfill({
           status: 202,
           body: JSON.stringify({ session: currentRun }),
           headers: jsonHeaders(),
         });
-      } else {
-        currentRun = {
-          run_id: "run-unavailable",
-          requirement_id: "r-1",
-          start_message_id: body.message_id,
-          phase: "awaiting_assignment",
-          status: "unavailable",
-          cancel_requested: false,
-          created_at: "2026-01-01T00:03:00Z",
-          updated_at: "2026-01-01T00:03:00Z",
-          last_activity_at: "2026-01-01T00:03:00Z",
-        };
-        await route.fulfill({
-          status: 503,
-          body: JSON.stringify({
-            error: "clarification_unavailable",
-            requirement: current,
-            session: currentRun,
-          }),
-          headers: jsonHeaders(),
-        });
+        return true;
       }
-      return;
-    }
-    if (request.method() === "POST" && url.pathname.endsWith("/dispatch")) {
-      dispatchCalls += 1;
-      await route.fulfill({
-        status: 409,
-        body: JSON.stringify({ error: "unexpected_dispatch" }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    if (request.method() === "POST" && url.pathname.endsWith("/cancel")) {
-      cancelCalls += 1;
-      currentRun = {
-        ...currentRun,
-        phase: "terminal",
-        status: "completed",
-        cancel_requested: true,
-      };
-      await route.fulfill({
-        status: 202,
-        body: JSON.stringify({ session: currentRun }),
-        headers: jsonHeaders(),
-      });
-      return;
-    }
-    await route.continue();
+      return false;
+    },
   });
 
   await page.goto("/requirements/r-1");

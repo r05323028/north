@@ -8,7 +8,6 @@ import {
 } from "@/lib/conversation-pagination";
 
 function page(
-  offset: number,
   ids: string[],
   next_offset: number | null,
 ): ConversationPage {
@@ -28,96 +27,77 @@ function page(
   };
 }
 
+async function repairShiftedPages(
+  previous: ReturnType<typeof buildConversationHistory>,
+  finalIds: string[],
+  finalNextOffset: number | null,
+) {
+  const calls: number[] = [];
+  const repaired = await repairConversationHistory(
+    async (offset) => {
+      calls.push(offset);
+      if (offset === 0) return page(["X", "A"], 2);
+      if (offset === 2) return page(["B", "C"], 4);
+      return page(finalIds, finalNextOffset);
+    },
+    previous,
+    2,
+  );
+  return { calls, messages: repaired.messages };
+}
+
+function expectShiftedRepair(
+  result: Awaited<ReturnType<typeof repairShiftedPages>>,
+  expectedIds: string[],
+) {
+  expect(result.calls).toEqual([0, 2, 4]);
+  expect(result.messages.map((message) => message.id)).toEqual(expectedIds);
+  expect(new Set(result.messages.map((message) => message.id)).size).toBe(
+    expectedIds.length,
+  );
+}
+
 describe("conversation pagination repair", () => {
   it("follows shifted next offsets and re-observes every prior message", async () => {
-    const previous = buildConversationHistory([
-      { offset: 0, page: page(0, ["A", "B"], 2) },
-      { offset: 2, page: page(2, ["C", "D"], null) },
-    ]);
-    const calls: number[] = [];
-    const repaired = await repairConversationHistory(
-      async (offset) => {
-        calls.push(offset);
-        if (offset === 0) return page(offset, ["X", "A"], 2);
-        if (offset === 2) return page(offset, ["B", "C"], 4);
-        return page(offset, ["D"], null);
-      },
-      previous,
-      2,
+    const result = await repairShiftedPages(
+      buildConversationHistory([
+        { offset: 0, page: page(["A", "B"], 2) },
+        { offset: 2, page: page(["C", "D"], null) },
+      ]),
+      ["D"],
+      null,
     );
-
-    expect(calls).toEqual([0, 2, 4]);
-    expect(repaired.messages.map((message) => message.id)).toEqual([
-      "A",
-      "B",
-      "C",
-      "D",
-      "X",
-    ]);
-    expect(new Set(repaired.messages.map((message) => message.id)).size).toBe(
-      5,
-    );
+    expectShiftedRepair(result, ["A", "B", "C", "D", "X"]);
   });
 
   it("continues to the new end when previously loaded history was complete", async () => {
-    const previous = buildConversationHistory([
-      { offset: 0, page: page(0, ["A", "B"], null) },
-    ]);
-    const calls: number[] = [];
-    const repaired = await repairConversationHistory(
-      async (offset) => {
-        calls.push(offset);
-        if (offset === 0) return page(offset, ["X", "A"], 2);
-        if (offset === 2) return page(offset, ["B", "C"], 4);
-        return page(offset, ["D"], null);
-      },
-      previous,
-      2,
+    const result = await repairShiftedPages(
+      buildConversationHistory([
+        { offset: 0, page: page(["A", "B"], null) },
+      ]),
+      ["D"],
+      null,
     );
-
-    expect(calls).toEqual([0, 2, 4]);
-    expect(repaired.messages.map((message) => message.id)).toEqual([
-      "A",
-      "B",
-      "C",
-      "D",
-      "X",
-    ]);
+    expectShiftedRepair(result, ["A", "B", "C", "D", "X"]);
   });
 
   it("does not omit prior IDs when new pages shift before an old numeric end", async () => {
-    const previous = buildConversationHistory([
-      { offset: 0, page: page(0, ["A", "B"], 2) },
-      { offset: 2, page: page(2, ["C", "D"], 4) },
-    ]);
-    const calls: number[] = [];
-    const repaired = await repairConversationHistory(
-      async (offset) => {
-        calls.push(offset);
-        if (offset === 0) return page(offset, ["X", "A"], 2);
-        if (offset === 2) return page(offset, ["B", "C"], 4);
-        return page(offset, ["D", "E"], 6);
-      },
-      previous,
-      2,
+    const result = await repairShiftedPages(
+      buildConversationHistory([
+        { offset: 0, page: page(["A", "B"], 2) },
+        { offset: 2, page: page(["C", "D"], 4) },
+      ]),
+      ["D", "E"],
+      6,
     );
-
-    expect(calls).toEqual([0, 2, 4]);
-    expect(repaired.messages.map((message) => message.id)).toEqual([
-      "A",
-      "B",
-      "C",
-      "D",
-      "E",
-      "X",
-    ]);
+    expectShiftedRepair(result, ["A", "B", "C", "D", "E", "X"]);
   });
 
   it("deduplicates overlapping pages and follows only canonical next offsets", () => {
     const history = buildConversationHistory([
-      { offset: 0, page: page(0, ["A", "B"], 2) },
+      { offset: 0, page: page(["A", "B"], 2) },
     ]);
-    const expanded = appendConversationPage(history, page(2, ["B", "C"], null));
+    const expanded = appendConversationPage(history, page(["B", "C"], null));
     expect(expanded.messages.map((message) => message.id)).toEqual([
       "A",
       "B",

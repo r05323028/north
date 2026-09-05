@@ -150,7 +150,9 @@ let fetchMock = vi.fn((path: string) =>
   Promise.resolve(response(valueFor(path))),
 );
 
-function Probe({ beforeRefresh }: { beforeRefresh?: (count: number) => void }) {
+type ProbeProps = { beforeRefresh?: (count: number) => void };
+
+function Probe({ beforeRefresh }: ProbeProps) {
   const state = useRequirementConversationWorkspace("requirement-1");
   const refreshCount = useRef(0);
   return (
@@ -239,6 +241,124 @@ function setupPages() {
   vi.stubGlobal("EventSource", FakeEventSource);
 }
 
+function stubConversationRepairRequests(
+  bundleRequirement: { promise: Promise<ReturnType<typeof response>> },
+  conversationMore: { promise: Promise<ReturnType<typeof response>> },
+  isRepairing: () => boolean,
+  isLoadingMore: () => boolean,
+) {
+  fetchMock.mockImplementation((path: string) => {
+    const url = new URL(path, "http://north.test");
+    if (
+      isRepairing() &&
+      url.pathname === "/requirements/requirement-1" &&
+      url.search === ""
+    ) {
+      return bundleRequirement.promise;
+    }
+    if (
+      isRepairing() &&
+      url.pathname === "/requirements/requirement-1/conversation"
+    ) {
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      if (offset === 0)
+        return Promise.resolve(response(conversationPage(["N", "A"], 4)));
+      if (offset === 4)
+        return Promise.resolve(response(conversationPage(["B", "C"], null)));
+    }
+    if (
+      isLoadingMore() &&
+      url.pathname === "/requirements/requirement-1/conversation" &&
+      Number(url.searchParams.get("offset") ?? 0) === 2
+    ) {
+      return conversationMore.promise;
+    }
+    return Promise.resolve(response(valueFor(path)));
+  });
+}
+
+type StalePaginationResource = "conversation" | "activity";
+
+function stubStalePaginationRequests(
+  resource: StalePaginationResource,
+  repairRequirement: { promise: Promise<ReturnType<typeof response>> },
+  staleMore: { promise: Promise<ReturnType<typeof response>> },
+  isRepairing: () => boolean,
+  onStaleMore: () => void,
+) {
+  const endpoint = `/requirements/requirement-1/${resource}`;
+  fetchMock.mockImplementation((path: string) => {
+    const url = new URL(path, "http://north.test");
+    if (
+      isRepairing() &&
+      url.pathname === "/requirements/requirement-1" &&
+      url.search === ""
+    ) {
+      return repairRequirement.promise;
+    }
+    if (isRepairing() && url.pathname === endpoint) {
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      if (resource === "conversation") {
+        if (offset === 0)
+          return Promise.resolve(response(conversationPage(["X", "A"], 2)));
+        if (offset === 2)
+          return Promise.resolve(
+            response(conversationPage(["B", "C"], null)),
+          );
+      } else {
+        if (offset === 0)
+          return Promise.resolve(
+            response({ activities: [], next_offset: 2 }),
+          );
+        if (offset === 2)
+          return Promise.resolve(
+            response({
+              activities: [activity(10), activity(11)],
+              next_offset: null,
+            }),
+          );
+      }
+    }
+    if (
+      !isRepairing() &&
+      url.pathname === endpoint &&
+      Number(url.searchParams.get("offset") ?? 0) === 2
+    ) {
+      onStaleMore();
+      return staleMore.promise;
+    }
+    return Promise.resolve(response(valueFor(path)));
+  });
+}
+
+type MountedProbe = {
+  container: HTMLDivElement;
+  root: ReturnType<typeof createRoot>;
+};
+
+function mountProbe(): MountedProbe {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  return { container, root: createRoot(container) };
+}
+
+async function renderProbe(
+  mounted: MountedProbe,
+  props: ProbeProps = {},
+) {
+  await act(async () => {
+    mounted.root.render(<Probe {...props} />);
+    await settle();
+  });
+}
+
+async function unmountProbe(mounted: MountedProbe) {
+  await act(async () => {
+    mounted.root.unmount();
+  });
+  mounted.container.remove();
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   FakeEventSource.instances = [];
@@ -248,14 +368,9 @@ afterEach(() => {
 describe("useRequirementConversationWorkspace", () => {
   it("loads canonical bundle, paginates, and repairs shifted complete history after reconnect and focus", async () => {
     setupPages();
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(<Probe />);
-      await settle();
-    });
+    await renderProbe({ container, root });
     expect(
       container.querySelector("[data-testid=bundle]")?.textContent,
     ).toContain("Initial requirement");
@@ -318,10 +433,7 @@ describe("useRequirementConversationWorkspace", () => {
       "E",
       "F",
     ]);
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 
   it("suppresses an older repair when a newer repair completes first", async () => {
@@ -339,14 +451,9 @@ describe("useRequirementConversationWorkspace", () => {
       }
       return Promise.resolve(response(valueFor(path)));
     });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(<Probe />);
-      await settle();
-    });
+    await renderProbe({ container, root });
     repairCalls = 0;
     const refresh = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "refresh",
@@ -364,10 +471,7 @@ describe("useRequirementConversationWorkspace", () => {
     });
     expect(container.textContent).toContain("N,A,B");
     expect(container.textContent).not.toContain("O,A,B");
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 
   it("retains newest canonical response and stale data after refresh failure", async () => {
@@ -382,20 +486,12 @@ describe("useRequirementConversationWorkspace", () => {
         return newRequirement.promise;
       return Promise.resolve(response(valueFor(path)));
     });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(
-        <Probe
-          beforeRefresh={(count) => {
-            refreshCount = count;
-          }}
-        />,
-      );
-      await settle();
-    });
+    await renderProbe(
+      { container, root },
+      { beforeRefresh: (count) => (refreshCount = count) },
+    );
     const refresh = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "refresh",
     );
@@ -432,10 +528,7 @@ describe("useRequirementConversationWorkspace", () => {
     });
     expect(container.textContent).toContain("Newest requirement");
     expect(container.textContent).toContain("offline");
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 
   it("keeps bundle and conversation load-more completion independent", async () => {
@@ -444,42 +537,15 @@ describe("useRequirementConversationWorkspace", () => {
     const conversationMore = deferred<ReturnType<typeof response>>();
     let repairing = false;
     let loadingMore = false;
-    fetchMock.mockImplementation((path: string) => {
-      const url = new URL(path, "http://north.test");
-      if (
-        repairing &&
-        url.pathname === "/requirements/requirement-1" &&
-        url.search === ""
-      ) {
-        return bundleRequirement.promise;
-      }
-      if (
-        repairing &&
-        url.pathname === "/requirements/requirement-1/conversation"
-      ) {
-        const offset = Number(url.searchParams.get("offset") ?? 0);
-        if (offset === 0)
-          return Promise.resolve(response(conversationPage(["N", "A"], 4)));
-        if (offset === 4)
-          return Promise.resolve(response(conversationPage(["B", "C"], null)));
-      }
-      if (
-        loadingMore &&
-        url.pathname === "/requirements/requirement-1/conversation" &&
-        Number(url.searchParams.get("offset") ?? 0) === 2
-      ) {
-        return conversationMore.promise;
-      }
-      return Promise.resolve(response(valueFor(path)));
-    });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    stubConversationRepairRequests(
+      bundleRequirement,
+      conversationMore,
+      () => repairing,
+      () => loadingMore,
+    );
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(<Probe />);
-      await settle();
-    });
+    await renderProbe({ container, root });
     const refresh = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "refresh",
     );
@@ -526,10 +592,7 @@ describe("useRequirementConversationWorkspace", () => {
     });
     expect(new Set(state.conversation).size).toBe(state.conversation.length);
     expect(container.textContent).toContain("Refreshed requirement");
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 
   it("keeps conversation load-more clear while focus repair wins canonically", async () => {
@@ -538,42 +601,15 @@ describe("useRequirementConversationWorkspace", () => {
     const bundleRequirement = deferred<ReturnType<typeof response>>();
     let repairing = false;
     let loadingMore = false;
-    fetchMock.mockImplementation((path: string) => {
-      const url = new URL(path, "http://north.test");
-      if (
-        repairing &&
-        url.pathname === "/requirements/requirement-1" &&
-        url.search === ""
-      ) {
-        return bundleRequirement.promise;
-      }
-      if (
-        repairing &&
-        url.pathname === "/requirements/requirement-1/conversation"
-      ) {
-        const offset = Number(url.searchParams.get("offset") ?? 0);
-        if (offset === 0)
-          return Promise.resolve(response(conversationPage(["N", "A"], 4)));
-        if (offset === 4)
-          return Promise.resolve(response(conversationPage(["B", "C"], null)));
-      }
-      if (
-        loadingMore &&
-        url.pathname === "/requirements/requirement-1/conversation" &&
-        Number(url.searchParams.get("offset") ?? 0) === 2
-      ) {
-        return conversationMore.promise;
-      }
-      return Promise.resolve(response(valueFor(path)));
-    });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    stubConversationRepairRequests(
+      bundleRequirement,
+      conversationMore,
+      () => repairing,
+      () => loadingMore,
+    );
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(<Probe />);
-      await settle();
-    });
+    await renderProbe({ container, root });
     const source = FakeEventSource.instances[0];
     const loadConversation = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "load conversation",
@@ -625,10 +661,7 @@ describe("useRequirementConversationWorkspace", () => {
     });
     expect(new Set(state.conversation).size).toBe(state.conversation.length);
     expect(container.textContent).toContain("Canonical after focus");
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 
   it("keeps activity load-more clear while focus repair wins canonically", async () => {
@@ -671,14 +704,9 @@ describe("useRequirementConversationWorkspace", () => {
       }
       return Promise.resolve(response(valueFor(path)));
     });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(<Probe />);
-      await settle();
-    });
+    await renderProbe({ container, root });
     const source = FakeEventSource.instances[0];
     const loadActivity = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "load activity",
@@ -732,10 +760,7 @@ describe("useRequirementConversationWorkspace", () => {
     });
     expect(new Set(state.activities).size).toBe(state.activities.length);
     expect(container.textContent).toContain("Canonical activity repair");
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 
   it("clears recovered resource errors without dropping successful data", async () => {
@@ -771,20 +796,12 @@ describe("useRequirementConversationWorkspace", () => {
       }
       return Promise.resolve(response(valueFor(path)));
     });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(
-        <Probe
-          beforeRefresh={(count) => {
-            refreshCount = count;
-          }}
-        />,
-      );
-      await settle();
-    });
+    await renderProbe(
+      { container, root },
+      { beforeRefresh: (count) => (refreshCount = count) },
+    );
     const refresh = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "refresh",
     );
@@ -820,10 +837,7 @@ describe("useRequirementConversationWorkspace", () => {
     );
     expect(state.resourceErrors.readiness).toBeUndefined();
     expect(state.conversation).toEqual(["A", "B", "C"]);
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 
   it.each(["after", "before"] as const)(
@@ -834,45 +848,18 @@ describe("useRequirementConversationWorkspace", () => {
       const repairRequirement = deferred<ReturnType<typeof response>>();
       let repairStarted = false;
       let staleMoreStarted = false;
-      fetchMock.mockImplementation((path: string) => {
-        const url = new URL(path, "http://north.test");
-        if (
-          repairStarted &&
-          url.pathname === "/requirements/requirement-1" &&
-          url.search === ""
-        ) {
-          return repairRequirement.promise;
-        }
-        if (
-          repairStarted &&
-          url.pathname === "/requirements/requirement-1/conversation"
-        ) {
-          const offset = Number(url.searchParams.get("offset") ?? 0);
-          if (offset === 0)
-            return Promise.resolve(response(conversationPage(["X", "A"], 2)));
-          if (offset === 2)
-            return Promise.resolve(
-              response(conversationPage(["B", "C"], null)),
-            );
-        }
-        if (
-          !repairStarted &&
-          url.pathname === "/requirements/requirement-1/conversation" &&
-          Number(url.searchParams.get("offset") ?? 0) === 2
-        ) {
+      stubStalePaginationRequests(
+        "conversation",
+        repairRequirement,
+        staleMore,
+        () => repairStarted,
+        () => {
           staleMoreStarted = true;
-          return staleMore.promise;
-        }
-        return Promise.resolve(response(valueFor(path)));
-      });
-      const container = document.createElement("div");
-      document.body.appendChild(container);
-      const root = createRoot(container);
+        },
+      );
+      const { container, root } = mountProbe();
 
-      await act(async () => {
-        root.render(<Probe />);
-        await settle();
-      });
+      await renderProbe({ container, root });
       const refresh = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === "refresh",
       );
@@ -934,10 +921,7 @@ describe("useRequirementConversationWorkspace", () => {
       expect(state.conversation).toEqual(["X", "A", "B", "C"]);
       expect(new Set(state.conversation).size).toBe(state.conversation.length);
       expect(container.textContent).toContain(`Canonical ${timing}`);
-      await act(async () => {
-        root.unmount();
-      });
-      container.remove();
+      await unmountProbe({ container, root });
     },
   );
 
@@ -953,50 +937,18 @@ describe("useRequirementConversationWorkspace", () => {
       const repairRequirement = deferred<ReturnType<typeof response>>();
       let repairStarted = false;
       let staleMoreStarted = false;
-      fetchMock.mockImplementation((path: string) => {
-        const url = new URL(path, "http://north.test");
-        if (
-          repairStarted &&
-          url.pathname === "/requirements/requirement-1" &&
-          url.search === ""
-        ) {
-          return repairRequirement.promise;
-        }
-        if (
-          repairStarted &&
-          url.pathname === "/requirements/requirement-1/activity"
-        ) {
-          const offset = Number(url.searchParams.get("offset") ?? 0);
-          if (offset === 0)
-            return Promise.resolve(
-              response({ activities: [], next_offset: 2 }),
-            );
-          if (offset === 2)
-            return Promise.resolve(
-              response({
-                activities: [activity(10), activity(11)],
-                next_offset: null,
-              }),
-            );
-        }
-        if (
-          !repairStarted &&
-          url.pathname === "/requirements/requirement-1/activity" &&
-          Number(url.searchParams.get("offset") ?? 0) === 2
-        ) {
+      stubStalePaginationRequests(
+        "activity",
+        repairRequirement,
+        staleMore,
+        () => repairStarted,
+        () => {
           staleMoreStarted = true;
-          return staleMore.promise;
-        }
-        return Promise.resolve(response(valueFor(path)));
-      });
-      const container = document.createElement("div");
-      document.body.appendChild(container);
-      const root = createRoot(container);
+        },
+      );
+      const { container, root } = mountProbe();
 
-      await act(async () => {
-        root.render(<Probe />);
-        await settle();
-      });
+      await renderProbe({ container, root });
       const refresh = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === "refresh",
       );
@@ -1061,10 +1013,7 @@ describe("useRequirementConversationWorkspace", () => {
       expect(state.activities).toEqual([10, 11]);
       expect(new Set(state.activities).size).toBe(state.activities.length);
       expect(container.textContent).toContain(`Canonical activity ${timing}`);
-      await act(async () => {
-        root.unmount();
-      });
-      container.remove();
+      await unmountProbe({ container, root });
     },
   );
 
@@ -1081,20 +1030,12 @@ describe("useRequirementConversationWorkspace", () => {
       }
       return Promise.resolve(response(valueFor(path)));
     });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(
-        <Probe
-          beforeRefresh={() => {
-            recovered = true;
-          }}
-        />,
-      );
-      await settle();
-    });
+    await renderProbe(
+      { container, root },
+      { beforeRefresh: () => (recovered = true) },
+    );
     let state = probeState(container);
     expect(state.initialError).toContain("initial conversation offline");
     expect(state.refreshError).toBeNull();
@@ -1116,10 +1057,7 @@ describe("useRequirementConversationWorkspace", () => {
     expect(state.resourceErrors).toEqual({});
     expect(state.conversation).toEqual(["A", "B"]);
     expect(container.textContent).not.toContain("initial conversation offline");
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 
   it("retains initial error when explicit retry remains partially failed", async () => {
@@ -1132,20 +1070,12 @@ describe("useRequirementConversationWorkspace", () => {
       }
       return Promise.resolve(response(valueFor(path)));
     });
-    const container = document.createElement("div");
-    document.body.appendChild(container);
-    const root = createRoot(container);
+    const { container, root } = mountProbe();
 
-    await act(async () => {
-      root.render(
-        <Probe
-          beforeRefresh={() => {
-            phase = "retry";
-          }}
-        />,
-      );
-      await settle();
-    });
+    await renderProbe(
+      { container, root },
+      { beforeRefresh: () => (phase = "retry") },
+    );
     const initialState = probeState(container);
     expect(initialState.initialError).toContain("initial conversation offline");
 
@@ -1163,9 +1093,6 @@ describe("useRequirementConversationWorkspace", () => {
     expect(retryState.resourceErrors.conversation).toContain(
       "retry conversation offline",
     );
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    await unmountProbe({ container, root });
   });
 });
