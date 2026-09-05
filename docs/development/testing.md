@@ -81,7 +81,9 @@ PostgreSQL integration also exercises legacy readiness schema upgrades and migra
 | expected_state_version HTTP 409, assessment identity binding, and no side effects | Integration | Implemented by requirement/readiness/conversation integration tests |
 | atomic assessment evidence/transition/dedupe before event ACK | Integration | Implemented by readiness-assessment, including authenticated daemon ACK path |
 | daemon selection, pinned reconnect, credential revocation | Integration | daemon-runtime-connection |
-| server retry authority and restart-persistent attempts | Integration | runtime-retry-and-failure-state |
+| server retry authority, durable attempt identity, restart/due discovery, duplicate failure, cancellation races, and pinned-owner policy | Integration | introduce-runtime-retry-and-failure-state |
+| public request-code/setup identity, trusted-proxy spoofing, client/resource quotas, generic 429, restart reset, and no-resource-on-rejection | Integration | harden-public-endpoint-abuse-protection |
+| canonical workspace review packet, exact mutation identities, stale 409 repair, feedback preservation, permissions, and durable audit boundary | E2E + Integration | introduce-human-requirement-review |
 | concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
 | soft-disable history, disabled-name recovery, and disabled-repo citation rules | Integration | configured-repositories |
 | Full server-backed SSE disconnect/missed hint/duplicate/delayed hint refetch | E2E | requirement-board + requirement-conversation-workspace |

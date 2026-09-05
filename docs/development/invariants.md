@@ -22,6 +22,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Editing Ready demotes to Discussing and advances both tokens | Enforced | `apply_edit` + integration tests |
 | Review packet binds Requirement revision/state version and assessment identity | Enforced | `ReviewPacket::project`, locked packet query, stale-review integration test; generation equality is scoped to Ready reviewability |
 | Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Enforced | `Role::can_review` + server guard + assessment-bound transition integration tests |
+| Review UI uses only canonical workspace + Review Packet and explicit stale repair | Specified | introduce-human-requirement-review; browser/API tests pending |
 | Requirement access is workspace-wide in 0.1.0; no per-Requirement ACL | Enforced | authenticated routes and cross-requester integration test |
 | First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
 | Verification codes cannot be brute-forced past a bounded attempt budget | Enforced | locked transactional failed-attempt counter, five-failure consumption, PostgreSQL concurrency test |
@@ -43,7 +44,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Daemon reports facts/events; server owns business transitions | Partially Enforced | crate edges now; server-side transition validation lands with requirement-domain change |
 | Server is sole owner of durable business state | Partially Enforced | dependency boundaries; server/persistence implementation and integration tests pending |
 | Setup approval state changes require authenticated same-origin POST | Enforced | read-only approval GET, Origin/Host validation, and PostgreSQL HTTP-boundary tests |
-| Public auth/setup request endpoints have resource-aware abuse limits | Specified | deferred to `harden-public-endpoint-abuse-protection`; no current limiter claimed |
+| Public auth/setup request endpoints have resource-aware abuse limits | Specified | `harden-public-endpoint-abuse-protection`; proxy, quota, 429, and concurrency proofs pending |
 | Every server command is durable before dispatch and idempotent at daemon boundary | Enforced | immutable outbox transaction, payload digest, daemon Journal, stable command/runtime identity, and duplicate suppression |
 | Command ACK means durable daemon acceptance, not runtime completion | Enforced | daemon `received` journal commit precedes `command_ack`; runtime outcome is separate |
 | Command/event ids and independent directional sequences detect gaps and harmless duplicates | Enforced | server watermarks/event ledger plus bounded daemon Journal identity and sequence checks |
@@ -55,9 +56,10 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Expired daemon setup rows have bounded retention | Partially Enforced | indexed 24-hour retention and 100-row opportunistic cleanup on setup create/poll; no scheduler in 0.1.0 |
 | Setup claim response is retry-idempotent after a lost response | Specified | accepted 0.1.0 one-shot claim trade-off; no plaintext credential recovery |
 | Daemon credentials are user-owned; Admin/Owner revocation cuts access | Enforced | migration 0007, device-flow claim, authenticated WS registration, owner/admin revoke routes, per-frame connection revalidation, and PostgreSQL integration coverage |
-| Server owns execution state, retry budget, attempt count, and terminal Failed | Specified | introduce-runtime-retry-and-failure-state + hardening; restart/retry tests pending |
-| Daemon has no business retry policy authority | Partially Enforced | architecture source guard; runtime implementation must keep policy in server |
-| Execution failure never mutates Requirement lifecycle state | Specified | runtime retry change; isolation integration test pending |
+| Server owns execution state, retry budget, attempt count, and terminal Failed | Specified | canonical `execution-retry-authority` refinement; durable scheduler/attempt tests pending |
+| Daemon has no business retry policy authority | Partially Enforced | architecture source guard; refined runtime implementation must keep policy in server |
+| Execution failure never mutates Requirement lifecycle state | Specified | retry/failure refinement; isolation integration test pending |
+| Retry-waiting runs retain sequential slot; terminal failure releases it | Specified | clarification/runtime + PostgreSQL concurrency tests pending |
 
 ## Repository access
 

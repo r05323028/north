@@ -1,18 +1,120 @@
-# Design
+# Design: human Requirement review in canonical workspace
 
-## Decisions
+## Boundary
 
-- Review packet endpoint already exists (readiness change); UI renders it plus
-  Accept / Request Changes / Reject actions gated client-side by role and
-  authoritatively by server guards.
-- Stale-guard: page records `assessment_id`, content revision, and state version,
-  but the server remains authoritative. Each review action submits the assessment
-  identity and `expected_state_version`; persistence matches the exact accepted
-  Ready-generation evidence before writing decision provenance and the audit row.
-  A mismatch returns HTTP 409 with no decision or transition.
-- Request Changes requires a feedback text; stored with the transition audit.
-- Reopen lives on Rejected requirements' detail view.
+The existing browser route `/requirements/[id]` remains the only Requirement
+detail surface. Its existing requester workspace owns Requirement content,
+conversation, readiness, activity, clarification run, and current-user
+identity. Human review is one additional panel/state inside that workspace.
 
-## Open Questions
+No `/requirements/[id]/review`, alternate detail route, review-specific
+workspace, browser WebSocket, or client-owned Requirement/readiness store is
+introduced.
 
-None.
+The server contracts already on `main` remain authoritative:
+
+- `GET /requirements/{id}/review-packet` returns the current review evidence and
+  concurrency identities.
+- Accept, Reject, Request Changes, and Reopen routes enforce reviewer roles and
+  expected state versions.
+- Accept, Reject, and Request Changes bind `assessment_id`; Reopen does not.
+- The server validates Ready state, revision, Ready generation, assessment
+  identity, and `expected_state_version` atomically, then writes durable audit
+  data.
+
+The browser consumes these contracts; it does not redesign them.
+
+## Data ownership and loading
+
+The workspace keeps two canonical reads:
+
+1. Requirement data supplies current content/lifecycle/state version.
+2. Review Packet supplies review evidence, assessment identity, Ready-generation
+   identity, and review-specific concurrency values.
+
+Review controls are derived from those responses and `/auth/me` only for UX.
+The browser never infers Ready from transcript text, activity, or an assessment
+message and never reconstructs packet evidence from another read.
+
+Initial load and every repair fetch Requirement and review packet as one logical
+bundle. The packet may be absent when the Requirement is not Ready; that is a
+normal non-reviewable state, not permission to synthesize one. Packet errors
+remain visible and disable review actions.
+
+SSE `requirement.changed`/readiness hints, reconnect, focus/visibility return,
+and an explicit refresh button schedule/refetch canonical HTTP state. SSE does
+not carry packet truth. Duplicate hints are harmless, and an older response
+cannot overwrite a newer request generation.
+
+## Review action contract
+
+| Action | Eligible lifecycle | Request body |
+| --- | --- | --- |
+| Accept | Ready | `assessment_id`, `expected_state_version` |
+| Reject | Ready | `assessment_id`, `expected_state_version` |
+| Request Changes | Ready | `assessment_id`, `expected_state_version`, feedback |
+| Reopen | Rejected | `expected_state_version` |
+
+The shared API layer must have separate typed builders or an equivalent
+conditional body so Reopen cannot accidentally receive or require
+`assessment_id`, and the three Ready decisions cannot omit it. Feedback is
+trimmed/validated according to the existing server contract; it is not sent for
+other actions.
+
+The workspace does not optimistically change lifecycle, readiness, state
+version, or packet identity. On success it refetches the canonical workspace
+bundle and renders the server result.
+
+## Permission matrix
+
+| Viewer | Read workspace/packet | Review controls |
+| --- | --- | --- |
+| Requester | Yes, subject to existing workspace access | No |
+| Requirement Manager | Yes | Yes where lifecycle permits |
+| Admin | Yes | Yes where lifecycle permits |
+| Owner | Yes | Yes where lifecycle permits |
+
+This is presentation gating only. Every mutation still handles server 401,
+403, 404, 409, and lifecycle errors without assuming the client check was
+security.
+
+## Stale packet repair
+
+The browser follows this exact flow:
+
+1. Load current Requirement and packet.
+2. Reviewer edits or inspects locally.
+3. Another edit, lifecycle transition, Ready-generation change, or assessment
+   identity change makes the packet stale.
+4. Mutation returns HTTP 409.
+5. Browser does not apply an optimistic transition and does not retry the
+   mutation.
+6. Browser refetches Requirement and packet, marks the old packet unusable, and
+   shows a stale/review-required notice.
+7. Any unsent Request Changes textarea remains intact.
+8. Reviewer explicitly inspects the refreshed packet before a new submission is
+   enabled.
+
+A successful refetch that is no longer Ready removes Ready actions. A stale
+response cannot be used with a refreshed Requirement, even if the old action
+would otherwise look valid.
+
+## Audit and history boundary
+
+Existing server transition transactions remain the audit authority. The
+browser does not claim that conversation activity is audit history. Current
+`main` has no browser-readable review-audit projection beyond durable server
+rows, so this change adds no history panel or new audit read route. Tasks verify
+that the existing rows retain actor, transition, relevant feedback, assessment
+identity where applicable, state-version context, and timestamp.
+
+If a later product requirement needs reviewer-visible history, it needs a
+separate read-model decision and contract; this change does not smuggle it in.
+
+## Error and accessibility behavior
+
+Controls are disabled while their own mutation is in flight, not while an
+unrelated read is pending. Errors are announced in the existing workspace
+status region, remain associated with the action, and do not erase feedback.
+Buttons have explicit labels and lifecycle/permission explanations. No server
+secret, raw runtime detail, or hidden reasoning is rendered.

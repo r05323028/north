@@ -46,4 +46,7 @@ values drive labels only; hiding an affordance never replaces server
 authorization. Requester structured-content editing is separate from reviewer
 operations: Requesters may edit non-terminal content and converse, but only
 Requirement Managers, Admins, and Owners may perform Accept, Reject, Request
-Changes, Reopen, or other readiness/review mutations.
+Changes, Reopen, or other readiness/review mutations. Review actions render in
+the canonical `/requirements/[id]` workspace; the client uses the current
+review packet only for UX, while server role, lifecycle, assessment, and state
+version checks remain authoritative.

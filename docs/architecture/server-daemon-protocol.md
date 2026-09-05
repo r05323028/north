@@ -130,21 +130,21 @@ builds these DTOs and filters disabled repositories.
 
 The durable-delivery rules below define the North 0.1 contract. The wire,
 transport, server outbox/event ledger, daemon local journal, replay, bounded gap
-handling, reconciliation, and identity tombstones are implemented. The daemon
-journal retains full payloads until explicit safe compaction; business execution
-retry and the real agent runtime remain downstream responsibilities.
+handling, reconciliation, and identity tombstones are delivery concerns. The
+daemon journal retains full payloads until explicit safe compaction. Server
+execution-retry authority is a separate coordination layer over this delivery
+contract; it owns attempt identity, policy, and due `session.resume` creation.
 `requirement.assessed` evidence, repository citation gates, revision checks, and
-post-commit ACKs are implemented by the server readiness path.
+post-commit ACKs remain server readiness concerns.
 
-Current generic-event handling is deliberately only protocol delivery: the
-server validates event identity and sequence, records one durable accepted or
-rejected receipt, sends the matching terminal ACK after commit, and suppresses
-replay after that ACK. Only `requirement.assessed` has a business projection in
-this slice. `session.started`, `agent.message`, `agent.activity`,
-`session.completed`, and `session.failed` are durably rejected with
-`event_handler_not_implemented`; they do not transition execution state,
-project activity/conversation data, consume retry budget, or claim that server
-retry policy ran. Those projections belong to later runtime/retry changes.
+Runtime events retain the same identity, sequence, dedupe, and ACK-after-commit
+boundary. The clarification-runtime projection handles `session.started`,
+`agent.message`, `agent.activity`, `session.completed`, and `session.failed` in
+server-owned transactions. `session.failed` is an attempt fact: known failure
+may persist `Retrying` and `next_retry_at`, while exhaustion/unknown outcome may
+persist terminal `Failed`; neither mutates Requirement lifecycle. Duplicate
+facts return their recorded outcome. Transport replay and reconnect remain
+separate from business retry and never create a new attempt.
 
 Only delivery envelopes carry envelope fields:
 
@@ -217,12 +217,13 @@ server/domain readiness gates, atomically records immutable evidence and any
 valid `Discussing` -> `Ready` promotion, records the resulting Ready-generation
 `state_version` as `accepted_state_version`, commits, and sends
 `event_ack(status=accepted)` (or commits a rejection and sends
-`event_ack(status=rejected)`). Generic runtime events use the same durable
-identity/sequence/rejection boundary but have no business projection here:
-`session.started`, `agent.message`, `agent.activity`, `session.completed`, and
-`session.failed` receive `event_handler_not_implemented`, a durable rejected
-receipt, and `event_ack(status=rejected)`. No execution-state transition,
-retry-budget decision, or activity/conversation projection is implied.
+`event_ack(status=rejected)`). Runtime events use the same durable
+identity/sequence/rejection boundary and then enter their server-owned
+clarification projection. `session.started`, `agent.message`, and
+`agent.activity` update their canonical run/message/activity reads; `session.completed`
+closes successful execution; and `session.failed` applies server retry policy or
+terminal failure. Duplicate facts remain inert, and no event mutates Requirement
+lifecycle outside its existing revision-bound domain operation.
 Accepted evidence creates/binds `assessment_id`
 and `accepted_state_version`; neither is an inbound assessment concurrency
 token. Later human Accept, Reject, or Request Changes uses `assessment_id`,
@@ -313,8 +314,9 @@ server command outbox, daemon processed-command dedupe, daemon event journaling,
 ACK-after-commit, bounded gap handling, reconnect reconciliation, session
 ownership, retry policy, and Requirement transaction semantics. The current
 implementation provides the wire/transport boundaries, daemon registration and
-revocation, server ACK/event ledgers, and the daemon Journal coordinator. Business
-execution retry and the real agent runtime remain downstream responsibilities.
+revocation, server ACK/event ledgers, and the daemon Journal coordinator. The
+execution-retry capability adds server-owned attempt scheduling above this
+transport layer; reconnect and journal replay remain delivery recovery.
 
 ## Session routing and state ownership
 

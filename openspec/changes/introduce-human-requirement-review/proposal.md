@@ -1,36 +1,61 @@
-# Introduce human Requirement review
+# Integrate human Requirement review into canonical workspace
 
 ## Why
 
-Ready hands off to humans; the review moment must be concise, permissioned,
-and structurally incapable of approving a stale assessment.
+`main` already owns review decisions, reviewer authorization, optimistic
+concurrency, Ready-generation identity, and durable transition audit rows. A
+separate review page would duplicate those contracts and create a second
+Requirement/readiness truth. This change makes the existing
+Requirement Conversation Workspace the browser surface for those contracts.
 
-## What Changes
+## What changes
 
-- Review surface for Ready requirements showing the review packet: Goal,
-  Scope, Acceptance Criteria, Assumptions, Blocking Questions, Repositories
-  Inspected.
-- Actions Accept / Request Changes (with feedback) / Reject for reviewers
-  only; Reopen on Rejected requirements.
-- Stale protection: review actions require `expected_state_version` and validate the
-  requirement/assessment revision atomically; a moved revision returns HTTP 409,
-  forces re-read, and refuses blind approval.
-- Decisions recorded with reviewer identity and timestamp (audit trail).
+- Extend only `/requirements/[id]` with review presentation and actions.
+- Load review truth from `GET /requirements/{id}/review-packet`; never rebuild a
+  packet from messages, activity, or client readiness heuristics.
+- Show Accept, Reject, and Request Changes for eligible reviewers while the
+  packet is current and the Requirement is Ready. Show Reopen for rejected
+  Requirements.
+- Send the exact existing mutation preconditions: `assessment_id` plus
+  `expected_state_version` for Accept, Reject, and Request Changes; only
+  `expected_state_version` for Reopen.
+- Treat HTTP 409 as stale repair: refetch Requirement and packet, preserve
+  unsent Request Changes feedback, and require explicit reviewer inspection
+  before another mutation.
+- Keep Requesters read-only for review actions. Client visibility is UX only;
+  server role checks remain authoritative.
+- Keep durable audit writes server-owned. This change does not add a history
+  endpoint or label coarse workspace activity as audit history.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `human-review`: packet-driven review flow, decision endpoints, staleness
-  guard, reopen path.
+- `human-review`: browser review presentation, exact mutation payloads, and
+  stale packet repair.
 
 ### Modified Capabilities
 
-- `requirements`: review transitions gain their canonical UI entry point.
+- `requirement-conversation-workspace`: renders review in the existing
+  Requirement route and consumes safe canonical review state.
 
-## Impact
+The server-side `requirements`, `readiness`, and `roles` contracts are
+consumed, not redesigned.
 
-- Affected docs: docs/product/requirement-lifecycle.md (review ownership),
-  docs/development/invariants.md (stale-approval row).
-- Dependencies on earlier changes: introduce-readiness-assessment,
-  introduce-requirement-conversation-workspace.
+## Non-goals
+
+No new review route, review persistence model, lifecycle enum, readiness model,
+ACL model, browser WebSocket, optimistic lifecycle transition, automatic retry,
+or duplicate Requirement/readiness entity.
+
+## Dependencies
+
+Consumes current `requirements`, `readiness`, `roles`, review-packet,
+transition, and Requirement Conversation Workspace contracts. Completed changes
+are treated as current behavior, not future prerequisites.
+
+## Documentation impact
+
+Update lifecycle, role, architecture, testing, and invariant documentation to
+name the single workspace surface, exact mutation identities, stale repair, and
+absence of a browser audit-history projection.

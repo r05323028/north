@@ -9,8 +9,9 @@ they can converse while watching the live structured Requirement change without
 turning browser state, SSE, or runtime telemetry into a second source of truth.
 
 This is next after the Board and clarification-runtime slices. It consolidates
-those existing contracts into a requester-facing workflow before human review
-and later retry-state UI are added.
+those existing contracts into a requester-facing workflow before human review;
+server-owned runtime retry remains an extension of the same public session
+projection, not a second workspace state machine.
 
 ## What Changes
 
@@ -40,10 +41,10 @@ and later retry-state UI are added.
   visibility repair refetch canonical HTTP state; duplicate, delayed, reordered,
   or missed hints remain harmless.
 - **[Invariant]** Make composer states explicit: idle, submitting, active
-  clarification, awaiting runtime assignment, cancellation pending, completed,
-  and operational failure. Never silently drop a submitted message, retry a
-  stale write, create a browser-side run, or start a second run during an
-  occupied sequential slot.
+  clarification, awaiting runtime assignment, retrying, cancellation pending,
+  completed, and terminal execution failure. Never silently drop a submitted
+  message, retry a stale write, create a browser-side run, or start a second
+  run during an occupied sequential slot.
 - **[Invariant]** Obtain current-user identity and role from `/auth/me` for
   requester-facing labels and affordances. Authenticated users retain the
   existing workspace-wide view/conversation policy. The existing Requirement

@@ -29,6 +29,17 @@ evidence rows are append-only; database triggers reject direct mutation of
 evidence, repository source identity, and command outbox payloads. Requirement
 delete is restrictive so evidence never changes via a cascade. Requirements
 with readiness evidence must be retained (or receive a future tombstone design).
+Execution retry state is durable coordination state, not an in-memory timer:
+when the retry capability lands, attempt rows, unique command/failure identities,
+`attempt_count`, snapshotted limits, safe failure class, and `next_retry_at` are
+transactionally bound to the session and command outbox. Startup discovers due
+rows from the indexed database; reconnect/replay does not increment attempts.
+
+Public creation protection remains deliberately smaller: process-local client
+buckets reset on restart, while normalized-email cooldown and pending setup
+quotas remain durable. Setup quota keys use canonical client/network identity,
+not daemon labels.
+
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.
 The server updates liveness only for the authenticated connection identity;

@@ -111,8 +111,10 @@ one complete command envelope, and persists that exact payload atomically with
 `execution_sessions.daemon_id`. `DaemonRuntime::persist_and_dispatch_command`
 then dispatches the persisted envelope through its pinned owner. Reconnect
 reconciles only sessions pinned
-to that identity; North 0.1.0 does not perform automatic live migration. Full
-business execution retry/failure policy remains server-owned target work.
+to that identity; North 0.1.0 does not perform automatic live migration. Due
+business retries remain server-owned: a retry worker creates one durable
+`session.resume` for the immutable owner, while reconnect only delivers existing
+outbox work. Revoked owners are never replaced automatically.
 
 The current registration model defines daemon registrations as instance-scoped
 identities with credentials owned by the account recorded in `created_by`.
@@ -126,11 +128,17 @@ WebSocket reconnect/backoff and local Journal/runtime transport recovery are
 current daemon mechanics. They do not consume the server's business attempt
 budget. Event replay remains delivery recovery and does not consume that budget.
 
-The target server execution model will persist `Idle`, `Running`, `Retrying`, or
-`Failed` together with attempt count, retry budget, and failure reason. Only the
-server will decide when to send `session.resume` and when retry exhaustion becomes
-`Failed`. The target execution model will keep execution failure separate from
-Requirement lifecycle state.
+The server execution model persists `Idle`, `Running`, `Retrying`, or `Failed`
+(and existing successful `Completed`) together with attempt identity/count,
+snapshotted limit, persisted `next_retry_at`, and a bounded safe failure reason.
+Only server policy decides `session.resume` and terminal `Failed`; a known retry
+keeps the clarification run active and slot-occupying, while unknown outcome
+never auto-resubmits. Requirement lifecycle remains separate.
+
+WebSocket reconnect/backoff, journal replay, ACK retry, and event replay are
+transport recovery and consume no business attempt. Setup request creation is
+also subject to the public endpoint client bucket and pending quota; setup
+approval/claim credentials remain outside the browser response.
 
 Setup/login follows the browser-assisted CLI flow. A normal browser GET
 returns an HTML confirmation page with daemon label and state, an explicit

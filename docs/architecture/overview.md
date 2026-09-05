@@ -26,6 +26,13 @@
 - Server owns durable business state, session ownership, command outbox, and
   execution retry policy. Daemon reports execution facts and owns only local
   transport/runtime recovery.
+- Human review is rendered only in the canonical `/requirements/[id]` workspace.
+  Review Packet responses own review evidence; stale 409 repair refetches
+  Requirement and packet and does not invent a browser history projection.
+- Public `/auth/request-code` and `/daemon/setup/request` use explicit socket /
+  trusted-proxy identity, process-local coarse buckets, durable resource
+  controls, and generic 429 responses; forwarding headers are ignored from
+  untrusted peers.
 - Server↔daemon command/event delivery is at-least-once. Stable ids prevent
   duplicate effects; independent per-session sequence spaces detect gaps.
 

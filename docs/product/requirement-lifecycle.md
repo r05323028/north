@@ -81,9 +81,27 @@ the draft and requires reconciliation, while the server response determines
 any Ready → Discussing demotion. Reviewer and readiness operations remain
 server-authorized and are not requester workspace controls.
 
+## Human review surface
+
+Human review lives in the same `/requirements/[id]` workspace. Ready Requirements
+load review truth directly from `GET /requirements/{id}/review-packet`; the
+browser does not rebuild packets from conversation/activity or create a second
+Requirement/readiness entity. Accept, Reject, and Request Changes send
+`assessment_id` plus `expected_state_version`; Reopen sends only
+`expected_state_version`. HTTP 409 triggers canonical Requirement/packet
+refetch, preserves unsent Request Changes feedback, invalidates the old packet,
+and requires explicit reviewer inspection before retry. Requesters may read but
+never receive actionable reviewer controls; server authorization remains
+authoritative. Current durable review audit rows remain server-owned; this
+workspace does not invent a browser history projection.
+
 ## Execution state is separate
 
-Runtime health (Idle / Running / Retrying / Failed) never mutates business state.
-A failed agent run leaves the requirement exactly where it was. The server
-persists execution attempts and owns retry/resume/Failed decisions; the daemon
-only reconnects, replays, and reports facts. See docs/architecture/daemon.md.
+Runtime execution state (`Idle` / `Running` / `Retrying` / `Failed`) never
+mutates business state. A failed agent attempt leaves the Requirement exactly
+where it was. The server persists attempts, due retry work, and safe failure
+classification; it owns retry/resume/terminal-failure decisions. The daemon
+only reconnects, replays, and reports facts. Public clarification projection
+keeps `awaiting_assignment` / `active` / `terminal` phases; policy retry is
+`active/retrying`, while terminal execution failure is `terminal/failed`. See
+docs/architecture/daemon.md and the execution-retry-authority contract.
