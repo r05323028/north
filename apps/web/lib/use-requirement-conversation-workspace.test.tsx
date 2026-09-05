@@ -165,6 +165,17 @@ function Probe({ beforeRefresh }: { beforeRefresh?: (count: number) => void }) {
               state.connectionState,
             ].join("|")}
       </output>
+      <output data-testid="workspace-state">
+        {JSON.stringify({
+          refreshing: state.refreshing,
+          loadingConversationMore: state.loadingConversationMore,
+          loadingActivityMore: state.loadingActivityMore,
+          conversation:
+            state.conversation?.messages.map(({ id }) => id) ?? [],
+          activities: state.activities.map(({ id }) => id),
+          resourceErrors: state.resourceErrors,
+        })}
+      </output>
       <button type="button" onClick={() => void state.loadMoreConversation()}>
         load conversation
       </button>
@@ -183,6 +194,21 @@ function Probe({ beforeRefresh }: { beforeRefresh?: (count: number) => void }) {
       </button>
     </>
   );
+}
+
+type ProbeState = {
+  refreshing: boolean;
+  loadingConversationMore: boolean;
+  loadingActivityMore: boolean;
+  conversation: string[];
+  activities: number[];
+  resourceErrors: Record<string, string>;
+};
+
+function probeState(container: HTMLElement): ProbeState {
+  const output = container.querySelector("[data-testid=workspace-state]");
+  if (!output) throw new Error("workspace state output missing");
+  return JSON.parse(output.textContent ?? "{}");
 }
 
 async function settle() {
@@ -258,7 +284,14 @@ describe("useRequirementConversationWorkspace", () => {
       await settle();
     });
     expect(container.textContent).toContain("X,A,B,C,D,E");
-    expect((container.textContent ?? "").match(/A/g)?.length).toBe(1);
+    expect(probeState(container).conversation).toEqual([
+      "X",
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+    ]);
 
     conversationPages = new Map([
       [0, conversationPage(["X", "A"], 2)],
@@ -271,7 +304,15 @@ describe("useRequirementConversationWorkspace", () => {
       await settle();
     });
     expect(container.textContent).toContain("X,A,B,C,D,E,F");
-    expect((container.textContent ?? "").match(/F/g)?.length).toBe(1);
+    expect(probeState(container).conversation).toEqual([
+      "X",
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+    ]);
     await act(async () => {
       root.unmount();
     });
@@ -386,6 +427,406 @@ describe("useRequirementConversationWorkspace", () => {
     });
     expect(container.textContent).toContain("Newest requirement");
     expect(container.textContent).toContain("offline");
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("keeps bundle and conversation load-more completion independent", async () => {
+    setupPages();
+    const bundleRequirement = deferred<ReturnType<typeof response>>();
+    const conversationMore = deferred<ReturnType<typeof response>>();
+    let repairing = false;
+    let loadingMore = false;
+    fetchMock.mockImplementation((path: string) => {
+      const url = new URL(path, "http://north.test");
+      if (
+        repairing &&
+        url.pathname === "/requirements/requirement-1" &&
+        url.search === ""
+      ) {
+        return bundleRequirement.promise;
+      }
+      if (
+        repairing &&
+        url.pathname === "/requirements/requirement-1/conversation"
+      ) {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        if (offset === 0)
+          return Promise.resolve(
+            response(conversationPage(["N", "A"], 4)),
+          );
+        if (offset === 4)
+          return Promise.resolve(
+            response(conversationPage(["B", "C"], null)),
+          );
+      }
+      if (
+        loadingMore &&
+        url.pathname === "/requirements/requirement-1/conversation" &&
+        Number(url.searchParams.get("offset") ?? 0) === 2
+      ) {
+        return conversationMore.promise;
+      }
+      return Promise.resolve(response(valueFor(path)));
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<Probe />);
+      await settle();
+    });
+    const refresh = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "refresh",
+    );
+    const loadConversation = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "load conversation",
+    );
+    if (!refresh || !loadConversation)
+      throw new Error("workspace controls missing");
+
+    repairing = true;
+    await act(async () => {
+      refresh.click();
+      await Promise.resolve();
+    });
+    loadingMore = true;
+    await act(async () => {
+      loadConversation.click();
+      await Promise.resolve();
+    });
+    expect(probeState(container)).toMatchObject({
+      refreshing: true,
+      loadingConversationMore: true,
+    });
+
+    bundleRequirement.resolve(
+      response({ ...currentRequirement, title: "Refreshed requirement" }),
+    );
+    await act(async () => {
+      await settle();
+    });
+    expect(probeState(container)).toMatchObject({
+      refreshing: false,
+      loadingConversationMore: true,
+    });
+    conversationMore.resolve(
+      response(conversationPage(["B", "C"], null)),
+    );
+    await act(async () => {
+      await settle();
+    });
+    const state = probeState(container);
+    expect(state).toMatchObject({
+      refreshing: false,
+      loadingConversationMore: false,
+      conversation: ["N", "A", "B", "C"],
+    });
+    expect(new Set(state.conversation).size).toBe(state.conversation.length);
+    expect(container.textContent).toContain("Refreshed requirement");
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("keeps conversation load-more clear while focus repair wins canonically", async () => {
+    setupPages();
+    const conversationMore = deferred<ReturnType<typeof response>>();
+    const bundleRequirement = deferred<ReturnType<typeof response>>();
+    let repairing = false;
+    let loadingMore = false;
+    fetchMock.mockImplementation((path: string) => {
+      const url = new URL(path, "http://north.test");
+      if (
+        repairing &&
+        url.pathname === "/requirements/requirement-1" &&
+        url.search === ""
+      ) {
+        return bundleRequirement.promise;
+      }
+      if (
+        repairing &&
+        url.pathname === "/requirements/requirement-1/conversation"
+      ) {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        if (offset === 0)
+          return Promise.resolve(
+            response(conversationPage(["N", "A"], 4)),
+          );
+        if (offset === 4)
+          return Promise.resolve(
+            response(conversationPage(["B", "C"], null)),
+          );
+      }
+      if (
+        loadingMore &&
+        url.pathname === "/requirements/requirement-1/conversation" &&
+        Number(url.searchParams.get("offset") ?? 0) === 2
+      ) {
+        return conversationMore.promise;
+      }
+      return Promise.resolve(response(valueFor(path)));
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<Probe />);
+      await settle();
+    });
+    const source = FakeEventSource.instances[0];
+    const loadConversation = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "load conversation",
+    );
+    if (!loadConversation) throw new Error("conversation control missing");
+
+    loadingMore = true;
+    await act(async () => {
+      loadConversation.click();
+      await Promise.resolve();
+    });
+    repairing = true;
+    await act(async () => {
+      source.emit(
+        "conversation.changed",
+        JSON.stringify({
+          category: "conversation.changed",
+          requirement_id: "requirement-1",
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
+    });
+    expect(probeState(container)).toMatchObject({
+      refreshing: true,
+      loadingConversationMore: true,
+    });
+
+    conversationMore.resolve(
+      response(conversationPage(["B", "C"], null)),
+    );
+    await act(async () => {
+      await settle();
+    });
+    expect(probeState(container)).toMatchObject({
+      refreshing: true,
+      loadingConversationMore: false,
+      conversation: ["A", "B", "C"],
+    });
+    bundleRequirement.resolve(
+      response({ ...currentRequirement, title: "Canonical after focus" }),
+    );
+    await act(async () => {
+      await settle();
+    });
+    const state = probeState(container);
+    expect(state).toMatchObject({
+      refreshing: false,
+      loadingConversationMore: false,
+      conversation: ["N", "A", "B", "C"],
+    });
+    expect(new Set(state.conversation).size).toBe(state.conversation.length);
+    expect(container.textContent).toContain("Canonical after focus");
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("keeps activity load-more clear while focus repair wins canonically", async () => {
+    setupPages();
+    activityPages = new Map([
+      [0, { activities: [activity(1)], next_offset: 2 }],
+      [2, { activities: [activity(2)], next_offset: null }],
+    ]);
+    const activityMore = deferred<ReturnType<typeof response>>();
+    const bundleRequirement = deferred<ReturnType<typeof response>>();
+    let repairing = false;
+    let loadingMore = false;
+    fetchMock.mockImplementation((path: string) => {
+      const url = new URL(path, "http://north.test");
+      if (
+        repairing &&
+        url.pathname === "/requirements/requirement-1" &&
+        url.search === ""
+      ) {
+        return bundleRequirement.promise;
+      }
+      if (
+        repairing &&
+        url.pathname === "/requirements/requirement-1/activity" &&
+        Number(url.searchParams.get("offset") ?? 0) === 0
+      ) {
+        return Promise.resolve(
+          response({
+            activities: [activity(10), activity(11)],
+            next_offset: null,
+          }),
+        );
+      }
+      if (
+        loadingMore &&
+        url.pathname === "/requirements/requirement-1/activity" &&
+        Number(url.searchParams.get("offset") ?? 0) === 2
+      ) {
+        return activityMore.promise;
+      }
+      return Promise.resolve(response(valueFor(path)));
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<Probe />);
+      await settle();
+    });
+    const source = FakeEventSource.instances[0];
+    const loadActivity = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "load activity",
+    );
+    if (!loadActivity) throw new Error("activity control missing");
+
+    loadingMore = true;
+    await act(async () => {
+      loadActivity.click();
+      await Promise.resolve();
+    });
+    repairing = true;
+    await act(async () => {
+      source.emit(
+        "activity.changed",
+        JSON.stringify({
+          category: "activity.changed",
+          requirement_id: "requirement-1",
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await Promise.resolve();
+    });
+    expect(probeState(container)).toMatchObject({
+      refreshing: true,
+      loadingActivityMore: true,
+    });
+
+    activityMore.resolve(
+      response({ activities: [activity(2)], next_offset: null }),
+    );
+    await act(async () => {
+      await settle();
+    });
+    expect(probeState(container)).toMatchObject({
+      refreshing: true,
+      loadingActivityMore: false,
+      activities: [1, 2],
+    });
+    bundleRequirement.resolve(
+      response({ ...currentRequirement, title: "Canonical activity repair" }),
+    );
+    await act(async () => {
+      await settle();
+    });
+    const state = probeState(container);
+    expect(state).toMatchObject({
+      refreshing: false,
+      loadingActivityMore: false,
+      activities: [10, 11],
+    });
+    expect(new Set(state.activities).size).toBe(state.activities.length);
+    expect(container.textContent).toContain("Canonical activity repair");
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it("clears recovered resource errors without dropping successful data", async () => {
+    setupPages();
+    let refreshCount = 0;
+    fetchMock.mockImplementation((path: string) => {
+      const url = new URL(path, "http://north.test");
+      if (
+        refreshCount === 1 &&
+        url.pathname === "/requirements/requirement-1/conversation"
+      ) {
+        return Promise.reject(new Error("conversation offline"));
+      }
+      if (
+        refreshCount === 2 &&
+        url.pathname === "/requirements/requirement-1/conversation"
+      ) {
+        return Promise.resolve(
+          response(conversationPage(["A", "B", "C"], null)),
+        );
+      }
+      if (
+        refreshCount === 2 &&
+        url.pathname === "/requirements/requirement-1/readiness"
+      ) {
+        return Promise.reject(new Error("readiness offline"));
+      }
+      if (
+        refreshCount === 3 &&
+        url.pathname === "/requirements/requirement-1/conversation"
+      ) {
+        return Promise.reject(new Error("conversation offline again"));
+      }
+      return Promise.resolve(response(valueFor(path)));
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <Probe
+          beforeRefresh={(count) => {
+            refreshCount = count;
+          }}
+        />,
+      );
+      await settle();
+    });
+    const refresh = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "refresh",
+    );
+    if (!refresh) throw new Error("refresh control missing");
+
+    await act(async () => {
+      refresh.click();
+      await settle();
+    });
+    let state = probeState(container);
+    expect(state.resourceErrors.conversation).toContain("conversation offline");
+    expect(state.resourceErrors.readiness).toBeUndefined();
+    expect(state.conversation).toEqual(["A", "B"]);
+    expect(container.textContent).toContain("Initial requirement");
+
+    await act(async () => {
+      refresh.click();
+      await settle();
+    });
+    state = probeState(container);
+    expect(state.resourceErrors.conversation).toBeUndefined();
+    expect(state.resourceErrors.readiness).toContain("readiness offline");
+    expect(state.conversation).toEqual(["A", "B", "C"]);
+    expect(container.textContent).toContain("Initial requirement");
+
+    await act(async () => {
+      refresh.click();
+      await settle();
+    });
+    state = probeState(container);
+    expect(state.resourceErrors.conversation).toContain(
+      "conversation offline again",
+    );
+    expect(state.resourceErrors.readiness).toBeUndefined();
+    expect(state.conversation).toEqual(["A", "B", "C"]);
     await act(async () => {
       root.unmount();
     });

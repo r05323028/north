@@ -210,12 +210,22 @@ export function useRequirementConversationWorkspace(requirementId: string) {
     useState<RequirementConversationWorkspaceState>(emptyState);
   const stateRef = useRef(state);
   stateRef.current = state;
-  const requestGeneration = useRef(0);
+  const lifecycleGeneration = useRef(0);
+  const bundleGeneration = useRef(0);
+  const conversationMoreGeneration = useRef(0);
+  const activityMoreGeneration = useRef(0);
   const repairTimer = useRef<number | null>(null);
+  const invalidateOutstandingWork = useCallback(() => {
+    lifecycleGeneration.current += 1;
+    bundleGeneration.current += 1;
+    conversationMoreGeneration.current += 1;
+    activityMoreGeneration.current += 1;
+  }, []);
 
   const loadBundle = useCallback(
     async (initial: boolean): Promise<void> => {
-      const generation = ++requestGeneration.current;
+      const lifecycle = lifecycleGeneration.current;
+      const generation = ++bundleGeneration.current;
       const previous = stateRef.current;
       const previousConversation = initial ? null : previous.conversation;
       const previousActivity = initial ? null : previous.activityHistory;
@@ -251,7 +261,11 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         getCurrentUser(),
       ]);
 
-      if (generation !== requestGeneration.current) return;
+      if (
+        lifecycle !== lifecycleGeneration.current ||
+        generation !== bundleGeneration.current
+      )
+        return;
       setState((current) => {
         const resourceErrors: WorkspaceResourceErrors = {};
         let next = { ...current };
@@ -295,10 +309,7 @@ export function useRequirementConversationWorkspace(requirementId: string) {
               : current.initialError,
           refreshError:
             !initial && failures.length > 0 ? failures.join(" · ") : null,
-          resourceErrors:
-            failures.length > 0
-              ? { ...current.resourceErrors, ...resourceErrors }
-              : {},
+          resourceErrors,
         };
       });
     },
@@ -319,7 +330,8 @@ export function useRequirementConversationWorkspace(requirementId: string) {
     const current = stateRef.current.conversation;
     const offset = current?.next_offset;
     if (!current || offset === null || offset === undefined) return;
-    const generation = ++requestGeneration.current;
+    const lifecycle = lifecycleGeneration.current;
+    const generation = ++conversationMoreGeneration.current;
     setState((value) => ({ ...value, loadingConversationMore: true }));
     try {
       const page = await getConversationPage(
@@ -327,7 +339,11 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         offset,
         WORKSPACE_PAGE_LIMIT,
       );
-      if (generation !== requestGeneration.current) return;
+      if (
+        lifecycle !== lifecycleGeneration.current ||
+        generation !== conversationMoreGeneration.current
+      )
+        return;
       setState((value) => ({
         ...value,
         conversation: value.conversation
@@ -337,7 +353,11 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         resourceErrors: { ...value.resourceErrors, conversation: undefined },
       }));
     } catch (cause) {
-      if (generation !== requestGeneration.current) return;
+      if (
+        lifecycle !== lifecycleGeneration.current ||
+        generation !== conversationMoreGeneration.current
+      )
+        return;
       setState((value) => ({
         ...value,
         loadingConversationMore: false,
@@ -352,7 +372,8 @@ export function useRequirementConversationWorkspace(requirementId: string) {
   const loadMoreActivity = useCallback(async () => {
     const offset = stateRef.current.activity_next_offset;
     if (offset === null || offset === undefined) return;
-    const generation = ++requestGeneration.current;
+    const lifecycle = lifecycleGeneration.current;
+    const generation = ++activityMoreGeneration.current;
     setState((value) => ({ ...value, loadingActivityMore: true }));
     try {
       const page = await getActivityPage(
@@ -360,7 +381,11 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         offset,
         WORKSPACE_PAGE_LIMIT,
       );
-      if (generation !== requestGeneration.current) return;
+      if (
+        lifecycle !== lifecycleGeneration.current ||
+        generation !== activityMoreGeneration.current
+      )
+        return;
       setState((value) => {
         const existing: ActivityPageSlice = {
           offset: 0,
@@ -381,7 +406,11 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         };
       });
     } catch (cause) {
-      if (generation !== requestGeneration.current) return;
+      if (
+        lifecycle !== lifecycleGeneration.current ||
+        generation !== activityMoreGeneration.current
+      )
+        return;
       setState((value) => ({
         ...value,
         loadingActivityMore: false,
@@ -393,30 +422,41 @@ export function useRequirementConversationWorkspace(requirementId: string) {
     }
   }, [requirementId]);
 
-  const applyRequirement = useCallback((requirement: Requirement) => {
-    setState((current) => ({
-      ...current,
-      requirement,
-      resourceErrors: { ...current.resourceErrors, requirement: undefined },
-    }));
-  }, []);
+  const applyRequirement = useCallback(
+    (requirement: Requirement) => {
+      if (requirement.id !== requirementId) return;
+      setState((current) => ({
+        ...current,
+        requirement,
+        resourceErrors: {
+          ...current.resourceErrors,
+          requirement: undefined,
+        },
+      }));
+    },
+    [requirementId],
+  );
 
-  const applyRun = useCallback((run: ClarificationRun) => {
-    setState((current) => ({
-      ...current,
-      run,
-      resourceErrors: { ...current.resourceErrors, session: undefined },
-    }));
-  }, []);
+  const applyRun = useCallback(
+    (run: ClarificationRun) => {
+      if (run.requirement_id !== requirementId) return;
+      setState((current) => ({
+        ...current,
+        run,
+        resourceErrors: { ...current.resourceErrors, session: undefined },
+      }));
+    },
+    [requirementId],
+  );
 
   useEffect(() => {
-    requestGeneration.current += 1;
+    invalidateOutstandingWork();
     setState(emptyState());
     void loadBundle(true);
     return () => {
-      requestGeneration.current += 1;
+      invalidateOutstandingWork();
     };
-  }, [loadBundle]);
+  }, [invalidateOutstandingWork, loadBundle]);
 
   useEffect(() => {
     const onFocus = () => scheduleRepair();
