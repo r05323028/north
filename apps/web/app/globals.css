@@ -285,7 +285,6 @@
 }
 
 .north-theme-button,
-.north-sse-inline,
 .north-user-card {
   display: flex;
   align-items: center;
@@ -309,15 +308,6 @@
   color: var(--fg);
 }
 
-.north-sse-inline {
-  gap: 6px;
-  padding: 0 8px 4px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-}
-
-.north-sse-dot,
 .north-status-dot {
   display: inline-block;
   width: 6px;
@@ -325,10 +315,6 @@
   flex-shrink: 0;
   border-radius: 50%;
   background: var(--success);
-}
-
-.north-sse-dot {
-  animation: north-pulse 1.8s infinite;
 }
 
 .north-user-card {
@@ -677,16 +663,6 @@
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 11px;
-}
-
-@keyframes north-pulse {
-  0%,
-  100% {
-    opacity: 0.45;
-  }
-  50% {
-    opacity: 1;
-  }
 }
 
 @media (max-width: 1199px) {

@@ -1,3 +1,5 @@
+import { InvalidServerDataError, requestJson } from "@/lib/api/client";
+
 export const requirementStatuses = [
   "draft",
   "discussing",
@@ -46,6 +48,16 @@ export type CreateRequirementInput = {
   description: string;
 };
 
+export type RequirementEditInput = {
+  expected_state_version: number;
+  title?: string;
+  description?: string;
+  summary?: string;
+  acceptance_criteria?: string[];
+  assumptions?: string[];
+  open_questions?: string[];
+};
+
 export function isRequirementStatus(
   value: unknown,
 ): value is RequirementStatus {
@@ -56,7 +68,9 @@ export function isRequirementStatus(
 }
 
 function invalidRequirementField(field: string): never {
-  throw new Error(`Server returned invalid Requirement field: ${field}`);
+  throw new InvalidServerDataError(
+    `Server returned invalid Requirement field: ${field}`,
+  );
 }
 
 function requiredString(value: Record<string, unknown>, field: string): string {
@@ -91,12 +105,12 @@ function requiredVersionNumber(
 
 export function parseRequirement(value: unknown): Requirement {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Server returned invalid Requirement");
+    throw new InvalidServerDataError("Server returned invalid Requirement");
   }
   const record = value as Record<string, unknown>;
   const status = record.status;
   if (!isRequirementStatus(status)) {
-    throw new Error(
+    throw new InvalidServerDataError(
       `Server returned invalid Requirement status: ${String(status)}`,
     );
   }
@@ -119,7 +133,9 @@ export function parseRequirement(value: unknown): Requirement {
 
 function parseRequirementList(value: unknown): Requirement[] {
   if (!Array.isArray(value)) {
-    throw new Error("Server returned invalid Requirement collection");
+    throw new InvalidServerDataError(
+      "Server returned invalid Requirement collection",
+    );
   }
   return value.map(parseRequirement);
 }
@@ -139,44 +155,7 @@ export function requirementsUrl(query: RequirementQuery = {}): string {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  if (!headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
-  }
-
-  const response = await fetch(path, {
-    credentials: "include",
-    ...init,
-    headers,
-  });
-  const body = await response.text();
-
-  if (!response.ok) {
-    let message = `Request failed (${response.status})`;
-    if (body) {
-      try {
-        const parsed: unknown = JSON.parse(body);
-        if (
-          typeof parsed === "object" &&
-          parsed !== null &&
-          "error" in parsed &&
-          typeof parsed.error === "string"
-        ) {
-          message = parsed.error;
-        }
-      } catch {
-        // Keep status fallback when server has no JSON error body.
-      }
-    }
-    throw new Error(message);
-  }
-
-  if (!body) return undefined as T;
-  try {
-    return JSON.parse(body) as T;
-  } catch {
-    throw new Error("Server returned invalid JSON");
-  }
+  return (await requestJson(path, init)) as T;
 }
 
 export async function listRequirements(
@@ -194,6 +173,18 @@ export async function listRequirementsAtPath(
 export async function getRequirement(id: string): Promise<Requirement> {
   return parseRequirement(
     await request<unknown>(`/requirements/${encodeURIComponent(id)}`),
+  );
+}
+
+export async function editRequirement(
+  id: string,
+  input: RequirementEditInput,
+): Promise<Requirement> {
+  return parseRequirement(
+    await request<unknown>(`/requirements/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
   );
 }
 

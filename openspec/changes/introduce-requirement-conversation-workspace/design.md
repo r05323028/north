@@ -246,6 +246,34 @@ pages from the proposal and change the invariant ledger only to statuses proven
 by runnable tests. The predecessor is already marked superseded and is not an
 implementation input; no second detail UI may be claimed or merged from it.
 
+## Compatibility review
+
+Implementation reuses canonical contracts rather than introducing parallel names:
+
+- Requirements remain the existing Requirement response and PATCH operation;
+  `revision` identifies structured content and `state_version` is the
+  edit/start concurrency token.
+- Conversations keep requester/agent/system `Message` kinds, durable
+  persistence-first POST, and offset/`next_offset` pagination. Boundary repair
+  deduplicates stable message IDs without cursor or stream-payload state.
+- Readiness remains an independent server projection. `current`, verdict,
+  blockers, assumptions, outcome, and retained repository ID/full SHA are rendered
+  as received; transcript/activity/run completion never creates readiness.
+- Roles come from `/auth/me`. Requester structured-content editing remains
+  distinct from reviewer-only lifecycle/readiness operations, which stay server
+  authorized and are not added to this workspace.
+- Browser reconnect follows the existing single `/events` source. Named
+  notifications are identity/category hints; HTTP refetch owns correctness.
+- Distributed delivery, daemon protocol, session ownership, execution retry
+  authority, and repository isolation remain server/daemon concerns. The browser
+  exposes one `ClarificationRun` concept with `run_id`; the wire
+  `session` wrapper and `session_id` terminology remain compatibility
+  fields. No browser WebSocket, protocol frame, retry state machine, checkout
+  path, credential, or provider detail is introduced.
+- `introduce-requirement-conversation-ui` is the superseded planning
+  predecessor; this change is sole canonical successor and its artifacts are not
+  an implementation input.
+
 ## Risks / Trade-offs
 
 - **[Risk] Offset pagination shifts while new messages arrive.** → Discard

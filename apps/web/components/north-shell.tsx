@@ -5,6 +5,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { getCurrentUser } from "@/lib/api/current-user";
+import type { CurrentUser } from "@/lib/api/contracts";
 type ThemeMode = "system" | "light" | "dark";
 type IconName = "board" | "activity" | "repository" | "members";
 
@@ -174,6 +176,22 @@ function Sidebar({
   pathname: string;
   onNavigate: () => void;
 }) {
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void getCurrentUser()
+      .then((user) => {
+        if (active) setCurrentUser(user);
+      })
+      .catch(() => {
+        if (active) setCurrentUser(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   return (
     <aside
       aria-label="主導覽"
@@ -213,19 +231,27 @@ function Sidebar({
       </nav>
       <div className="north-sidebar-foot">
         <ThemeButton />
-        <div className="north-sse-inline" role="status">
-          <span aria-hidden="true" className="north-sse-dot" />
-          <span>已連線 · 自動更新</span>
-        </div>
-        <div className="north-user-card">
+        <div
+          aria-label={
+            currentUser
+              ? `Signed in as ${currentUser.email}`
+              : "Current user unavailable"
+          }
+          className="north-user-card"
+          role="status"
+        >
           <span aria-hidden="true" className="north-avatar">
-            AC
+            {currentUser?.email.slice(0, 2).toUpperCase() ?? "?"}
           </span>
           <span className="north-user-copy">
-            <strong>管理員</strong>
-            <span>admin@north.local</span>
+            <strong>{currentUser?.email ?? "Current user unavailable"}</strong>
+            <span>
+              {currentUser ? "Authenticated user" : "Retry from workspace"}
+            </span>
           </span>
-          <span className="north-user-role">Owner</span>
+          {currentUser && (
+            <span className="north-user-role">{currentUser.role}</span>
+          )}
         </div>
       </div>
     </aside>

@@ -14,6 +14,15 @@
 - Browser talks **only** to server over HTTP and SSE. SSE is notification; after
   connect/reconnect UI refetches canonical API state.
 - Daemon always initiates persistent WebSocket connection.
+
+- The requester Requirement workspace loads Requirement, durable conversation,
+  readiness, coarse activity, latest clarification run, and `/auth/me` through
+  canonical HTTP operations. It keeps successful stale data during refresh
+  failures and uses request generations to suppress older responses.
+- Clarification mutation identity is the browser `ClarificationRun.run_id`.
+  `clarification/start` is the only identity-creating call; active dispatch and
+  cancellation carry that run ID explicitly. The wire `session` wrapper remains
+  a compatibility detail.
 - Server owns durable business state, session ownership, command outbox, and
   execution retry policy. Daemon reports execution facts and owns only local
   transport/runtime recovery.

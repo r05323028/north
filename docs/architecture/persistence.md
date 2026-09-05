@@ -77,6 +77,20 @@ Invariants:
   use `assessment_id`, `expected_state_version`, and the exact current Ready
   generation.
 
+Requirement conversations and requester messages are durable business data.
+The conversation endpoint exposes bounded offset pages with `next_offset`; the
+browser repairs shifted pages from offset 0 and merges by stable message ID,
+while persistence remains the sole ordering and content authority. Message
+persistence is independent of clarification runtime lookup, so a failed start,
+dispatch, or cancellation never rolls back the durable requester message.
+
+Clarification runs are durable sequential-slot state. A non-terminal
+`awaiting_assignment` or `active` run occupies its Requirement slot; only a
+terminal run releases it. The public read projection exposes `run_id`,
+`start_message_id`, phase, coarse status, cancellation intent, and safe
+timestamps. Browser `/events` notifications do not become a second persistence
+source; canonical HTTP reads repair missed or reordered hints.
+
 ## First-owner bootstrap
 
 On a fresh instance, `instance_settings` has one singleton row (`id = 1`)

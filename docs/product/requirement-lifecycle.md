@@ -58,6 +58,29 @@ requester messages provide conversation context.
 Illegal transitions must be unrepresentable through domain APIs
 (`crates/north-domain/src/status.rs`), not just blocked in UI.
 
+## Requester conversation workspace
+
+The direct `/requirements/{id}` route is the requester workspace. It renders
+canonical Requirement fields beside durable Conversation messages, independent
+readiness, server-published activity, the latest public clarification run, and
+current-user identity. Agent questions remain ordinary `agent` messages;
+activity is never synthesized into the transcript and completion never implies
+Ready.
+
+Requester message submission persists the message first. A new or terminal run
+then uses an explicit `clarification/start` with that message ID and current
+`state_version`; an active run uses explicit run- and message-scoped dispatch.
+An awaiting-assignment or cancellation-pending run occupies its sequential slot:
+new dispatch/start is disabled, same-start retry and cancellation remain
+explicit, and persisted messages are not rolled back after runtime failure.
+
+The browser uses one `/events` subscription only for category/identity hints.
+Reconnect, focus, visibility return, and explicit repair refetch canonical HTTP
+state. Structured-content edits use `expected_state_version`; a conflict keeps
+the draft and requires reconciliation, while the server response determines
+any Ready → Discussing demotion. Reviewer and readiness operations remain
+server-authorized and are not requester workspace controls.
+
 ## Execution state is separate
 
 Runtime health (Idle / Running / Retrying / Failed) never mutates business state.

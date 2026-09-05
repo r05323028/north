@@ -1,4 +1,4 @@
-import { RequirementDetail } from "@/components/requirement-detail";
+import { RequirementConversationWorkspace } from "@/components/requirement-conversation-workspace";
 
 type RequirementPageProps = {
   params: Promise<{ id: string }>;
@@ -10,7 +10,7 @@ export default async function RequirementPage({
   const { id } = await params;
   return (
     <main className="north-container">
-      <RequirementDetail id={id} />
+      <RequirementConversationWorkspace id={id} />
     </main>
   );
 }
