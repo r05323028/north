@@ -27,10 +27,10 @@
   Daemon reports clarification execution facts and owns local transport/runtime
   recovery. Durable retry policy is **Specified — implementation pending** in
   `execution-retry-authority`, not current daemon behavior.
-- Human review is **Specified — browser integration pending** in the canonical
-  `/requirements/[id]` workspace. Its target uses Review Packet truth and
-  generation-bound stale acknowledgement; current browser behavior does not
-  claim those controls.
+- Human review is **Enforced** in the canonical `/requirements/[id]`
+  workspace. The browser loads Review Packet truth, sends lifecycle-specific
+  mutation identities, repairs stale state through canonical HTTP, and requires
+  generation-bound acknowledgement without owning Requirement lifecycle.
 - Public endpoint abuse protection is **Specified — implementation pending**.
   Its target resolves a normalized effective client address, derives an IPv4
   `/32` or IPv6 `/64` CIDR primary limiter key, reuses that CIDR value as the

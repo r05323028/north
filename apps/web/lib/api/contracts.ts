@@ -99,6 +99,26 @@ export type CurrentUser = {
   role: CurrentUserRole;
 };
 
+export type ReviewRepository = {
+  repository_id: string;
+  commit_sha: string;
+};
+
+export type ReviewPacket = {
+  assessment_id: string;
+  requirement_revision: number;
+  requirement_state_version: number;
+  goal: string;
+  scope: string;
+  summary: string;
+  acceptance_criteria: string[];
+  assumptions: string[];
+  open_questions: string[];
+  blockers: string[];
+  assessment_assumptions: string[];
+  repositories_reviewed: ReviewRepository[];
+};
+
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -391,6 +411,60 @@ export function parseReadinessResponse(value: unknown): ReadinessView | null {
       "created_at",
     ),
     current: requiredBoolean(assessment, "Readiness assessment", "current"),
+  };
+}
+
+export function parseReviewPacket(value: unknown): ReviewPacket {
+  const record = recordFor(value, "Review packet");
+  const repositories = record.repositories_reviewed;
+  if (!Array.isArray(repositories)) {
+    invalid("Review packet", "repositories_reviewed");
+  }
+  return {
+    assessment_id: requiredString(record, "Review packet", "assessment_id"),
+    requirement_revision: safeInteger(
+      record,
+      "Review packet",
+      "requirement_revision",
+      1,
+    ),
+    requirement_state_version: safeInteger(
+      record,
+      "Review packet",
+      "requirement_state_version",
+      1,
+    ),
+    goal: stringValue(record, "Review packet", "goal"),
+    scope: stringValue(record, "Review packet", "scope"),
+    summary: stringValue(record, "Review packet", "summary"),
+    acceptance_criteria: stringArray(
+      record,
+      "Review packet",
+      "acceptance_criteria",
+    ),
+    assumptions: stringArray(record, "Review packet", "assumptions"),
+    open_questions: stringArray(record, "Review packet", "open_questions"),
+    blockers: stringArray(record, "Review packet", "blockers"),
+    assessment_assumptions: stringArray(
+      record,
+      "Review packet",
+      "assessment_assumptions",
+    ),
+    repositories_reviewed: repositories.map((repository) => {
+      const item = recordFor(repository, "Review packet repository");
+      return {
+        repository_id: requiredString(
+          item,
+          "Review packet repository",
+          "repository_id",
+        ),
+        commit_sha: requiredString(
+          item,
+          "Review packet repository",
+          "commit_sha",
+        ),
+      };
+    }),
   };
 }
 

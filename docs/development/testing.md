@@ -67,14 +67,13 @@ member so `cargo test --workspace` executes it.
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
 | Unit (Web) | Implemented — Vitest via `npm test` in `apps/web` |
 | Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, durable coordination, and post-commit browser notification coverage; execute with `NORTH_TEST_DATABASE_URL` |
-| E2E | Partial — Playwright web-boundary coverage exists for Board/List/create/direct workspace and SSE invalidation; full server-backed assembled workflow remains pending |
+| E2E | Partial — Playwright web-boundary coverage includes Board/List/create/direct workspace, SSE invalidation, and human review; full server-backed assembled workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
 Human-review browser integration, including Review Packet loading, stale repair,
-and generation-bound acknowledgement, remains **Specified — implementation
-pending**; no current E2E result claims those controls. Public endpoint abuse
-limiting and durable execution retry remain specified targets for their owning
-changes.
+and generation-bound acknowledgement, is **Enforced** by Web Vitest and
+Playwright web-boundary coverage. Public endpoint abuse limiting and durable
+execution retry remain specified targets for their owning changes.
 
 PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it.
 
@@ -128,14 +127,17 @@ Coverage generation/upload remains CI-specific (`npm run test:coverage`).
 ## Requirement workspace coverage
 
 Web unit coverage proves strict browser parsing, canonical bundle loading,
-offset boundary repair, stable-ID deduplication, stale response suppression,
-requester persistence-before-intent, explicit run identity, cancellation and
-structured-edit conflicts. Playwright coverage proves direct workspace load,
-canonical panes, durable message POST, initial start without duplicate dispatch,
-active run dispatch, explicit cancellation URLs, reload-safe same-start retry,
-awaiting/cancellation-pending states, terminal restart, 503 unavailability, and
-409 edit reconciliation. Full assembled server-backed E2E and smoke coverage
-remain separate obligations and are not claimed here.
+Ready-only Review Packet loading, non-Ready packet skipping, stale response
+suppression, stable-ID deduplication, requester persistence-before-intent,
+explicit run identity, cancellation and structured-edit conflicts, typed review
+payloads, role gates, stale review repair, feedback preservation, and
+identity-bound acknowledgement. Playwright coverage proves direct workspace
+load, canonical panes, durable message POST, initial start without duplicate
+dispatch, active run dispatch, explicit cancellation URLs, reload-safe same-start
+retry, awaiting/cancellation-pending states, 503 unavailability, 409 edit
+reconciliation, human review decisions, Reopen, stale acknowledgement, and
+SSE/focus repair. Full assembled server-backed E2E and smoke coverage remain
+separate obligations and are not claimed here.
 
 ## Specs
 

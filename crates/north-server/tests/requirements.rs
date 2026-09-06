@@ -474,8 +474,19 @@ async fn transition_edges_are_state_version_guarded_and_assessment_bound() {
     assert_eq!(changes["revision"], 2);
     assert_eq!(changes["state_version"], 8);
 
-    let audits: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT transition, from_status, to_status, feedback
+    type AuditRow = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        bool,
+    );
+    let audits: Vec<AuditRow> = sqlx::query_as(
+        "SELECT actor_id, transition, from_status, to_status, feedback,
+                assessment_id, state_version, created_at IS NOT NULL
          FROM transition_audit WHERE requirement_id = $1 ORDER BY id ASC",
     )
     .bind(&requirement_id)
@@ -483,13 +494,30 @@ async fn transition_edges_are_state_version_guarded_and_assessment_bound() {
     .await
     .expect("read transition audits");
     assert_eq!(audits.len(), 6);
-    assert_eq!(audits[0].0, "begin_discussion");
-    assert_eq!(audits[1].0, "mark_ready");
-    assert_eq!(audits[2].0, "reject");
-    assert_eq!(audits[3].0, "reopen");
-    assert_eq!(audits[4].0, "mark_ready");
-    assert_eq!(audits[5].0, "request_changes");
-    assert_eq!(audits[5].3.as_deref(), Some("Clarify account scope"));
+    assert_eq!(audits[0].1, "begin_discussion");
+    assert_eq!(audits[1].1, "mark_ready");
+    assert_eq!(audits[2].1, "reject");
+    assert_eq!(audits[3].1, "reopen");
+    assert_eq!(audits[4].1, "mark_ready");
+    assert_eq!(audits[5].1, "request_changes");
+    for audit in &audits {
+        assert!(audit.7, "transition audit timestamp must be populated");
+        assert!(
+            audit.6 > 0,
+            "transition audit state version must be populated"
+        );
+    }
+    assert_eq!(audits[2].0, manager_id);
+    assert_eq!(audits[2].3, "Rejected");
+    assert_eq!(audits[2].5.as_deref(), Some(assessment_a_id.as_str()));
+    assert_eq!(audits[2].6, 5);
+    assert_eq!(audits[3].0, manager_id);
+    assert_eq!(audits[3].5, None);
+    assert_eq!(audits[3].6, 6);
+    assert_eq!(audits[5].0, manager_id);
+    assert_eq!(audits[5].4.as_deref(), Some("Clarify account scope"));
+    assert_eq!(audits[5].5.as_deref(), Some(assessment_b_id.as_str()));
+    assert_eq!(audits[5].6, 8);
 
     sqlx::query("DELETE FROM server_event_dedupe WHERE session_id IN ($1, $2)")
         .bind(&session_a)

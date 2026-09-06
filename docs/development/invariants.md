@@ -22,7 +22,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Editing Ready demotes to Discussing and advances both tokens | Enforced | `apply_edit` + integration tests |
 | Review packet binds Requirement revision/state version and assessment identity | Enforced | `ReviewPacket::project`, locked packet query, stale-review integration test; generation equality is scoped to Ready reviewability |
 | Accept/Reject/Request Changes/Reopen human-only, reviewer-gated | Enforced | `Role::can_review` + server guard + assessment-bound transition integration tests |
-| Review UI uses only canonical workspace + Review Packet and generation-bound stale acknowledgement | Specified | introduce-human-requirement-review; browser/API tests pending |
+| Review UI uses only canonical workspace + Review Packet and generation-bound stale acknowledgement | Enforced | typed browser API, workspace/hook/component tests, and requirement-board Playwright coverage |
 | Requirement access is workspace-wide in 0.1.0; no per-Requirement ACL | Enforced | authenticated routes and cross-requester integration test |
 | First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
 | Verification codes cannot be brute-forced past a bounded attempt budget | Enforced | locked transactional failed-attempt counter, five-failure consumption, PostgreSQL concurrency test |

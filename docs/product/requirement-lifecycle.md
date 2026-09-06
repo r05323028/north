@@ -81,24 +81,25 @@ the draft and requires reconciliation, while the server response determines
 any Ready → Discussing demotion. Reviewer and readiness operations remain
 server-authorized and are not requester workspace controls.
 
-## Human review surface (Specified — browser integration pending)
+## Human review surface (Implemented — canonical workspace)
 
-The target human-review surface is the same `/requirements/[id]` workspace.
-When implemented, Ready Requirements will load review truth directly from
-`GET /requirements/{id}/review-packet`; the browser will not rebuild packets
-from conversation/activity or create a second Requirement/readiness entity. Accept, Reject, and Request Changes send
-`assessment_id` plus `expected_state_version`; Reopen sends only
-`expected_state_version`. HTTP 409 triggers canonical Requirement/packet
-refetch, preserves unsent Request Changes feedback, invalidates the old packet,
-and requires an explicit accessible refreshed-state acknowledgement for the
-current canonical identity before retry (`Review refreshed packet` for Ready
-decisions, `Review refreshed Requirement` for Reopen). Ready acknowledgement is
-bound to `(requirement_state_version, assessment_id)`; Reopen acknowledgement is
-bound to `requirement_state_version`. Unchanged duplicate hints/refetches keep
-acknowledgement valid, while identity changes require fresh acknowledgement.
-Requesters may read but never receive actionable reviewer controls; server
-authorization remains authoritative. Current durable review audit rows remain
-server-owned; this workspace does not invent a browser history projection.
+The human-review surface is the same `/requirements/[id]` workspace. Ready
+Requirements load review truth directly from
+`GET /requirements/{id}/review-packet`; the browser does not rebuild packets
+from conversation/activity or create a second Requirement/readiness entity.
+Accept, Reject, and Request Changes send `assessment_id` plus
+`expected_state_version`; Reopen sends only `expected_state_version`. HTTP 409
+triggers canonical Requirement/packet refetch, preserves unsent Request Changes
+feedback, invalidates the old packet, and requires an explicit accessible
+refreshed-state acknowledgement before retry (`Review refreshed packet` for
+Ready decisions, `Review refreshed Requirement` for Reopen). Ready
+acknowledgement is bound to `(requirement_state_version, assessment_id)`; Reopen
+acknowledgement is bound to `requirement_state_version`. Unchanged duplicate
+hints/refetches keep acknowledgement valid, while identity changes require
+fresh acknowledgement. Requesters may read but never receive actionable
+reviewer controls; server authorization remains authoritative. Current durable
+review audit rows remain server-owned; this workspace does not invent a browser
+history projection.
 
 ## Execution state boundary
 

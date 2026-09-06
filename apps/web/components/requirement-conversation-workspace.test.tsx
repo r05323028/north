@@ -34,6 +34,10 @@ const mocks = vi.hoisted(() => {
     dispatch: vi.fn(),
     cancel: vi.fn(),
     edit: vi.fn(),
+    acceptReview: vi.fn(),
+    rejectReview: vi.fn(),
+    requestChangesReview: vi.fn(),
+    reopenReview: vi.fn(),
     MockClarificationUnavailableError,
   };
 });
@@ -49,6 +53,12 @@ vi.mock("@/lib/api/clarification", () => ({
   cancelClarification: mocks.cancel,
   dispatchClarificationMessage: mocks.dispatch,
   startClarification: mocks.start,
+}));
+vi.mock("@/lib/api/review", () => ({
+  acceptRequirementReview: mocks.acceptReview,
+  rejectRequirementReview: mocks.rejectReview,
+  requestRequirementChanges: mocks.requestChangesReview,
+  reopenRequirement: mocks.reopenReview,
 }));
 vi.mock("@/lib/requirements", () => ({
   editRequirement: mocks.edit,
@@ -145,6 +155,23 @@ const readiness: ReadinessView = {
   current: false,
 };
 
+const reviewPacket = {
+  assessment_id: "assessment-1",
+  requirement_revision: 4,
+  requirement_state_version: 9,
+  goal: "Recover access",
+  scope: "Email recovery",
+  summary: "Self-service recovery.",
+  acceptance_criteria: ["Recovery link expires"],
+  assumptions: ["Email exists"],
+  open_questions: [],
+  blockers: [],
+  assessment_assumptions: ["Provider is configured"],
+  repositories_reviewed: [
+    { repository_id: "repository-1", commit_sha: "a".repeat(40) },
+  ],
+};
+
 function run(overrides: Partial<ClarificationRun> = {}): ClarificationRun {
   return {
     run_id: "run-a",
@@ -178,6 +205,7 @@ function workspace(
       reached_end: true,
     },
     readiness,
+    reviewPacket,
     activities,
     activityHistory: null,
     activity_next_offset: null,
@@ -211,15 +239,14 @@ function mount(value = workspace()) {
 
 async function renderWorkspace(mounted: ReturnType<typeof mount>) {
   await act(async () => {
-    mounted.root.render(<RequirementConversationWorkspace id={requirement.id} />);
+    mounted.root.render(
+      <RequirementConversationWorkspace id={requirement.id} />,
+    );
     await settle();
   });
 }
 
-async function renderAndSend(
-  mounted: ReturnType<typeof mount>,
-  body: string,
-) {
+async function renderAndSend(mounted: ReturnType<typeof mount>, body: string) {
   await renderWorkspace(mounted);
   const input = mounted.container.querySelector<HTMLTextAreaElement>(
     "#clarification-message",
@@ -615,6 +642,346 @@ describe("RequirementConversationWorkspace", () => {
       "#requirement-edit-title",
     );
     expect(reconciledTitle?.value).toBe("Canonical title");
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("renders canonical packet evidence without requester review controls", () => {
+    mocks.useWorkspace.mockReturnValue(workspace());
+    const html = renderToStaticMarkup(
+      <RequirementConversationWorkspace id={requirement.id} />,
+    );
+
+    expect(html).toContain("Recover access");
+    expect(html).toContain("Assessment assumptions");
+    expect(html).toContain("Repositories reviewed");
+    expect(html).not.toContain('aria-label="Accept Requirement"');
+    expect(html).not.toContain('aria-label="Request Changes"');
+  });
+
+  it("sends reviewer decisions with packet identity and clears feedback after success", async () => {
+    const reviewer = { ...requester, role: "RequirementManager" as const };
+    mocks.acceptReview.mockResolvedValueOnce(requirement);
+    mocks.requestChangesReview.mockResolvedValueOnce(requirement);
+    const value = workspace({ currentUser: reviewer });
+    const mounted = mount(value);
+    await renderWorkspace(mounted);
+
+    const accept = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Accept Requirement"]',
+    );
+    if (!accept) throw new Error("accept control missing");
+    await act(async () => {
+      accept.click();
+      await settle();
+    });
+    expect(mocks.acceptReview).toHaveBeenCalledWith(requirement.id, {
+      assessment_id: reviewPacket.assessment_id,
+      expected_state_version: reviewPacket.requirement_state_version,
+    });
+
+    const feedback =
+      mounted.container.querySelector<HTMLTextAreaElement>("#review-feedback");
+    const requestChanges = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Request Changes"]',
+    );
+    if (!feedback || !requestChanges)
+      throw new Error("Request Changes controls missing");
+    setValue(feedback, "Clarify recovery expiry.");
+    await act(async () => {
+      requestChanges.click();
+      await settle();
+    });
+    expect(mocks.requestChangesReview).toHaveBeenCalledWith(requirement.id, {
+      assessment_id: reviewPacket.assessment_id,
+      expected_state_version: reviewPacket.requirement_state_version,
+      feedback: "Clarify recovery expiry.",
+    });
+    expect(feedback.value).toBe("");
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("reopens rejected Requirements with state version only", async () => {
+    const reviewer = { ...requester, role: "Admin" as const };
+    const rejected = { ...requirement, status: "rejected" as const };
+    mocks.reopenReview.mockResolvedValueOnce({
+      ...rejected,
+      status: "discussing" as const,
+      state_version: rejected.state_version + 1,
+    });
+    const mounted = mount(
+      workspace({
+        currentUser: reviewer,
+        requirement: rejected,
+        reviewPacket: null,
+      }),
+    );
+    await renderWorkspace(mounted);
+    const reopen = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Reopen Requirement"]',
+    );
+    if (!reopen) throw new Error("reopen control missing");
+    await act(async () => {
+      reopen.click();
+      await settle();
+    });
+    expect(mocks.reopenReview).toHaveBeenCalledWith(requirement.id, {
+      expected_state_version: rejected.state_version,
+    });
+    expect(mocks.reopenReview.mock.calls[0][1]).not.toHaveProperty(
+      "assessment_id",
+    );
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("repairs stale review without optimistic transition and requires refreshed acknowledgement", async () => {
+    const reviewer = { ...requester, role: "Owner" as const };
+    const value = workspace({ currentUser: reviewer });
+    mocks.acceptReview
+      .mockRejectedValueOnce(new ApiError(409, "conflict", "conflict"))
+      .mockResolvedValueOnce(requirement);
+    const mounted = mount(value);
+    await renderWorkspace(mounted);
+    const accept = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Accept Requirement"]',
+    );
+    if (!accept) throw new Error("accept control missing");
+    await act(async () => {
+      accept.click();
+      await settle();
+    });
+    expect(mocks.acceptReview).toHaveBeenCalledOnce();
+    expect(value.requirement?.status).toBe("ready");
+    expect(accept.disabled).toBe(true);
+
+    mocks.useWorkspace.mockReturnValue({
+      ...value,
+      reviewPacket: { ...reviewPacket },
+    });
+    await act(async () => {
+      mounted.root.render(
+        <RequirementConversationWorkspace id={requirement.id} />,
+      );
+      await settle();
+    });
+    const acknowledge = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Review refreshed packet"]',
+    );
+    if (!acknowledge) throw new Error("packet acknowledgement missing");
+    await act(async () => {
+      acknowledge.click();
+      await settle();
+    });
+    const refreshedAccept = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Accept Requirement"]',
+    );
+    if (!refreshedAccept) throw new Error("refreshed accept control missing");
+    expect(refreshedAccept.disabled).toBe(false);
+    await act(async () => {
+      refreshedAccept.click();
+      await settle();
+    });
+    expect(mocks.acceptReview).toHaveBeenCalledTimes(2);
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("preserves Request Changes feedback across stale repair", async () => {
+    const reviewer = { ...requester, role: "RequirementManager" as const };
+    mocks.requestChangesReview.mockRejectedValueOnce(
+      new ApiError(409, "conflict", "conflict"),
+    );
+    const mounted = mount(workspace({ currentUser: reviewer }));
+    await renderWorkspace(mounted);
+    const feedback =
+      mounted.container.querySelector<HTMLTextAreaElement>("#review-feedback");
+    const requestChanges = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Request Changes"]',
+    );
+    if (!feedback || !requestChanges)
+      throw new Error("Request Changes controls missing");
+    setValue(feedback, "Keep this unsent review feedback.");
+    await act(async () => {
+      requestChanges.click();
+      await settle();
+    });
+    expect(feedback.value).toBe("Keep this unsent review feedback.");
+    expect(mounted.container.textContent).toContain("Review became stale");
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("keeps acknowledgement for unchanged identity and resets it for state or assessment changes", async () => {
+    const reviewer = { ...requester, role: "Admin" as const };
+    const value = workspace({ currentUser: reviewer });
+    mocks.acceptReview.mockRejectedValueOnce(
+      new ApiError(409, "conflict", "conflict"),
+    );
+    const mounted = mount(value);
+    await renderWorkspace(mounted);
+    const accept = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Accept Requirement"]',
+    );
+    if (!accept) throw new Error("accept control missing");
+    await act(async () => {
+      accept.click();
+      await settle();
+    });
+    mocks.useWorkspace.mockReturnValue({
+      ...value,
+      reviewPacket: { ...reviewPacket },
+    });
+    await act(async () => {
+      mounted.root.render(
+        <RequirementConversationWorkspace id={requirement.id} />,
+      );
+      await settle();
+    });
+    const acknowledge = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Review refreshed packet"]',
+    );
+    if (!acknowledge) throw new Error("packet acknowledgement missing");
+    await act(async () => {
+      acknowledge.click();
+      await settle();
+    });
+
+    mocks.useWorkspace.mockReturnValue({
+      ...value,
+      reviewPacket: { ...reviewPacket },
+    });
+    await act(async () => {
+      mounted.root.render(
+        <RequirementConversationWorkspace id={requirement.id} />,
+      );
+      await settle();
+    });
+    expect(
+      mounted.container.querySelector(
+        'button[aria-label="Review refreshed packet"]',
+      ),
+    ).toBeNull();
+
+    const changedRequirement = {
+      ...requirement,
+      revision: 5,
+      state_version: 10,
+    };
+    mocks.useWorkspace.mockReturnValue({
+      ...value,
+      requirement: changedRequirement,
+      reviewPacket: {
+        ...reviewPacket,
+        requirement_revision: 5,
+        requirement_state_version: 10,
+      },
+    });
+    await act(async () => {
+      mounted.root.render(
+        <RequirementConversationWorkspace id={requirement.id} />,
+      );
+      await settle();
+    });
+    expect(
+      mounted.container.querySelector(
+        'button[aria-label="Review refreshed packet"]',
+      ),
+    ).not.toBeNull();
+    const changedAccept = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Accept Requirement"]',
+    );
+    expect(changedAccept?.disabled).toBe(true);
+
+    mocks.useWorkspace.mockReturnValue({
+      ...value,
+      requirement: changedRequirement,
+      reviewPacket: {
+        ...reviewPacket,
+        assessment_id: "assessment-2",
+        requirement_revision: 5,
+        requirement_state_version: 10,
+      },
+    });
+    await act(async () => {
+      mounted.root.render(
+        <RequirementConversationWorkspace id={requirement.id} />,
+      );
+      await settle();
+    });
+    expect(
+      mounted.container.querySelector(
+        'button[aria-label="Review refreshed packet"]',
+      ),
+    ).not.toBeNull();
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("requires refreshed Reopen acknowledgement and uses only state version", async () => {
+    const reviewer = { ...requester, role: "Owner" as const };
+    const rejected = { ...requirement, status: "rejected" as const };
+    const value = workspace({
+      currentUser: reviewer,
+      requirement: rejected,
+      reviewPacket: null,
+    });
+    mocks.reopenReview
+      .mockRejectedValueOnce(new ApiError(409, "conflict", "conflict"))
+      .mockResolvedValueOnce({
+        ...rejected,
+        status: "discussing" as const,
+        state_version: rejected.state_version + 1,
+      });
+    const mounted = mount(value);
+    await renderWorkspace(mounted);
+    const reopen = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Reopen Requirement"]',
+    );
+    if (!reopen) throw new Error("reopen control missing");
+    await act(async () => {
+      reopen.click();
+      await settle();
+    });
+    expect(mocks.reopenReview).toHaveBeenCalledOnce();
+    expect(mounted.container.textContent).toContain("Review became stale");
+
+    const refreshedRejected = { ...rejected, state_version: 10 };
+    mocks.useWorkspace.mockReturnValue({
+      ...value,
+      requirement: refreshedRejected,
+      reviewPacket: null,
+    });
+    await act(async () => {
+      mounted.root.render(
+        <RequirementConversationWorkspace id={requirement.id} />,
+      );
+      await settle();
+    });
+    const acknowledge = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Review refreshed Requirement"]',
+    );
+    if (!acknowledge) throw new Error("Requirement acknowledgement missing");
+    await act(async () => {
+      acknowledge.click();
+      await settle();
+    });
+    const refreshedReopen = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Reopen Requirement"]',
+    );
+    if (!refreshedReopen) throw new Error("refreshed Reopen control missing");
+    expect(refreshedReopen.disabled).toBe(false);
+    await act(async () => {
+      refreshedReopen.click();
+      await settle();
+    });
+    expect(mocks.reopenReview).toHaveBeenLastCalledWith(requirement.id, {
+      expected_state_version: 10,
+    });
+    expect(mocks.reopenReview.mock.calls[1][1]).not.toHaveProperty(
+      "assessment_id",
+    );
     mounted.root.unmount();
     mounted.container.remove();
   });
