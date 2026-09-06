@@ -16,7 +16,7 @@ concurrency:
 jobs:
   sonarqube:
     name: SonarQube analysis
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     services:
       postgres:
         image: postgres:16
