@@ -12,8 +12,9 @@ invalidate the code. A successful verification SHALL consume the code as
 before.
 
 A syntactically valid request to `POST /auth/request-code` SHALL pass the
-separate process-local client/network bucket and the existing normalized-email
-cooldown/resource transaction. Client request rate, email cooldown, and failed
+separate process-local bucket keyed by the normalized effective address's
+primary limiter key and the existing normalized-email cooldown/resource
+transaction. Client request rate, email cooldown, and failed
 verification-attempt budget are independent controls and SHALL NOT be merged.
 Any rate/cooldown rejection SHALL create no code and use the canonical generic
 HTTP 429 `rate_limited` response with safe `Retry-After` where applicable. The

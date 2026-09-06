@@ -9,9 +9,10 @@
 - [ ] Walk trusted chains right-to-left, reject malformed/missing chains
       safely, and fall back to immediate peer; ignore untrusted forwarding
       headers.
-- [ ] Define typed IPv4 `/24` and IPv6 `/64` network keys from address bits;
-      normalize mapped IPv6 before deriving the key and reuse the exact key for
-      process buckets and durable setup quotas.
+- [ ] Define the normalized effective client address and PostgreSQL `CIDR`
+      primary limiter key: IPv4 `/32` or IPv6 `/64` from address bits; normalize
+      mapped IPv6 before deriving the key and reuse that exact value as the
+      durable setup quota key.
 - [ ] Add unit tests for direct, trusted, untrusted, multi-hop, malformed,
       duplicate-header, all-trusted, mapped-address, and prefix-boundary cases.
 
@@ -31,14 +32,15 @@
 - [ ] Preserve normalized-email one-active-code, cooldown, supersession, and
       generic code-free response semantics; keep verification-attempt budget
       separate.
-- [ ] Add migration for nullable `client_network_key` with an explicit legacy-row
-      policy: existing null-key rows retain claim/expiry behavior but are not
-      counted for new keyed quotas; require non-null keys on new rows and never
-      fabricate identities.
-- [ ] Persist the derived typed network key on new setup-request rows and
-      transactionally enforce bounded quota (default maximum 3 unexpired/unclaimed
-      rows per key) under a deterministic per-key advisory transaction lock; never
-      use label alone.
+- [ ] Add migration for nullable PostgreSQL `CIDR` `client_network_key` with an
+      explicit legacy-row policy: existing null-key rows retain claim/expiry
+      behavior but are not counted for new keyed quotas; require a non-null
+      derived durable setup quota key on new rows and never fabricate identities.
+- [ ] Persist the derived `CIDR` durable setup quota key on new setup-request
+      rows and transactionally enforce bounded quota (default maximum 3
+      unexpired/unclaimed rows per key) under
+      `pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))`;
+      never use label alone.
 - [ ] Add the keyed pending-count index (`client_network_key`, `expires_at`)
       for unclaimed rows while retaining the existing expiry-cleanup index.
 - [ ] Define pending/approved/claimed/expired row counting and retain bounded

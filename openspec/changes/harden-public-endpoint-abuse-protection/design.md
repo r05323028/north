@@ -27,14 +27,25 @@ to a canonical IP value before comparison or keying:
 - A malformed or missing address is not accepted as a trusted client claim;
   use the transport's peer failure path rather than an attacker-provided value.
 
-Client bucket grouping is explicit and fixed for 0.1.0: IPv4 `/24` and IPv6
-`/64`. Derive prefixes from IP bits, never by string truncation. Encode the
-bucket key with an address-family tag and canonical network bytes (for example,
-`v4:<first-24-bits>` or `v6:<first-64-bits>`), so IPv4-mapped IPv6 shares the
-same IPv4 key after normalization. The exact normalized address remains the
-request's immediate-peer identity; the typed network key is used for coarse
-buckets and the durable setup quota. Do not use daemon labels, email local
-parts, User-Agent, cookies, or arbitrary headers as client identity.
+Derive one normalized effective client address from the immediate peer and,
+when trusted, the validated forwarding chain. That address is the input to the
+primary limiter key:
+
+- IPv4 primary key: `/32` (the complete normalized IPv4 address);
+- IPv6 primary key: `/64` (the first 64 address bits).
+
+Derive prefixes from address bits, never string truncation. Represent the primary
+key as a PostgreSQL `CIDR` value with its prefix: `192.0.2.7/32` for IPv4 or
+`2001:db8::/64` for IPv6. IPv4-mapped IPv6 becomes IPv4 before key derivation,
+so it receives the same `/32` CIDR primary key as its IPv4 spelling.
+
+Use terms precisely: the **normalized effective client address** is the
+canonical address after peer/proxy resolution; the **primary limiter key** is
+the CIDR `/32` or `/64` value used by process-local endpoint buckets; and the
+**durable setup quota key** is the same CIDR primary value persisted in
+`client_network_key` for setup rows. North 0.1.0 does not add a broader
+secondary anti-rotation key. Do not use daemon labels, email local parts,
+User-Agent, cookies, or arbitrary headers as any of these identities.
 
 ## 3. Forwarded header trust
 
@@ -59,13 +70,15 @@ startup; no guessed private-network trust is enabled.
 
 ## 4. Limiter storage and limits
 
-Use an in-process, concurrency-safe token bucket keyed by endpoint plus grouped
-client network. It is intentionally coarse and resets on process restart; this
-restart behavior is documented and does not claim cross-instance protection.
-Defaults are bounded and configurable:
+Use an in-process, concurrency-safe token bucket keyed by endpoint plus the
+primary limiter key. It is intentionally coarse and resets on process restart;
+this restart behavior is documented and does not claim cross-instance
+protection. Defaults are bounded and configurable:
 
-- request-code: capacity 5, refill 1 token per 120 seconds per client network;
-- daemon setup: capacity 5, refill 1 token per 120 seconds per client network.
+- request-code: capacity 5, refill 1 token per 120 seconds per IPv4 `/32` or
+  IPv6 `/64` primary key;
+- daemon setup: capacity 5, refill 1 token per 120 seconds per IPv4 `/32` or
+  IPv6 `/64` primary key.
 
 The implementation calculates a safe integer `Retry-After` from the bucket and
 never exposes bucket counts. One process-local mutex/map is enough; do not add a
@@ -76,23 +89,26 @@ Durable resource-specific controls remain separate:
 - request-code uses the existing normalized-email one-active-code and cooldown
   transaction. The cooldown is not merged with the client bucket.
 - daemon setup uses a transactionally enforced pending quota keyed by the
-  canonical typed client/network key. Persist that derived key on every setup
-  request row; do not recompute it from mutable proxy configuration later. Count
-  unexpired, unclaimed rows for that key, including pending or approved rows;
-  claimed rows and expired rows do not count even before cleanup. The 0.1.0
-  default maximum is 3 unexpired, unclaimed rows per network key. The create
-  transaction takes a deterministic per-key PostgreSQL advisory transaction lock,
-  counts, and inserts under that lock so concurrent requests cannot pass the
-  same quota. The existing 24-hour expiry cleanup remains bounded. Add a
+  durable setup quota key (the same CIDR primary limiter key). Persist that
+  derived key on every setup request row; do not recompute it from mutable proxy
+  configuration later. Count unexpired, unclaimed rows for that key, including
+  pending or approved rows; claimed rows and expired rows do not count even
+  before cleanup. The 0.1.0 default maximum is 3 unexpired, unclaimed rows per
+  durable setup quota key. The create transaction acquires
+  `pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))`, then
+  counts and inserts under that lock so concurrent requests cannot pass the same
+  quota. The hash is only a serialization key; `client_network_key` remains the
+  quota identity. The existing 24-hour expiry cleanup remains bounded. Add a
   partial index over `(client_network_key, expires_at)` for rows with
   `claimed_at IS NULL`; retain the existing expiry index for cleanup.
 
-The setup-key migration SHALL add a nullable `client_network_key` column because
-pre-existing rows have no recorded peer identity. Existing rows with a null key
-retain normal approval/claim/expiry behavior but are excluded from new keyed
-quota counts; the application SHALL require a non-null key for every new row and
-must not place legacy rows in one shared attacker-visible bucket. Legacy rows
-age out under the existing retention policy.
+The setup-key migration SHALL add a nullable PostgreSQL `CIDR`
+`client_network_key` column because pre-existing rows have no recorded peer
+identity. Existing rows with a null key retain normal
+approval/claim/expiry behavior but are excluded from new keyed
+quota counts; the application SHALL require a non-null durable setup quota key
+for every new row and must not place legacy rows in one shared attacker-visible
+bucket. Legacy rows age out under the existing retention policy.
 
 A valid setup request includes a bounded daemon-label length check, but the label
 is display data only and is never the sole quota key. Rejected client or pending

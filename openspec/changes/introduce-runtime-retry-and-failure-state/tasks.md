@@ -4,9 +4,10 @@
       `openspec/specs/execution-retry-authority`.
 - [ ] Align clarification-runtime and Requirement workspace contracts with
       active `retrying` and terminal `failed` projection semantics.
-- [ ] Update the daemon-protocol delta so runtime events keep identity,
-      sequence, dedupe, and ACK-after-commit while reaching owning server
-      projections instead of generic rejection.
+- [ ] Update the daemon-protocol delta so the landed clarification event
+      projection keeps identity, sequence, dedupe, and ACK-after-commit while
+      only `session.failed` changes to execution-attempt retry/terminal policy;
+      do not duplicate generic projection routing.
 - [ ] Keep session ownership/daemon-runtime as consumed boundaries; remove
       stale wording that treats retry behavior as a future duplicate capability.
 

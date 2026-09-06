@@ -33,8 +33,9 @@ cancellation, and public clarification projection ambiguous.
 
 - `execution-retry-authority`: durable attempt policy, failure facts,
   scheduling, cancellation, and safe public projection.
-- `daemon-protocol`: runtime events hand off to owning server projections
-  instead of generic delivery-only rejection; wire schemas remain unchanged.
+- `daemon-protocol`: retain the landed clarification-owned event projection
+  boundary and modify only `session.failed` into an execution-attempt fact;
+  wire schemas and delivery rules remain unchanged.
 - Existing clarification-runtime/workspace contracts: retrying and failed
   projections use the same run identity and phase ownership.
 

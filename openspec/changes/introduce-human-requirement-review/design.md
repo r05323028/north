@@ -36,6 +36,14 @@ Review controls are derived from those responses and `/auth/me` only for UX.
 The browser never infers Ready from transcript text, activity, or an assessment
 message and never reconstructs packet evidence from another read.
 
+Acknowledgement is bound to canonical review identity, not to a refetch or SSE
+hint. For Ready decisions the identity is
+`(requirement_state_version, assessment_id)`; for Reopen it is
+`requirement_state_version`. The browser stores the acknowledged identity and
+compares every canonical refresh against it. `requirement_revision` may also be
+included when present in the packet contract, but does not turn a refresh into
+an invalidation by itself when the chosen identity is unchanged.
+
 Loading is conditional and generation-aware. The workspace first loads the
 canonical Requirement. Only when that response says `Ready` does it request
 `GET /requirements/{id}/review-packet`. Draft, Discussing, Accepted, and other
@@ -90,22 +98,26 @@ security.
 
 The browser follows this exact flow:
 
-1. Load current Requirement and packet.
+1. Load current Requirement and, only when it is Ready, the applicable Review
+   Packet.
 2. Reviewer edits or inspects locally.
 3. Another edit, lifecycle transition, Ready-generation change, or assessment
    identity change makes the packet stale.
 4. Mutation returns HTTP 409.
 5. Browser does not apply an optimistic transition and does not retry the
    mutation.
-6. Browser refetches Requirement and packet, marks the old packet unusable, and
-   shows a stale/review-required notice.
+6. Browser refetches Requirement, fetches a packet only if it is still Ready,
+   marks the old packet unusable, and shows a stale/review-required notice.
 7. Any unsent Request Changes textarea remains intact.
 8. Browser keeps review mutations disabled behind an explicit accessible
    acknowledgement for the refreshed canonical state: `Review refreshed packet`
    when Ready, or `Review refreshed Requirement` when Rejected/Reopen is shown.
-   Refetch/render completion alone is not inspection; acknowledgement clears the
-   gate only for the current Requirement generation and, when Ready, packet
-   generation. Any later hint or refetch sets the gate again.
+   Refetch/render completion alone is not inspection. The acknowledgement stores
+   the canonical review identity: `(requirement_state_version, assessment_id)`
+   for Ready decisions and `requirement_state_version` for Reopen. A later hint,
+   focus repair, visibility repair, explicit refresh, or duplicate refetch keeps
+   acknowledgement valid when that identity is unchanged, and invalidates it
+   when the identity changes. No refresh event alone resets the gate.
 
 A successful refetch that is no longer Ready removes Ready actions. A stale
 response cannot be used with a refreshed Requirement, even if the old action

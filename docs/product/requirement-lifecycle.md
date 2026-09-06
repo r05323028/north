@@ -81,29 +81,35 @@ the draft and requires reconciliation, while the server response determines
 any Ready → Discussing demotion. Reviewer and readiness operations remain
 server-authorized and are not requester workspace controls.
 
-## Human review surface
+## Human review surface (Specified — browser integration pending)
 
-Human review lives in the same `/requirements/[id]` workspace. Ready Requirements
-load review truth directly from `GET /requirements/{id}/review-packet`; the
-browser does not rebuild packets from conversation/activity or create a second
-Requirement/readiness entity. Accept, Reject, and Request Changes send
+The target human-review surface is the same `/requirements/[id]` workspace.
+When implemented, Ready Requirements will load review truth directly from
+`GET /requirements/{id}/review-packet`; the browser will not rebuild packets
+from conversation/activity or create a second Requirement/readiness entity. Accept, Reject, and Request Changes send
 `assessment_id` plus `expected_state_version`; Reopen sends only
 `expected_state_version`. HTTP 409 triggers canonical Requirement/packet
 refetch, preserves unsent Request Changes feedback, invalidates the old packet,
 and requires an explicit accessible refreshed-state acknowledgement for the
-current generation before retry (`Review refreshed packet` for Ready decisions,
-`Review refreshed Requirement` for Reopen). Requesters may read but never receive
-actionable reviewer controls; server authorization remains authoritative. Current
-durable review audit rows remain server-owned; this workspace does not invent a
-browser history projection.
+current canonical identity before retry (`Review refreshed packet` for Ready
+decisions, `Review refreshed Requirement` for Reopen). Ready acknowledgement is
+bound to `(requirement_state_version, assessment_id)`; Reopen acknowledgement is
+bound to `requirement_state_version`. Unchanged duplicate hints/refetches keep
+acknowledgement valid, while identity changes require fresh acknowledgement.
+Requesters may read but never receive actionable reviewer controls; server
+authorization remains authoritative. Current durable review audit rows remain
+server-owned; this workspace does not invent a browser history projection.
 
-## Execution state is separate
+## Execution state boundary
 
-Runtime execution state (`Idle` / `Running` / `Retrying` / `Failed`) never
-mutates business state. A failed agent attempt leaves the Requirement exactly
-where it was. The server persists attempts, due retry work, and safe failure
-classification; it owns retry/resume/terminal-failure decisions. The daemon
-only reconnects, replays, and reports facts. Public clarification projection
-keeps `awaiting_assignment` / `active` / `terminal` phases; policy retry is
-`active/retrying`, while terminal execution failure is `terminal/failed`. See
-docs/architecture/daemon.md and the execution-retry-authority contract.
+Current landed clarification runtime keeps execution facts separate from
+Requirement lifecycle. It projects `Idle` / `Running` / `Completed` / `Failed`,
+and a current `session.failed` terminalizes the clarification run with
+operational failure status without changing Requirement content, lifecycle,
+revision, or readiness.
+
+**Specified — implementation pending:** `execution-retry-authority` will add
+logical-run versus execution-attempt state, retry scheduling, attempt
+accounting, durable `next_retry_at`, public `retrying`/`failed` projections,
+and unknown-outcome terminality. Until implemented, documentation must not read
+those target states as current behavior. See docs/architecture/daemon.md.

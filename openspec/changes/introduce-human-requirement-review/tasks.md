@@ -55,10 +55,14 @@
       required notice, and keep mutations disabled until an explicit accessible
       acknowledgement for that generation (`Review refreshed packet` for Ready,
       `Review refreshed Requirement` for Reopen).
-- [ ] Reset that acknowledgement on every later hint/refetch; never auto-retry a
-      failed review action.
+- [ ] Bind acknowledgement to canonical identity: `(requirement_state_version,
+      assessment_id)` for Ready decisions and `requirement_state_version` for
+      Reopen; preserve it across unchanged duplicate hints/refetches and
+      invalidate it only when identity changes. Never auto-retry a failed action.
 - [ ] Add Vitest race tests for edit/lifecycle/Ready-generation/assessment
-      changes, old-packet rejection, and feedback preservation.
+      changes, old-packet rejection, feedback preservation, unchanged duplicate
+      SSE/focus refetch preservation, changed state-version reset, changed
+      assessment-id reset, and Reopen state-version reset.
 
 ## 6. Audit and safety boundary
 

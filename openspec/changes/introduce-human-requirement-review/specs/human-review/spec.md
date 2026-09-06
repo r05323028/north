@@ -57,7 +57,7 @@ feedback. For Reopen, the workspace SHALL send `expected_state_version` and
 SHALL NOT require or send `assessment_id`.
 
 The browser SHALL not optimistically change lifecycle or readiness. On success
-it SHALL refetch canonical Requirement and packet state.
+it SHALL refetch canonical Requirement and any applicable Review Packet state.
 
 #### Scenario: Ready decision carries assessment identity
 
@@ -109,10 +109,12 @@ packet SHALL be dropped; Rejected Reopen remains Requirement-state-only. The
 workspace SHALL keep review mutations disabled until the reviewer performs
 an explicit accessible acknowledgement after stale repair: `Review refreshed
 packet` for a Ready decision, or `Review refreshed Requirement` for Reopen.
-Refetch/render completion alone is not inspection. The acknowledgement applies
-only to the current Requirement generation and, when Ready, packet generation;
-any later hint or refetch disables mutations again. The workspace SHALL NOT
-automatically retry.
+Refetch/render completion alone is not inspection. The acknowledgement identity
+is `(requirement_state_version, assessment_id)` for Ready decisions and
+`requirement_state_version` for Reopen. A later SSE hint, focus/visibility
+repair, explicit refresh, or duplicate refetch SHALL preserve acknowledgement
+when that canonical identity is unchanged and SHALL invalidate it when the
+identity changes. The workspace SHALL NOT automatically retry.
 Unsent Request Changes feedback SHALL survive the refetch and stale notice.
 
 #### Scenario: Concurrent edit causes stale decision
@@ -120,9 +122,10 @@ Unsent Request Changes feedback SHALL survive the refetch and stale notice.
 - **GIVEN** a reviewer loaded a current packet and another operation changes
   Requirement content, lifecycle, Ready generation, or assessment
 - **WHEN** the reviewer submits the old packet and receives HTTP 409
-- **THEN** no lifecycle transition is applied in the browser, the Requirement
-  and packet are refetched, the old packet cannot be retried, and mutations stay
-  disabled until the reviewer explicitly acknowledges the refreshed packet
+- **THEN** no lifecycle transition is applied in the browser, the canonical
+  Requirement is refetched and Review Packet is fetched only if the refreshed
+  Requirement is Ready; the old packet cannot be retried, and mutations stay
+  disabled until the reviewer explicitly acknowledges refreshed state
 
 #### Scenario: Request Changes draft survives stale repair
 
@@ -145,6 +148,39 @@ Unsent Request Changes feedback SHALL survive the refetch and stale notice.
   reviewable for that assessment
 - **THEN** Ready actions remain disabled and the reviewer sees the refreshed
   canonical reason
+
+#### Scenario: Duplicate unchanged SSE hint preserves acknowledgement
+
+- **GIVEN** reviewer acknowledged Ready identity `(state_version, assessment_id)`
+- **WHEN** a duplicate SSE hint causes a canonical refetch with the same identity
+- **THEN** acknowledgement remains valid and actions do not require repeated
+  confirmation
+
+#### Scenario: Unchanged focus repair preserves acknowledgement
+
+- **GIVEN** reviewer acknowledged a Ready identity or Rejected state version
+- **WHEN** focus/visibility repair or explicit refetch returns the same identity
+- **THEN** acknowledgement remains valid
+
+#### Scenario: Changed Ready state version resets acknowledgement
+
+- **GIVEN** reviewer acknowledged a Ready review identity
+- **WHEN** canonical refresh returns a different `requirement_state_version`
+- **THEN** old acknowledgement is invalid and the reviewer must acknowledge the
+  latest identity before actions re-enable
+
+#### Scenario: Changed assessment identity resets acknowledgement
+
+- **GIVEN** reviewer acknowledged a Ready review identity
+- **WHEN** canonical refresh returns a different `assessment_id`
+- **THEN** old acknowledgement is invalid even if state version is unchanged
+
+#### Scenario: Reopen acknowledgement follows Rejected state version
+
+- **GIVEN** reviewer acknowledged Reopen for Rejected state version V
+- **WHEN** canonical refresh returns Rejected state version V+1
+- **THEN** Reopen acknowledgement is invalidated, while an unchanged V preserves
+  it
 
 ### Requirement: Durable review audit remains server-owned
 

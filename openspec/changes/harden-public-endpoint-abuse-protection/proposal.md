@@ -13,15 +13,17 @@ or attacker-controlled daemon labels.
 
 - Add one `public-endpoint-abuse-protection` capability covering only the two
   unauthenticated creation endpoints.
-- Define canonical socket/proxy client identity with trusted `X-Forwarded-For`
-  handling, IPv4/IPv6 normalization, IPv4-mapped normalization, and fixed IPv4
-  `/24` / IPv6 `/64` network grouping.
+- Define the normalized effective client address from the socket/proxy boundary,
+  including trusted `X-Forwarded-For`, IPv4/IPv6 normalization, and
+  IPv4-mapped normalization. Derive the primary limiter key as PostgreSQL `CIDR`
+  IPv4 `/32` or IPv6 `/64`. Persist that same value as the setup quota key.
 - Add process-local coarse client token buckets plus existing/durable
   resource-specific controls. No Redis, provider registry, HA, or generic
   abuse platform.
-- Key request-code resource protection by normalized email. Persist daemon setup's
-  typed canonical network key and enforce bounded unexpired-unclaimed setup
-  quota, never by an attacker-controlled daemon label alone.
+- Key request-code resource protection by normalized email. Persist the same
+  CIDR primary limiter key as daemon setup's durable quota key and enforce
+  bounded unexpired-unclaimed setup quota, never by an attacker-controlled
+  daemon label alone.
 - Preserve one active code, cooldown, supersession, bounded verification-failure
   budget, generic auth errors, and secret-free responses.
 - Return one generic HTTP 429 contract with stable `rate_limited` code and safe

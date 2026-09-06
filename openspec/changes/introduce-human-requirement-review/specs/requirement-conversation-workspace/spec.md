@@ -41,9 +41,13 @@ actions.
 Every repair is generation-aware: refresh Requirement first or coordinate both
 responses under one generation, then fetch a packet only if refreshed state is
 Ready. A non-Ready refresh invalidates/drops any previous packet. No old packet
-may be submitted against refreshed Requirement state. After stale review repair,
-review mutations remain disabled until the explicit refreshed-state
-acknowledgement required by the human-review contract.
+may be submitted against refreshed Requirement state. Review acknowledgement is
+bound to canonical identity: `(requirement_state_version, assessment_id)` for
+Ready decisions and `requirement_state_version` for Reopen. After stale review
+repair, mutations remain disabled until explicit acknowledgement of the latest
+identity. Duplicate SSE hints, focus/visibility repair, explicit refresh, and
+refetches preserve acknowledgement when identity is unchanged; an identity
+change invalidates it.
 
 #### Scenario: Initial bundle uses canonical endpoints
 
@@ -102,6 +106,28 @@ acknowledgement required by the human-review contract.
 - **WHEN** stale repair changes Ready to Discussing, Rejected, or another state
 - **THEN** old packet is dropped, no Ready action remains enabled, and no old
   packet can be submitted
+
+#### Scenario: Unchanged duplicate hint preserves review acknowledgement
+
+- **GIVEN** reviewer acknowledged a canonical Ready or Rejected identity
+- **WHEN** duplicate SSE, focus/visibility repair, or explicit refresh returns
+  the same identity
+- **THEN** acknowledgement remains valid and no repeated confirmation is
+  required
+
+#### Scenario: Changed review identity requires acknowledgement
+
+- **GIVEN** reviewer acknowledged a Ready identity
+- **WHEN** refreshed canonical state changes `requirement_state_version` or
+  `assessment_id`
+- **THEN** old acknowledgement is invalidated and only the latest identity can
+  re-enable actions
+
+#### Scenario: Reopen tracks only Rejected state version
+
+- **GIVEN** reviewer acknowledged Reopen for Rejected state version V
+- **WHEN** refresh returns the same V or a changed V
+- **THEN** same V preserves acknowledgement and changed V requires a new one
 
 ### Requirement: Workspace permissions follow instance roles and server authority
 

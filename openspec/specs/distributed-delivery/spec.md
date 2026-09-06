@@ -27,10 +27,9 @@ remains Running, with a later `session.completed` or `session.failed` event.
 The durable command coordinator SHALL decide journal state and idempotency before
 crossing a narrow internal dispatch/execution seam that accepts stable command
 and runtime-operation identity. Durable-delivery tests MAY use a deterministic
-fake executor. The later `introduce-agent-requirement-clarification` change
-provides the real runtime adapter; this delivery contract does not define agent
-prompting, SDK behavior, tool choice, repository inspection, or readiness
-judgment.
+fake executor. The landed `clarification-runtime` capability provides the real
+runtime adapter; this delivery contract does not define agent prompting, SDK
+behavior, tool choice, repository inspection, or readiness judgment.
 A duplicate command MUST return the same acceptance outcome and MUST NOT
 invoke the runtime again or duplicate a side effect. In particular, one
 `message.send` command SHALL submit its user message to the agent at most once.

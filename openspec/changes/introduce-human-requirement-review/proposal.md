@@ -19,10 +19,14 @@ Requirement Conversation Workspace the browser surface for those contracts.
 - Send the exact existing mutation preconditions: `assessment_id` plus
   `expected_state_version` for Accept, Reject, and Request Changes; only
   `expected_state_version` for Reopen.
-- Treat HTTP 409 as stale repair: refetch Requirement and packet, preserve
-  unsent Request Changes feedback, and require an explicit accessible refreshed-
+- Treat HTTP 409 as stale repair: refetch Requirement, fetch only an applicable
+  packet for refreshed Ready state, preserve unsent Request Changes feedback, and
+  require an explicit accessible refreshed-
   state acknowledgement before another mutation (`Review refreshed packet` for
-  Ready decisions, or `Review refreshed Requirement` for Reopen).
+  Ready decisions, or `Review refreshed Requirement` for Reopen). Bind that
+  acknowledgement to `(requirement_state_version, assessment_id)` for Ready
+  decisions or `requirement_state_version` for Reopen; unchanged refetches do
+  not require repeated confirmation.
 - Keep Requesters read-only for review actions. Client visibility is UX only;
   server role checks remain authoritative.
 - Keep durable audit writes server-owned. This change does not add a history

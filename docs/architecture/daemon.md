@@ -54,8 +54,9 @@ Socket.IO or native-tls stack is introduced.
 
 ## Responsibilities
 
-Connection-supervisor, durable delivery, and WebSocket responsibilities below
-are current where stated. Repository inspection remains a downstream contract.
+Connection-supervisor, durable delivery, WebSocket, and repository-inspection
+responsibilities below describe current mechanics. Business retry remains a
+specified downstream contract.
 
 - Initiate and maintain the server connection (WebSocket over TLS in deployment).
 - The current authentication flow accepts one user-owned daemon registration,
@@ -65,7 +66,8 @@ are current where stated. Repository inspection remains a downstream contract.
   execution sessions, the server command outbox, and bounded verification-attempt
   state. Migration 0013 adds the configured repository catalog; migration 0014
   adds outbox payload fingerprints, command/event watermarks, and server event
-  identity/outcome records.
+  identity/outcome records. Migration 0015 adds clarification-run context,
+  cancellation/runtime outcome fields, and coarse activity records.
   Plaintext credentials remain on daemon hosts; the server stores hashes only.
   Setup rows older than the retention window are removed opportunistically in
   bounded indexed batches.
@@ -78,16 +80,15 @@ are current where stated. Repository inspection remains a downstream contract.
 - The coordinator crosses the local runtime seam once per `command_id`, passes
   that id as its operation id, and reattaches after restart when possible. It
   never re-invokes a `dispatch_started` command automatically.
-- The repository-inspection design will manage a reusable repository cache plus
-  isolated disposable session/task checkouts, detect dirty-checkout violations,
-  and report exact commit SHAs.
+- The repository-inspection implementation manages a reusable repository cache
+  plus isolated disposable session/task checkouts, detects dirty-checkout
+  violations, and reports exact commit SHAs.
 - The durable coordinator converts runtime output into typed facts/events,
   journals them before transmission, replays them in `daemon_event_seq` order,
-  and reports recoverability/failure. The shipped `LocalRuntime` is a
-  placeholder, so executable commands currently surface a not-configured/
-  unknown fact; the production agent adapter belongs to the downstream runtime
-  change. Unknown outcomes emit an explicit `session.failed` fact without
-  automatic resubmission.
+  and reports recoverability/failure. The shipped `north-daemon` wires the
+  landed `PiClarificationAdapter` backed by Pi Agent; Pi-specific details stay
+  behind the daemon-private North runtime seam. Unknown outcomes emit an
+  explicit `session.failed` fact without automatic resubmission.
 - Reconnect the WebSocket with local backoff and replay eligible Journal buffers
   after reconciliation; execution recovery remains a server `session.resume`
   command.
@@ -111,10 +112,11 @@ one complete command envelope, and persists that exact payload atomically with
 `execution_sessions.daemon_id`. `DaemonRuntime::persist_and_dispatch_command`
 then dispatches the persisted envelope through its pinned owner. Reconnect
 reconciles only sessions pinned
-to that identity; North 0.1.0 does not perform automatic live migration. Due
-business retries remain server-owned: a retry worker creates one durable
-`session.resume` for the immutable owner, while reconnect only delivers existing
-outbox work. Revoked owners are never replaced automatically.
+to that identity; North 0.1.0 does not perform automatic live migration. Business retry policy remains server-owned. The durable retry worker,
+`session.resume` scheduling, attempt accounting, and terminal retry policy are
+**Specified — implementation pending** in `execution-retry-authority`; current
+reconnect only delivers existing outbox work. Revoked owners are never replaced
+automatically.
 
 The current registration model defines daemon registrations as instance-scoped
 identities with credentials owned by the account recorded in `created_by`.
@@ -128,19 +130,25 @@ WebSocket reconnect/backoff and local Journal/runtime transport recovery are
 current daemon mechanics. They do not consume the server's business attempt
 budget. Event replay remains delivery recovery and does not consume that budget.
 
-The server execution model persists `Idle`, `Running`, `Retrying`, or `Failed`
-(and existing successful `Completed`) together with attempt identity/count,
-snapshotted limit, persisted `next_retry_at`, and a bounded safe failure reason.
-Only server policy decides `session.resume` and terminal `Failed`; a known retry
-keeps the clarification run active and slot-occupying, while unknown outcome
-never auto-resubmits. Requirement lifecycle remains separate.
+The landed clarification runtime persists `Idle`, `Running`, `Completed`, or
+`Failed`; its current `session.failed` projection terminalizes the clarification
+run as an operational failure and does not mutate Requirement lifecycle.
+
+Execution retry is **Specified — implementation pending**. The
+`execution-retry-authority` target adds `Retrying`, attempt identity/count,
+snapshotted limits, durable `next_retry_at`, safe failure classification,
+server-owned `session.resume`, and terminal `Failed` policy. Requirement
+lifecycle remains separate; daemon reconnect and journal replay remain transport
+recovery.
 
 WebSocket reconnect/backoff, journal replay, ACK retry, and event replay are
-transport recovery and consume no business attempt. Setup request creation is
-also subject to the public endpoint client bucket and transactional pending
-quota on the persisted typed IPv4 `/24` or IPv6 `/64` network key; process-local
-buckets reset on restart, while unexpired unclaimed setup rows remain durable.
-Setup approval/claim credentials remain outside the browser response.
+transport recovery and consume no business attempt. Public endpoint abuse
+protection is **Specified — implementation pending**. Its target uses the
+normalized effective client address, an IPv4 `/32` or IPv6 `/64` primary limiter
+CIDR key for process-local buckets, and the same CIDR value as the durable
+setup quota key. Process-local buckets reset on restart, while unexpired unclaimed
+setup rows remain durable. Setup approval/claim credentials remain outside the
+browser response.
 
 Setup/login follows the browser-assisted CLI flow. A normal browser GET
 returns an HTML confirmation page with daemon label and state, an explicit

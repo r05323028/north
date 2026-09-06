@@ -139,10 +139,10 @@ fake/test executor. Duplicate or replayed commands SHALL cross the seam only
 when permitted by the command-journal state machine; terminal or
 duplicate-safe records SHALL NOT cross it again.
 
-The later `introduce-agent-requirement-clarification` change SHALL provide the
-real agent-runtime adapter behind this seam. This protocol change SHALL NOT
-introduce agent prompting, SDK behavior, tool choice, repository inspection, or
-readiness judgment.
+The landed `clarification-runtime` capability provides the real agent-runtime
+adapter behind this seam. This protocol contract SHALL NOT introduce agent
+prompting, SDK behavior, tool choice, repository inspection, or readiness
+judgment.
 
 #### Scenario: Durable tests use a fake executor
 
@@ -434,34 +434,53 @@ persistence.
 - **THEN** it contains execution-recovery data only; directional event sequence
   and replay watermarks remain in reconciliation state
 
-### Requirement: Generic runtime events have delivery-only handling until projected
+### Requirement: Runtime events use owning clarification projection
 
 For well-formed `session.started`, `agent.message`, `agent.activity`,
-`session.completed`, and `session.failed` events, the current server SHALL
-validate event identity, sequence, and payload integrity, durably record a
-rejected receipt with `event_handler_not_implemented`, and send
-`event_ack(status=rejected)` only after that receipt commits. It SHALL not
-silently accept a business effect. Business projections for runtime/session
-state, activity or conversation data, and retry policy are deferred to their
-own changes. A rejected generic event remains retained/replay-safe according
-to the delivery watermarks and tombstones.
+`session.completed`, and `session.failed` events, the server SHALL retain the
+existing identity, sequence, payload-integrity, dedupe, and ACK-after-commit
+boundary. When the event belongs to a clarification session, server coordination
+SHALL route it to the owning clarification projection and commit that projection
+or a durable domain rejection before sending the matching terminal
+`event_ack(status=accepted|rejected)`.
 
-#### Scenario: Generic event receives terminal delivery rejection
+The currently landed clarification projection SHALL apply these effects:
 
-- **WHEN** a valid generic runtime event arrives before its owning business
-  projection exists
-- **THEN** server records its identity, sequence, payload digest, rejected
-  outcome, and `event_handler_not_implemented` before sending a rejected ACK;
-  no execution-state, activity, conversation, or retry-budget mutation occurs
+- `session.started` updates the run to its active/running projection;
+- `agent.message` persists canonical agent conversation content;
+- `agent.activity` persists coarse activity;
+- `session.completed` terminalizes the clarification run as completed; and
+- `session.failed` terminalizes the current clarification run using the
+  landed operational failure projection (`phase=terminal`, public
+  `status=unavailable`), without mutating Requirement lifecycle, content,
+  revision, or readiness.
 
-#### Scenario: Unknown outcome remains a local execution fact
+An event that has no clarification owner or no applicable projection MAY use the
+generic durable rejection path, including `event_handler_not_implemented`,
+subject to the same identity, sequence, payload-integrity, dedupe, and
+ACK-after-commit rules. Clarification-owned events SHALL NOT be rejected by that
+generic path merely because their projection is no longer delivery-only.
 
-- **WHEN** `session.failed` reports `recoverable: false` with
-  `execution_outcome_unknown`
-- **THEN** the fact means the existing runtime operation cannot be safely
-  recovered locally; it does not decide final execution failure, and server
-  attempt count, retry budget, `session.resume` policy, and final `Failed`
-  state remain server-owned
+#### Scenario: Clarification event reaches its owning projection
+
+- **WHEN** a valid runtime event targets an assigned clarification session
+- **THEN** server commits the corresponding run, conversation, activity, or
+  terminal projection (or a durable domain rejection) and sends its ACK only
+  after that commit
+
+#### Scenario: Current failure projection is terminal
+
+- **WHEN** a valid `session.failed` event reaches a clarification session under
+  the landed clarification runtime
+- **THEN** the current run becomes terminal with the landed operational failure
+  status, no Requirement lifecycle state changes, and no business retry is
+  scheduled
+
+#### Scenario: Unsupported ownership uses generic rejection
+
+- **WHEN** a well-formed runtime event has no owning clarification projection
+- **THEN** server may record `event_handler_not_implemented` durably and send a
+  rejected ACK only after that rejection commits
 
 ### Requirement: Runtime and business retry ownership stays separated
 

@@ -2,52 +2,67 @@
 
 ## MODIFIED Requirements
 
-### Requirement: Generic runtime events have delivery-only handling until projected
+### Requirement: Runtime events use owning clarification projection
 
-For well-formed `session.started`, `agent.message`, `agent.activity`,
-`session.completed`, and `session.failed` events, the server SHALL retain the
-existing identity, sequence, payload-integrity, dedupe, and ACK-after-commit
-boundary, then invoke the owning server-side clarification/runtime projection
-instead of returning `event_handler_not_implemented`. The projection SHALL
-commit or durably reject the business fact before its terminal
-`event_ack(status=accepted|rejected)`. `session.failed` is an
-execution-attempt fact: retry policy may persist `Retrying`/`next_retry_at` or
-terminal `Failed`; it never mutates Requirement lifecycle. Duplicate facts
-remain replay-safe and inert. `session.resume` remains a server command only for
-eligible non-terminal runs; a terminal unknown-outcome run cannot receive it.
-Transport replay state remains in reconciliation/watermark records.
+The canonical daemon-protocol requirement already routes clarification-owned
+`session.started`, `agent.message`, `agent.activity`, `session.completed`, and
+`session.failed` events through their server-side clarification projection after
+identity, sequence, payload-integrity, dedupe, and ACK-after-commit handling.
+This change SHALL NOT introduce that routing or change the generic rejection
+fallback. It SHALL modify only `session.failed`: the pre-retry terminal
+logical-run projection becomes an execution-attempt fact handled by the
+canonical execution-retry-authority policy. Requirement lifecycle, content,
+revision, and readiness remain untouched.
 
-#### Scenario: Runtime event reaches its owning projection
+A known failure MAY close/clear the current attempt, preserve a valid
+non-cancelled logical run as `phase=active,status=retrying`, and persist
+`next_retry_at` when retry budget and owner validity permit. Exhausted failure,
+`execution_outcome_unknown`, invalid/revoked owner, or cancellation becomes
+terminal `phase=terminal,status=failed`; it releases the sequential slot and
+cannot receive `session.resume`. Owner liveness alone does not decide policy.
+Transport replay state remains in reconciliation/watermark records, and
+replayed facts remain inert.
 
-- **WHEN** a valid runtime event arrives after its owning clarification/runtime
-  projection is available
-- **THEN** server coordination commits that projection or a durable domain
-  rejection, sends the matching terminal ACK after commit, and does not record
-  a generic `event_handler_not_implemented` rejection
+#### Scenario: Clarification event reaches its owning projection
 
-#### Scenario: Failure event does not move business lifecycle
+- **WHEN** a valid `session.started`, `agent.message`, `agent.activity`, or
+  `session.completed` event targets an assigned clarification session
+- **THEN** server SHALL retain the landed owning projection and ACK-after-commit
+  behavior; this retry delta adds no generic-event projection behavior
 
-- **WHEN** a valid `session.failed` fact is accepted
-- **THEN** server policy handles attempt retry/terminal failure idempotently while
-  Requirement content, lifecycle, revision, and readiness remain unchanged
+#### Scenario: Current failure projection is terminal
 
-#### Scenario: Duplicate runtime event remains inert
+- **WHEN** `session.failed` is exhausted, unknown-outcome, owner-invalid, or
+  terminally cancelled
+- **THEN** server SHALL project `phase=terminal,status=failed`, release the
+  sequential slot, and reject `session.resume` for that logical run
 
-- **WHEN** an already acknowledged runtime event is replayed
-- **THEN** server returns its known ACK/outcome without repeating conversation,
-  activity, execution, or retry effects
+#### Scenario: Unsupported ownership uses generic rejection
 
-#### Scenario: Generic event receives terminal delivery rejection
+- **WHEN** a well-formed runtime event has no owning clarification projection
+- **THEN** server MAY record `event_handler_not_implemented` durably and SHALL
+  send a rejected ACK only after that rejection commits
 
-- **WHEN** a valid generic runtime event arrives after its owning projection is
-  available
-- **THEN** server commits the owning projection or a durable domain rejection
-  and sends its terminal ACK after commit, rather than a generic
-  `event_handler_not_implemented` rejection
+#### Scenario: Failure event changes from terminal run fact to attempt fact
 
-#### Scenario: Unknown outcome remains a local execution fact
+- **WHEN** a valid clarification-owned `session.failed` fact arrives for the
+  current execution attempt
+- **THEN** the server SHALL record the attempt outcome and clear the current
+  attempt before applying retry policy, rather than unconditionally
+  terminalizing the logical run
 
-- **WHEN** a daemon reports an unknown outcome after local reattachment fails
-- **THEN** the server records the fact, creates no automatic `session.resume`,
-  and any later execution uses a new logical run/protocol `session_id` and an
-  explicit `session.start` command
+#### Scenario: Known failure remains retrying
+
+- **WHEN** failure is known, the logical run is not cancelled, the pinned owner
+  is valid, and retry budget remains
+- **THEN** server SHALL persist safe failure state and `next_retry_at`, leave the
+  run active/retrying and slot-occupying, and later create one explicit
+  `session.resume`
+
+#### Scenario: Unknown outcome is terminal and not resumable
+
+- **WHEN** local reattachment fails and the daemon reports
+  `execution_outcome_unknown`
+- **THEN** server SHALL terminalize the logical run as failed, create no
+  automatic `session.resume`, and reject any later resume for that terminal run;
+  a later execution requires a new logical run and explicit `session.start`

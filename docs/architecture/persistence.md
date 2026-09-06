@@ -9,7 +9,7 @@ server at startup.
 | Class | Examples | Rules |
 | --- | --- | --- |
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
-| Durable coordination | daemon registrations/setup requests (including each new setup row's canonical client/network key; legacy rows may be null), `session.daemon_id`, session execution state/attempts, server command outbox, event dedupe/rejection records, sequence watermarks | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
+| Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, server command outbox, event dedupe/rejection records, sequence watermarks; retry attempt state and keyed setup quota are specified targets | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
 Migrations 0003–0005 implement requirements and transition audit,
 one-to-one conversations/messages, and immutable revision-bound readiness
@@ -24,27 +24,40 @@ implement daemon registration/setup-request, execution-session/outbox records,
 and requirement binding used to authorize assessment events. Migration 0013
 adds the configured repository catalog. Migration 0014 adds immutable outbox
 payload fingerprints, command/event contiguous watermarks, and durable server
-event identity/outcome records. Readiness
+event identity/outcome records. Migration 0015 adds clarification-run context,
+cancellation/runtime outcome fields, and coarse activity records. Readiness
 evidence rows are append-only; database triggers reject direct mutation of
 evidence, repository source identity, and command outbox payloads. Requirement
 delete is restrictive so evidence never changes via a cascade. Requirements
 with readiness evidence must be retained (or receive a future tombstone design).
-Execution retry state is durable coordination state, not an in-memory timer:
-when the retry capability lands, attempt rows, unique command/failure identities,
-`attempt_count`, snapshotted limits, safe failure class, and `next_retry_at` are
-transactionally bound to the session and command outbox. Startup discovers due
-rows from the indexed database; reconnect/replay does not increment attempts.
-When public creation protection lands, its migration adds nullable setup
-`client_network_key` plus the unclaimed-key count index; pre-existing null-key
-rows retain normal expiry/claim behavior and are not counted for new keyed
-quotas.
+**Specified — implementation pending:** execution retry state is designed as
+durable coordination state, not an in-memory timer. When implemented, attempt
+rows, unique command/failure identities, `attempt_count`, snapshotted limits,
+safe failure class, and `next_retry_at` will be transactionally bound to the
+session and command outbox. Startup will discover due rows from the indexed
+database; reconnect/replay will not increment attempts.
 
-Public creation protection remains deliberately smaller: process-local client
-buckets reset on restart, while normalized-email cooldown and pending setup
-quotas remain durable. Client buckets group normalized IPv4 by `/24` and IPv6 by
-`/64`; IPv4-mapped IPv6 normalizes to IPv4. Each setup row persists its typed
-canonical network key, and unexpired unclaimed rows for that key count toward
-the pending quota; daemon labels never provide the key.
+**Specified — implementation pending:** public creation protection will add a
+nullable PostgreSQL `CIDR` setup `client_network_key` plus the unclaimed-key
+count index.
+Pre-existing null-key rows retain normal expiry/claim behavior and are excluded
+from new keyed quotas; every new row will receive a non-null durable setup quota
+key.
+
+The public-creation protection target is **Specified — implementation pending**:
+process-local client buckets reset on restart, while normalized-email cooldown
+and pending setup quotas remain durable. The normalized effective client address
+derives an IPv4 `/32` or IPv6 `/64` primary limiter key; IPv4-mapped IPv6
+normalizes to IPv4 first. Each new setup row persists that same CIDR value as
+its durable setup quota key in the nullable PostgreSQL `CIDR`
+`client_network_key`; only unexpired, unclaimed matching rows count.
+Count-and-insert will use
+`pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))`, reject
+before INSERT, and use a partial `(client_network_key, expires_at)` index for
+unclaimed rows alongside
+the existing expiry-cleanup index. Legacy NULL rows retain claim/expiry behavior
+but are excluded from keyed quotas, and daemon labels never provide any quota
+identity.
 
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.

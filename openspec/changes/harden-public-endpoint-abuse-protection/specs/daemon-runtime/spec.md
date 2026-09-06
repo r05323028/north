@@ -7,8 +7,9 @@
 Public abuse protection is no longer deferred. The active
 `public-endpoint-abuse-protection` capability SHALL protect only
 `POST /auth/request-code` and `POST /daemon/setup/request` with the documented
-client identity, process-local client buckets, durable resource-specific
-controls, generic 429 responses, and safe observability. Other deferred items
+normalized effective client identity, primary-limiter-key process buckets,
+durable resource-specific controls, generic 429 responses, and safe
+observability. Other deferred items
 remain unchanged:
 
 - Keyed OTP hashing with a server-side pepper remains a follow-up;

@@ -10,9 +10,10 @@ or a later `session.resume`.
 The server owns logical execution state, attempt accounting, retry policy,
 command identity, and terminal failure. The daemon reports facts and performs
 only transport/local recovery. The existing `daemon-protocol` delivery boundary
-is retained, but this change adds its explicit handoff from generic event
-receipt to the owning clarification/runtime projection; wire schemas and
-transport sequencing do not change.
+and landed clarification-owned event projection are consumed unchanged; this
+change modifies only the `session.failed` interpretation from pre-retry terminal
+logical-run handling to execution-attempt policy. Wire schemas and transport
+sequencing do not change.
 
 Pinned-owner validity and liveness are separate. An owner is **valid** when its
 registration still exists, it remains the persisted session owner, and it is not

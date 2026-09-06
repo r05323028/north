@@ -70,9 +70,18 @@ member so `cargo test --workspace` executes it.
 | E2E | Partial — Playwright web-boundary coverage exists for Board/List/create/direct workspace and SSE invalidation; full server-backed assembled workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
+Human-review browser integration, including Review Packet loading, stale repair,
+and generation-bound acknowledgement, remains **Specified — implementation
+pending**; no current E2E result claims those controls. Public endpoint abuse
+limiting and durable execution retry remain specified targets for their owning
+changes.
+
 PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it.
 
-## Required future proofs
+## Coverage matrix
+
+Rows marked `Implemented` are current evidence; remaining rows are required
+future proofs.
 
 | Contract | Primary layer | Owning change |
 | --- | --- | --- |
@@ -82,8 +91,8 @@ PostgreSQL integration also exercises legacy readiness schema upgrades and migra
 | atomic assessment evidence/transition/dedupe before event ACK | Integration | Implemented by readiness-assessment, including authenticated daemon ACK path |
 | daemon selection, pinned reconnect, credential revocation | Integration | daemon-runtime-connection |
 | server retry authority, durable attempt identity, restart/due discovery, duplicate failure, cancellation races, and pinned-owner policy | Integration | introduce-runtime-retry-and-failure-state |
-| public request-code/setup identity, mapped IPv6/prefix grouping, trusted-proxy spoofing, durable setup-key quotas, generic 429, restart reset, and no-resource-on-rejection | Integration | harden-public-endpoint-abuse-protection |
-| canonical workspace review packet, exact mutation identities, stale 409 repair/acknowledgement, feedback preservation, permissions, and durable audit boundary | E2E + Integration | introduce-human-requirement-review |
+| public request-code/setup normalized effective address, mapped IPv6 → IPv4 normalization, trusted-proxy spoofing, IPv4 `/32`/IPv6 `/64` primary-key derivation, durable setup quota key, generic 429, restart reset, and no-resource-on-rejection | Integration | harden-public-endpoint-abuse-protection |
+| canonical workspace review packet, exact mutation identities, stale 409 repair with generation-bound acknowledgement, unchanged duplicate SSE/focus refetch preservation, state-version/assessment-id reset, Reopen reset, feedback preservation, permissions, and durable audit boundary | E2E + Integration | introduce-human-requirement-review |
 | concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
 | soft-disable history, disabled-name recovery, and disabled-repo citation rules | Integration | configured-repositories |
 | Full server-backed SSE disconnect/missed hint/duplicate/delayed hint refetch | E2E | requirement-board + requirement-conversation-workspace |

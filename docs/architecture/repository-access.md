@@ -157,10 +157,10 @@ filesystem-identity checks; symlinked or redirected paths remain in place and
 produce cleanup failures. This pass never scans or deletes `source.git`,
 workspaces, or unrelated cache-root entries.
 
-The daemon binary initializes repository-inspection infrastructure as a future
-runtime-adapter seam. `LocalRuntime::dispatch` remains an explicit
-`runtime_adapter_not_configured` placeholder; downstream clarification owns
-invocation and agent execution. No inspection call, provider SDK behavior, or
+The daemon binary initializes repository-inspection infrastructure for the
+landed `PiClarificationAdapter` runtime. The adapter invokes Pi through the
+North-owned daemon seam and receives only authorized, run-bound repository
+context; no server persistence, Requirement mutation, provider SDK behavior, or
 new protocol surface belongs here.
 
 Out of scope for configured-repositories: clone/fetch execution, push, PR
