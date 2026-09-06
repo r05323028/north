@@ -1,0 +1,88 @@
+---
+name: Discord CI status
+
+# Intentional workflow_run: no checkout or write token.
+# yamllint disable rule:truthy
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+# yamllint enable rule:truthy
+
+permissions: {}
+
+jobs:
+  notify:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send CI status
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_CI_WEBHOOK }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          EVENT_NAME: ${{ github.event.workflow_run.event }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          ACTOR: ${{ github.event.workflow_run.actor.login }}
+        run: |
+          set -eu
+
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "DISCORD_CI_WEBHOOK is not configured; skipping Discord"
+            echo "notification."
+            exit 0
+          fi
+
+          case "$CONCLUSION" in
+            success)
+              color=5763719
+              ;;
+            failure)
+              color=15548997
+              ;;
+            cancelled|timed_out|action_required)
+              color=16705372
+              ;;
+            *)
+              color=9807270
+              ;;
+          esac
+
+          payload="$(
+            jq -n \
+              --arg conclusion "$CONCLUSION" \
+              --arg event "$EVENT_NAME" \
+              --arg branch "$HEAD_BRANCH" \
+              --arg run "$RUN_NUMBER" \
+              --arg url "$RUN_URL" \
+              --arg actor "$ACTOR" \
+              --argjson color "$color" \
+              '{
+                username: "North CI",
+                embeds: [{
+                  title: ("CI " + $conclusion),
+                  description: ("CI completed for `" + $branch + "`"),
+                  color: $color,
+                  fields: [
+                    {name: "Status", value: $conclusion, inline: true},
+                    {name: "Event", value: $event, inline: true},
+                    {name: "Run", value: ("#" + $run), inline: true},
+                    {name: "Actor", value: $actor, inline: true}
+                  ],
+                  url: $url
+                }]
+              }'
+          )"
+
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-delay 2 \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --header "Content-Type: application/json" \
+            --data "$payload" \
+            "$DISCORD_WEBHOOK"

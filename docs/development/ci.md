@@ -76,3 +76,22 @@ Known limitations of act parity (documented, not hidden):
 - act validates job steps, not branch-protection semantics.
 
 Red remote CI always wins over green local output.
+
+## Discord CI status notification
+
+`.github/workflows/discord-ci-status.yml` listens for completed runs of `CI`,
+covering its existing `main` push and pull request triggers. Add repository
+Actions secret `DISCORD_CI_WEBHOOK` with the Discord incoming webhook URL. The
+notification includes conclusion, triggering event, head branch, run number,
+actor, and link to the completed run. It sends workflow metadata only; it does
+not check out repository code or need repository permissions.
+
+Missing `DISCORD_CI_WEBHOOK` skips notification and succeeds. A configured
+webhook failure makes the notification workflow fail after bounded retries, but
+never changes `CI` or its required `gate` result. `workflow_run` notifications
+start after this workflow exists on the default branch. Remove the secret or
+delete this workflow to roll back; existing CI validation remains unchanged.
+
+Local `act` parity does not replay `workflow_run` completion delivery or call a
+real Discord endpoint. Validate notification behavior with a completed remote CI
+run after configuring the secret.
