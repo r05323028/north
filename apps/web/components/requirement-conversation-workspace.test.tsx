@@ -311,6 +311,45 @@ async function renderReviewPanel(props: ReviewPanelHarnessProps) {
   return { container, root };
 }
 
+function expectCanonicalRefreshFailure(
+  container: HTMLElement,
+  status: Requirement["status"],
+  buttonLabel: string,
+) {
+  expect(
+    container.querySelector('[data-testid="canonical-status"]')?.textContent,
+  ).toBe(status);
+  expect(
+    container.querySelector(`button[aria-label="${buttonLabel}"]`),
+  ).toBeNull();
+  expect(container.textContent).toContain("Canonical refresh failed.");
+  expect(container.textContent).not.toContain("Review action failed");
+}
+
+async function acknowledgeRefreshedPacket(
+  mounted: ReturnType<typeof mount>,
+  value: ReturnType<typeof workspace>,
+) {
+  mocks.useWorkspace.mockReturnValue({
+    ...value,
+    reviewPacket: { ...reviewPacket },
+  });
+  await act(async () => {
+    mounted.root.render(
+      <RequirementConversationWorkspace id={requirement.id} />,
+    );
+    await settle();
+  });
+  const acknowledge = mounted.container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Review refreshed packet"]',
+  );
+  if (!acknowledge) throw new Error("packet acknowledgement missing");
+  await act(async () => {
+    acknowledge.click();
+    await settle();
+  });
+}
+
 async function renderAndSend(mounted: ReturnType<typeof mount>, body: string) {
   await renderWorkspace(mounted);
   const input = mounted.container.querySelector<HTMLTextAreaElement>(
@@ -789,19 +828,11 @@ describe("RequirementConversationWorkspace", () => {
       accept.click();
       await settle();
     });
-    expect(
-      mounted.container.querySelector('[data-testid="canonical-status"]')
-        ?.textContent,
-    ).toBe("accepted");
-    expect(
-      mounted.container.querySelector(
-        'button[aria-label="Accept Requirement"]',
-      ),
-    ).toBeNull();
-    expect(mounted.container.textContent).toContain(
-      "Canonical refresh failed.",
+    expectCanonicalRefreshFailure(
+      mounted.container,
+      "accepted",
+      "Accept Requirement",
     );
-    expect(mounted.container.textContent).not.toContain("Review action failed");
     mounted.root.unmount();
     mounted.container.remove();
   });
@@ -834,23 +865,15 @@ describe("RequirementConversationWorkspace", () => {
       requestChanges.click();
       await settle();
     });
-    expect(
-      mounted.container.querySelector('[data-testid="canonical-status"]')
-        ?.textContent,
-    ).toBe("discussing");
+    expectCanonicalRefreshFailure(
+      mounted.container,
+      "discussing",
+      "Accept Requirement",
+    );
     expect(mounted.container.querySelector("#review-feedback")).toBeNull();
     expect(mounted.container.textContent).not.toContain(
       "Clarify account scope.",
     );
-    expect(
-      mounted.container.querySelector(
-        'button[aria-label="Accept Requirement"]',
-      ),
-    ).toBeNull();
-    expect(mounted.container.textContent).toContain(
-      "Canonical refresh failed.",
-    );
-    expect(mounted.container.textContent).not.toContain("Review action failed");
     mounted.root.unmount();
     mounted.container.remove();
   });
@@ -877,19 +900,11 @@ describe("RequirementConversationWorkspace", () => {
       reopen.click();
       await settle();
     });
-    expect(
-      mounted.container.querySelector('[data-testid="canonical-status"]')
-        ?.textContent,
-    ).toBe("discussing");
-    expect(
-      mounted.container.querySelector(
-        'button[aria-label="Reopen Requirement"]',
-      ),
-    ).toBeNull();
-    expect(mounted.container.textContent).toContain(
-      "Canonical refresh failed.",
+    expectCanonicalRefreshFailure(
+      mounted.container,
+      "discussing",
+      "Reopen Requirement",
     );
-    expect(mounted.container.textContent).not.toContain("Review action failed");
     mounted.root.unmount();
     mounted.container.remove();
   });
@@ -948,24 +963,7 @@ describe("RequirementConversationWorkspace", () => {
     expect(value.requirement?.status).toBe("ready");
     expect(accept.disabled).toBe(true);
 
-    mocks.useWorkspace.mockReturnValue({
-      ...value,
-      reviewPacket: { ...reviewPacket },
-    });
-    await act(async () => {
-      mounted.root.render(
-        <RequirementConversationWorkspace id={requirement.id} />,
-      );
-      await settle();
-    });
-    const acknowledge = mounted.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Review refreshed packet"]',
-    );
-    if (!acknowledge) throw new Error("packet acknowledgement missing");
-    await act(async () => {
-      acknowledge.click();
-      await settle();
-    });
+    await acknowledgeRefreshedPacket(mounted, value);
     const refreshedAccept = mounted.container.querySelector<HTMLButtonElement>(
       'button[aria-label="Accept Requirement"]',
     );
@@ -1021,24 +1019,7 @@ describe("RequirementConversationWorkspace", () => {
       accept.click();
       await settle();
     });
-    mocks.useWorkspace.mockReturnValue({
-      ...value,
-      reviewPacket: { ...reviewPacket },
-    });
-    await act(async () => {
-      mounted.root.render(
-        <RequirementConversationWorkspace id={requirement.id} />,
-      );
-      await settle();
-    });
-    const acknowledge = mounted.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Review refreshed packet"]',
-    );
-    if (!acknowledge) throw new Error("packet acknowledgement missing");
-    await act(async () => {
-      acknowledge.click();
-      await settle();
-    });
+    await acknowledgeRefreshedPacket(mounted, value);
 
     mocks.useWorkspace.mockReturnValue({
       ...value,

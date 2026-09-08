@@ -685,6 +685,32 @@ impl fmt::Debug for RepositoryInspector {
     }
 }
 
+fn prepare_inspection_root(
+    path: PathBuf,
+    phase: InspectionPhase,
+    name: &str,
+) -> Result<PathBuf, InspectionError> {
+    fs::create_dir_all(&path).map_err(|error| {
+        InspectionError::new(
+            phase,
+            format!("create {name} root {}: {error}", path.display()),
+        )
+    })?;
+    reject_symlink_root(&path, phase)?;
+    restrict_root_permissions(&path).map_err(|error| {
+        InspectionError::new(
+            phase,
+            format!("restrict {name} root {}: {error}", path.display()),
+        )
+    })?;
+    fs::canonicalize(&path).map_err(|error| {
+        InspectionError::new(
+            phase,
+            format!("resolve {name} root {}: {error}", path.display()),
+        )
+    })
+}
+
 impl RepositoryInspector {
     /// Create an inspector with separate reusable-cache and disposable roots.
     /// Overlapping roots are rejected so startup cleanup cannot delete cache
@@ -697,53 +723,9 @@ impl RepositoryInspector {
         let workspace_root = workspace_root.into();
         reject_symlink_root(&cache_root, InspectionPhase::Cache)?;
         reject_symlink_root(&workspace_root, InspectionPhase::Workspace)?;
-        fs::create_dir_all(&cache_root).map_err(|error| {
-            InspectionError::new(
-                InspectionPhase::Cache,
-                format!("create cache root {}: {error}", cache_root.display()),
-            )
-        })?;
-        fs::create_dir_all(&workspace_root).map_err(|error| {
-            InspectionError::new(
-                InspectionPhase::Workspace,
-                format!(
-                    "create workspace root {}: {error}",
-                    workspace_root.display()
-                ),
-            )
-        })?;
-        reject_symlink_root(&cache_root, InspectionPhase::Cache)?;
-        reject_symlink_root(&workspace_root, InspectionPhase::Workspace)?;
-        restrict_root_permissions(&cache_root).map_err(|error| {
-            InspectionError::new(
-                InspectionPhase::Cache,
-                format!("restrict cache root {}: {error}", cache_root.display()),
-            )
-        })?;
-        restrict_root_permissions(&workspace_root).map_err(|error| {
-            InspectionError::new(
-                InspectionPhase::Workspace,
-                format!(
-                    "restrict workspace root {}: {error}",
-                    workspace_root.display()
-                ),
-            )
-        })?;
-        let cache_root = fs::canonicalize(&cache_root).map_err(|error| {
-            InspectionError::new(
-                InspectionPhase::Cache,
-                format!("resolve cache root {}: {error}", cache_root.display()),
-            )
-        })?;
-        let workspace_root = fs::canonicalize(&workspace_root).map_err(|error| {
-            InspectionError::new(
-                InspectionPhase::Workspace,
-                format!(
-                    "resolve workspace root {}: {error}",
-                    workspace_root.display()
-                ),
-            )
-        })?;
+        let cache_root = prepare_inspection_root(cache_root, InspectionPhase::Cache, "cache")?;
+        let workspace_root =
+            prepare_inspection_root(workspace_root, InspectionPhase::Workspace, "workspace")?;
         if roots_overlap(&cache_root, &workspace_root) {
             return Err(InspectionError::new(
                 InspectionPhase::Workspace,
@@ -1785,13 +1767,13 @@ fn ensure_path_absent(path: &Path) -> Result<(), String> {
     }
 }
 
-fn create_owned_cache_staging_path(
+fn validate_cache_staging_request(
     cache_root: &Path,
     expected_root_identity: FsIdentity,
     repository_root: &Path,
     staging: &Path,
     expected_namespace_identity: FsIdentity,
-) -> Result<CacheStagingIdentity, InspectionError> {
+) -> Result<(), InspectionError> {
     if staging.parent() != Some(repository_root)
         || !staging.file_name().is_some_and(is_cache_staging_name)
     {
@@ -1809,6 +1791,10 @@ fn create_owned_cache_staging_path(
             "repository cache namespace identity changed",
         ));
     }
+    Ok(())
+}
+
+fn create_cache_staging_directory(staging: &Path) -> Result<FsIdentity, InspectionError> {
     ensure_path_absent(staging)
         .map_err(|reason| InspectionError::new(InspectionPhase::Cache, reason))?;
     fs::create_dir(staging).map_err(|error| {
@@ -1820,8 +1806,8 @@ fn create_owned_cache_staging_path(
             ),
         )
     })?;
-    let created_staging_identity = match fs::symlink_metadata(staging) {
-        Ok(metadata) => metadata_identity(&metadata),
+    match fs::symlink_metadata(staging) {
+        Ok(metadata) => Ok(metadata_identity(&metadata)),
         Err(error) => {
             let mut inspection_error = InspectionError::new(
                 InspectionPhase::Cache,
@@ -1833,28 +1819,62 @@ fn create_owned_cache_staging_path(
             inspection_error.cleanup_failure = Some(
                 "temporary repository cache ownership was not established; path retained".into(),
             );
-            return Err(inspection_error);
+            Err(inspection_error)
         }
-    };
-    let cleanup_created = |reason: String| -> Result<CacheStagingIdentity, InspectionError> {
-        let mut error = InspectionError::new(InspectionPhase::Cache, reason);
-        if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+    }
+}
+
+fn cleanup_created_cache_staging(
+    cache_root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+    expected_namespace_identity: FsIdentity,
+    created_staging_identity: FsIdentity,
+    staging: &Path,
+    reason: String,
+) -> Result<CacheStagingIdentity, InspectionError> {
+    let mut error = InspectionError::new(InspectionPhase::Cache, reason);
+    if let Err(cleanup_failure) = cleanup_abandoned_cache_staging_path(
+        cache_root,
+        expected_root_identity,
+        repository_root,
+        expected_namespace_identity,
+        created_staging_identity,
+        staging,
+    ) {
+        error.cleanup_failure = Some(cleanup_failure);
+    }
+    Err(error)
+}
+
+fn create_owned_cache_staging_path(
+    cache_root: &Path,
+    expected_root_identity: FsIdentity,
+    repository_root: &Path,
+    staging: &Path,
+    expected_namespace_identity: FsIdentity,
+) -> Result<CacheStagingIdentity, InspectionError> {
+    validate_cache_staging_request(
+        cache_root,
+        expected_root_identity,
+        repository_root,
+        staging,
+        expected_namespace_identity,
+    )?;
+    let created_staging_identity = create_cache_staging_directory(staging)?;
+    if let Err(error) = restrict_root_permissions(staging) {
+        return cleanup_created_cache_staging(
             cache_root,
             expected_root_identity,
             repository_root,
             expected_namespace_identity,
             created_staging_identity,
             staging,
-        ) {
-            error.cleanup_failure = Some(cleanup_failure);
-        }
-        Err(error)
-    };
-    if let Err(error) = restrict_root_permissions(staging) {
-        return cleanup_created(format!(
-            "restrict temporary repository cache {}: {error}",
-            staging.display()
-        ));
+            format!(
+                "restrict temporary repository cache {}: {error}",
+                staging.display()
+            ),
+        );
     }
     let identity = match validate_cache_staging_path(
         cache_root,
@@ -1863,10 +1883,28 @@ fn create_owned_cache_staging_path(
         staging,
     ) {
         Ok(identity) => identity,
-        Err(reason) => return cleanup_created(reason),
+        Err(reason) => {
+            return cleanup_created_cache_staging(
+                cache_root,
+                expected_root_identity,
+                repository_root,
+                expected_namespace_identity,
+                created_staging_identity,
+                staging,
+                reason,
+            )
+        }
     };
     if identity.namespace != expected_namespace_identity {
-        return cleanup_created("repository cache namespace identity changed".into());
+        return cleanup_created_cache_staging(
+            cache_root,
+            expected_root_identity,
+            repository_root,
+            expected_namespace_identity,
+            created_staging_identity,
+            staging,
+            "repository cache namespace identity changed".into(),
+        );
     }
     Ok(identity)
 }
