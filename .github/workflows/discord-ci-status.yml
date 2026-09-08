@@ -71,6 +71,7 @@ jobs:
                 --argjson color "$color" \
                 '{
                   username: "North CI",
+                  sender: "North CI",
                   embeds: [{
                     title: ("CI " + $conclusion),
                     description: ("CI completed for `" + $branch + "`"),
@@ -97,6 +98,7 @@ jobs:
                 --arg actor "$PR_ACTOR" \
                 '{
                   username: "North CI",
+                  sender: "North CI",
                   embeds: [{
                     title: ("PR " + $action),
                     description: ("#" + $number + " " + $title),
