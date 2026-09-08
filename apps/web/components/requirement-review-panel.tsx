@@ -22,6 +22,7 @@ type RequirementReviewPanelProps = {
   currentUser: CurrentUser | null;
   resourceError?: string;
   refreshing: boolean;
+  onApplyRequirementAction: (requirement: Requirement) => void;
   onRefreshAction: () => Promise<void>;
 };
 
@@ -102,6 +103,7 @@ export function RequirementReviewPanel({
   currentUser,
   resourceError,
   refreshing,
+  onApplyRequirementAction,
   onRefreshAction,
 }: RequirementReviewPanelProps) {
   const currentPacket = packetIsCurrent(requirement, reviewPacket)
@@ -185,8 +187,9 @@ export function RequirementReviewPanel({
     setActionError(null);
     setPendingAction(action);
     try {
+      let canonical: Requirement;
       if (action === "reopen") {
-        await reopenRequirement(requirement.id, {
+        canonical = await reopenRequirement(requirement.id, {
           expected_state_version: requirement.state_version,
         });
       } else {
@@ -196,18 +199,19 @@ export function RequirementReviewPanel({
           expected_state_version: currentPacket.requirement_state_version,
         };
         if (action === "accept") {
-          await acceptRequirementReview(requirement.id, input);
+          canonical = await acceptRequirementReview(requirement.id, input);
         } else if (action === "reject") {
-          await rejectRequirementReview(requirement.id, input);
+          canonical = await rejectRequirementReview(requirement.id, input);
         } else {
-          await requestRequirementChanges(requirement.id, {
+          canonical = await requestRequirementChanges(requirement.id, {
             ...input,
             feedback: normalizedFeedback,
           });
           setFeedback("");
         }
-        setStaleNotice(false);
       }
+      onApplyRequirementAction(canonical);
+      setStaleNotice(false);
       await refreshSafely();
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 409) {

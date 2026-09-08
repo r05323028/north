@@ -988,6 +988,7 @@ function LiveRequirementPanel({
             <ReadinessPanel readiness={readiness} />
             <RequirementReviewPanel
               currentUser={currentUser}
+              onApplyRequirementAction={onApplyRequirement}
               onRefreshAction={onRefresh}
               refreshing={refreshing}
               requirement={requirement}

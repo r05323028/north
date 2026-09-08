@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +10,7 @@ import type {
   CurrentUser,
   Message,
   ReadinessView,
+  ReviewPacket,
 } from "@/lib/api/contracts";
 import type { Requirement } from "@/lib/requirements";
 import type { RequirementConversationWorkspaceState } from "@/lib/use-requirement-conversation-workspace";
@@ -72,6 +73,7 @@ vi.mock("@/lib/requirements", () => ({
 }));
 
 import { RequirementConversationWorkspace } from "@/components/requirement-conversation-workspace";
+import { RequirementReviewPanel } from "@/components/requirement-review-panel";
 
 const requirement: Requirement = {
   id: "requirement-1",
@@ -172,6 +174,58 @@ const reviewPacket = {
   ],
 };
 
+type ReviewPanelHarnessProps = {
+  requirement: Requirement;
+  reviewPacket: ReviewPacket | null;
+  currentUser: CurrentUser;
+};
+
+function ReviewPanelHarness({
+  requirement,
+  reviewPacket,
+  currentUser,
+}: ReviewPanelHarnessProps) {
+  const [currentRequirement, setCurrentRequirement] = useState(requirement);
+  const [currentPacket, setCurrentPacket] = useState<ReviewPacket | null>(
+    reviewPacket,
+  );
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+
+  function applyRequirement(canonical: Requirement) {
+    setCurrentRequirement(canonical);
+    setCurrentPacket((packet) =>
+      canonical.status === "ready" &&
+      packet !== null &&
+      packet.requirement_revision === canonical.revision &&
+      packet.requirement_state_version === canonical.state_version
+        ? packet
+        : null,
+    );
+  }
+
+  async function refresh() {
+    setRefreshError("Canonical refresh failed.");
+    throw new Error("canonical refresh failed");
+  }
+
+  return (
+    <>
+      <output data-testid="canonical-status">
+        {currentRequirement.status}
+      </output>
+      {refreshError && <p role="status">{refreshError}</p>}
+      <RequirementReviewPanel
+        currentUser={currentUser}
+        onApplyRequirementAction={applyRequirement}
+        onRefreshAction={refresh}
+        refreshing={false}
+        requirement={currentRequirement}
+        reviewPacket={currentPacket}
+      />
+    </>
+  );
+}
+
 function run(overrides: Partial<ClarificationRun> = {}): ClarificationRun {
   return {
     run_id: "run-a",
@@ -244,6 +298,17 @@ async function renderWorkspace(mounted: ReturnType<typeof mount>) {
     );
     await settle();
   });
+}
+
+async function renderReviewPanel(props: ReviewPanelHarnessProps) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ReviewPanelHarness {...props} />);
+    await settle();
+  });
+  return { container, root };
 }
 
 async function renderAndSend(mounted: ReturnType<typeof mount>, body: string) {
@@ -679,6 +744,7 @@ describe("RequirementConversationWorkspace", () => {
       assessment_id: reviewPacket.assessment_id,
       expected_state_version: reviewPacket.requirement_state_version,
     });
+    expect(value.applyRequirement).toHaveBeenCalledWith(requirement);
 
     const feedback =
       mounted.container.querySelector<HTMLTextAreaElement>("#review-feedback");
@@ -698,6 +764,132 @@ describe("RequirementConversationWorkspace", () => {
       feedback: "Clarify recovery expiry.",
     });
     expect(feedback.value).toBe("");
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("keeps Accepted Requirement after refresh failure", async () => {
+    const reviewer = { ...requester, role: "RequirementManager" as const };
+    const accepted = {
+      ...requirement,
+      status: "accepted" as const,
+      state_version: 10,
+    };
+    mocks.acceptReview.mockResolvedValueOnce(accepted);
+    const mounted = await renderReviewPanel({
+      currentUser: reviewer,
+      requirement,
+      reviewPacket,
+    });
+    const accept = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Accept Requirement"]',
+    );
+    if (!accept) throw new Error("accept control missing");
+    await act(async () => {
+      accept.click();
+      await settle();
+    });
+    expect(
+      mounted.container.querySelector('[data-testid="canonical-status"]')
+        ?.textContent,
+    ).toBe("accepted");
+    expect(
+      mounted.container.querySelector(
+        'button[aria-label="Accept Requirement"]',
+      ),
+    ).toBeNull();
+    expect(mounted.container.textContent).toContain(
+      "Canonical refresh failed.",
+    );
+    expect(mounted.container.textContent).not.toContain("Review action failed");
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("keeps Discussing and clears submitted feedback after refresh failure", async () => {
+    const reviewer = { ...requester, role: "RequirementManager" as const };
+    const discussing = {
+      ...requirement,
+      status: "discussing" as const,
+      state_version: 10,
+    };
+    mocks.requestChangesReview.mockResolvedValueOnce(discussing);
+    const mounted = await renderReviewPanel({
+      currentUser: reviewer,
+      requirement,
+      reviewPacket,
+    });
+    const feedback =
+      mounted.container.querySelector<HTMLTextAreaElement>("#review-feedback");
+    const requestChanges = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Request Changes"]',
+    );
+    if (!feedback || !requestChanges)
+      throw new Error("Request Changes controls missing");
+    await act(async () => {
+      setValue(feedback, "Clarify account scope.");
+      await settle();
+    });
+    await act(async () => {
+      requestChanges.click();
+      await settle();
+    });
+    expect(
+      mounted.container.querySelector('[data-testid="canonical-status"]')
+        ?.textContent,
+    ).toBe("discussing");
+    expect(mounted.container.querySelector("#review-feedback")).toBeNull();
+    expect(mounted.container.textContent).not.toContain(
+      "Clarify account scope.",
+    );
+    expect(
+      mounted.container.querySelector(
+        'button[aria-label="Accept Requirement"]',
+      ),
+    ).toBeNull();
+    expect(mounted.container.textContent).toContain(
+      "Canonical refresh failed.",
+    );
+    expect(mounted.container.textContent).not.toContain("Review action failed");
+    mounted.root.unmount();
+    mounted.container.remove();
+  });
+
+  it("keeps Discussing after Reopen refresh failure", async () => {
+    const reviewer = { ...requester, role: "Admin" as const };
+    const rejected = { ...requirement, status: "rejected" as const };
+    const discussing = {
+      ...rejected,
+      status: "discussing" as const,
+      state_version: 10,
+    };
+    mocks.reopenReview.mockResolvedValueOnce(discussing);
+    const mounted = await renderReviewPanel({
+      currentUser: reviewer,
+      requirement: rejected,
+      reviewPacket: null,
+    });
+    const reopen = mounted.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Reopen Requirement"]',
+    );
+    if (!reopen) throw new Error("reopen control missing");
+    await act(async () => {
+      reopen.click();
+      await settle();
+    });
+    expect(
+      mounted.container.querySelector('[data-testid="canonical-status"]')
+        ?.textContent,
+    ).toBe("discussing");
+    expect(
+      mounted.container.querySelector(
+        'button[aria-label="Reopen Requirement"]',
+      ),
+    ).toBeNull();
+    expect(mounted.container.textContent).toContain(
+      "Canonical refresh failed.",
+    );
+    expect(mounted.container.textContent).not.toContain("Review action failed");
     mounted.root.unmount();
     mounted.container.remove();
   });
