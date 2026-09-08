@@ -40,6 +40,13 @@ only `contents: read`, `issues: write`, and `pull-requests: write`, and pins
 PR-Agent to release `v0.44.0` by commit SHA. Review `the-pr-agent/pr-agent`
 before changing that pin.
 
+Because `pull_request_target` runs the workflow from the base branch and
+PR-Agent loads repository settings from the default branch, the workflow also
+pins provider/model/reviewer settings and disables that repository-settings
+lookup. This prevents a new PR from inheriting stale model configuration before
+its `.pr_agent.toml` reaches the default branch; keep the workflow values and
+`.pr_agent.toml` synchronized.
+
 PR-Agent review is advisory. To roll it back, disable/remove the workflow and
 revoke `OPENCODE_API_KEY`; existing CI and `gate` remain unchanged.
 

@@ -28,11 +28,11 @@ North's CI workflows are pinned to immutable action revisions, use explicit job 
 
 3. **Grant only `contents: read`, `issues: write`, and `pull-requests: write`.** PR-Agent needs repository/PR reads and comment/review publication. It does not receive contents write or unrelated repository permissions.
 
-4. **Use OpenCode Go's Chat Completions route with MiMo-V2.5.** Configure PR-Agent's LiteLLM OpenAI route as `openai/mimo-v2.5` with `https://opencode.ai/zen/go/v1`, and map the administrator's `OPENCODE_API_KEY` secret to the action's `OPENAI_KEY` input. Inject a stable per-PR `x-opencode-session` and North user-agent header through `LITELLM.EXTRA_HEADERS`. This matches OpenCode Go's endpoint contract; Muse Spark Contributor uses the Responses API and is incompatible with the pinned PR-Agent Chat Completions client.
+4. **Use OpenCode Go's Chat Completions route with MiMo-V2.5.** Configure PR-Agent's LiteLLM OpenAI route as `openai/mimo-v2.5` with `https://opencode.ai/zen/go/v1`, and map the administrator's `OPENCODE_API_KEY` secret to the action's `OPENAI_KEY` input. Inject a stable per-PR `x-opencode-session` and North user-agent header through `LITELLM.EXTRA_HEADERS`. This matches OpenCode Go's endpoint contract; Muse Spark Contributor uses the Responses API and is incompatible with the pinned PR-Agent Chat Completions client. The workflow repeats provider-critical settings and disables PR-Agent's default-branch repository-settings lookup because a `pull_request_target` run can otherwise inherit stale `.pr_agent.toml` values before this PR merges.
 
 5. **Enable automatic review only.** Description generation and code improvement are disabled to keep output advisory and avoid automated source mutations. Review triggers mirror the workflow event types.
 
-6. **Keep reviewer guidance in `.pr_agent.toml`.** Configuration stays versioned and reviewable, while provider credentials remain in repository settings. Guidance tells PR-Agent to prioritize North's invariants, architecture boundaries, security, data loss, and regression coverage.
+6. **Keep reviewer guidance versioned and target-safe.** `.pr_agent.toml` remains the review configuration source for the default branch and manual use, while the target workflow repeats the provider and reviewer settings needed before a PR's file reaches that branch. Keep both copies synchronized; provider credentials remain in repository settings. Guidance tells PR-Agent to prioritize North's invariants, architecture boundaries, security, data loss, and regression coverage.
 
 ## Risks / Trade-offs
 

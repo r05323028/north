@@ -19,6 +19,7 @@
 
 - [x] 4.1 Route PR-Agent through OpenCode Go MiMo-V2.5 Chat Completions and add stable per-PR session/user-agent headers.
 - [x] 4.2 Update canonical CI documentation and OpenSpec provider contract; validate model catalog and provider response.
+- [ ] 4.3 Keep target-workflow provider settings independent of stale default-branch `.pr_agent.toml` settings.
 
 ## Validation Notes
 
