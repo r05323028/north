@@ -31,9 +31,11 @@ as a required branch-protection check.
 Repository administrators must add an `OPENCODE_API_KEY` Actions secret under
 **Settings → Secrets and variables → Actions**. The workflow maps that secret
 to PR-Agent's `OPENAI_KEY` input and routes
-`openai/muse-spark-1.3-contributor` through OpenCode Go's OpenAI-compatible
-endpoint. The workflow uses `pull_request_target` so fork pull requests can
-use that secret. It does not checkout or execute pull-request code, grants
+`openai/mimo-v2.5` through OpenCode Go's Chat Completions endpoint. The
+workflow supplies `LITELLM.EXTRA_HEADERS` with a stable per-PR
+`x-opencode-session` and identifies itself as `north-pr-agent/1.0`, as required
+by OpenCode Go. The workflow uses `pull_request_target` so fork pull requests
+can use that secret. It does not checkout or execute pull-request code, grants
 only `contents: read`, `issues: write`, and `pull-requests: write`, and pins
 PR-Agent to release `v0.44.0` by commit SHA. Review `the-pr-agent/pr-agent`
 before changing that pin.

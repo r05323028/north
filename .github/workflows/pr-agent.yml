@@ -1,7 +1,7 @@
 ---
 name: PR Agent
 
-"on":
+"on":  # zizmor: ignore[dangerous-triggers]
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, review_requested]
 
@@ -25,6 +25,11 @@ jobs:
         env:
           OPENAI_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          "LITELLM.EXTRA_HEADERS": >-
+            {
+              "x-opencode-session": "north-pr-${{ github.event.number }}",
+              "User-Agent": "north-pr-agent/1.0"
+            }
           "github_action_config.auto_review": "true"
           "github_action_config.auto_describe": "false"
           "github_action_config.auto_improve": "false"

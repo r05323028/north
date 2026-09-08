@@ -7,13 +7,18 @@
 
 ## 2. Repository guidance and administration
 
-- [x] 2.1 Add root `.pr_agent.toml` with OpenCode Go model routing and North-specific review priorities: invariants, architecture boundaries, security, data loss, correctness, and regression coverage.
-- [x] 2.2 Document `OPENCODE_API_KEY`, OpenCode Go routing, fork-safe target-workflow rationale, advisory-only status, and rollback in `docs/development/ci.md` without changing `gate` requirements.
+- [x] 2.1 Add root `.pr_agent.toml` with OpenCode Go MiMo-V2.5 routing and North-specific review priorities: invariants, architecture boundaries, security, data loss, correctness, and regression coverage.
+- [x] 2.2 Document `OPENCODE_API_KEY`, OpenCode Go routing and session header, fork-safe target-workflow rationale, advisory-only status, and rollback in `docs/development/ci.md` without changing `gate` requirements.
 
 ## 3. Validation
 
 - [x] 3.1 Validate YAML/config shape, immutable action pin, permissions, trigger types, secret wiring, absence of checkout, and unchanged merge-gate job dependencies with focused repository checks.
 - [x] 3.2 Run `openspec validate --all --strict`, relevant documentation/CI checks, and final diagnostics; review the complete diff and record any checks unavailable locally.
+
+## 4. Provider compatibility correction
+
+- [x] 4.1 Route PR-Agent through OpenCode Go MiMo-V2.5 Chat Completions and add stable per-PR session/user-agent headers.
+- [x] 4.2 Update canonical CI documentation and OpenSpec provider contract; validate model catalog and provider response.
 
 ## Validation Notes
 
@@ -23,3 +28,10 @@
 - OpenCode Go `/zen/go/v1/models`: HTTP 200; 35 models listed, including `muse-spark-1.3-contributor`.
 - `yamllint`: passed. `actionlint` and `zizmor`: unavailable locally.
 - Final pi-lens diagnostics: no issues.
+
+## Follow-up Validation Notes
+
+- OpenCode Go `/zen/go/v1/models`: HTTP 200; `mimo-v2.5` listed with Chat Completions endpoint.
+- MiMo-V2.5 smoke request with stable session and North user-agent headers: HTTP 200 with usable message content.
+- Follow-up `yamllint`, `actionlint`, `git diff --check`, and `openspec validate --all --strict`: passed.
+- Follow-up pre-push validation reached integration checks but stopped because `NORTH_TEST_DATABASE_URL` was unset; native checks before that point passed.
