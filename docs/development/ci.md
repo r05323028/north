@@ -83,7 +83,8 @@ Red remote CI always wins over green local output.
 for pull request actions `opened`, `synchronize`, `reopened`, `ready_for_review`,
 and `review_requested`. Add repository Actions secrets
 `DISCORD_CI_WEBHOOK` for CI notifications and `DISCORD_PR_WEBHOOK` for pull
-request reminders. CI notifications include conclusion, triggering event, head
+request reminders (use a direct Discord incoming webhook URL). CI notifications
+include conclusion, triggering event, head
 branch, run number, actor, and link to the completed run. Pull request
 notifications include action, number, title, base/head branches, actor, and
 link. The workflow sends event metadata only; it

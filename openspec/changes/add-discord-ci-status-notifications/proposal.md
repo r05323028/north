@@ -7,7 +7,7 @@ CI and pull-request lifecycle results currently require opening GitHub. Maintain
 ## What Changes
 
 - **Invariant:** Add a GitHub Actions workflow that posts one concise Discord notification after the `CI` workflow completes or on pull request actions `opened`, `synchronize`, `reopened`, `ready_for_review`, and `review_requested`, including conclusion or action, branch or pull request context, and link.
-- **Invariant:** Read CI webhook URL from `DISCORD_CI_WEBHOOK` and pull-request webhook URL from `DISCORD_PR_WEBHOOK`; never hard-code credentials or print them.
+- **Invariant:** Read CI webhook URL from `DISCORD_CI_WEBHOOK` and a direct Discord pull-request webhook URL from `DISCORD_PR_WEBHOOK`; never hard-code credentials or print them.
 - **Invariant:** Notification failure or missing configuration must not change the already-computed CI merge gate result.
 - **Implementation suggestion:** Use runner-provided `curl` and `jq` with bounded retries; do not add a third-party action dependency.
 - Document secret setup, event coverage, payload, and failure isolation in `docs/development/ci.md`.

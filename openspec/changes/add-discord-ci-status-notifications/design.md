@@ -25,7 +25,7 @@ The existing `.github/workflows/ci.yml` runs validation and computes `gate` for 
 
 2. **Use runner-native `curl` and `jq`.** Construct the Discord JSON payload with `jq --arg` so branch and actor values remain data even when supplied by pull requests. `curl` uses bounded retries and timeouts. This avoids an unpinned third-party action and adds no dependency.
 
-3. **Use separate optional secrets.** Use `DISCORD_CI_WEBHOOK` for `workflow_run` notifications and `DISCORD_PR_WEBHOOK` for pull request reminders. Select the corresponding secret from event type. Missing configuration emits an explicit skip message and succeeds; configured delivery errors remain visible on the notification workflow while never affecting the already-completed CI workflow.
+3. **Use separate optional secrets.** Use `DISCORD_CI_WEBHOOK` for `workflow_run` notifications and a direct Discord incoming webhook in `DISCORD_PR_WEBHOOK` for pull request reminders. Select the corresponding secret from event type. Missing configuration emits an explicit skip message and succeeds; configured delivery errors remain visible on the notification workflow while never affecting the already-completed CI workflow.
 
 4. **Grant no repository permissions.** The workflow only consumes `workflow_run` and `pull_request` metadata and sends an outbound webhook; it does not checkout code, execute pull request code, or call the GitHub API.
 

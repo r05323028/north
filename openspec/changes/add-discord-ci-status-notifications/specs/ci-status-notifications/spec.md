@@ -26,7 +26,7 @@ The repository SHALL attempt one Discord notification for each `pull_request` ev
 
 #### Scenario: Pull request lifecycle event is reported
 
-- **WHEN** a selected pull request action occurs and `DISCORD_PR_WEBHOOK` is configured
+- **WHEN** a selected pull request action occurs and `DISCORD_PR_WEBHOOK` contains a direct Discord incoming webhook URL
 - **THEN** the notification contains the action, pull request context, and link without checking out or executing pull request code
 
 ### Requirement: Webhook configuration stays secret
