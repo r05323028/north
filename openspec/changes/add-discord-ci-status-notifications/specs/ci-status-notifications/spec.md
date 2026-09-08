@@ -26,16 +26,16 @@ The repository SHALL attempt one Discord notification for each `pull_request` ev
 
 #### Scenario: Pull request lifecycle event is reported
 
-- **WHEN** a selected pull request action occurs and `DISCORD_CI_WEBHOOK` is configured
+- **WHEN** a selected pull request action occurs and `DISCORD_PR_WEBHOOK` is configured
 - **THEN** the notification contains the action, pull request context, and link without checking out or executing pull request code
 
 ### Requirement: Webhook configuration stays secret
 
-The notification endpoint SHALL come only from the repository secret `DISCORD_CI_WEBHOOK`. Event-derived values SHALL be encoded as data rather than executable shell or JSON syntax, and the endpoint value SHALL not be written to logs or repository files.
+The notification endpoint SHALL come only from `DISCORD_CI_WEBHOOK` for `workflow_run` events or `DISCORD_PR_WEBHOOK` for `pull_request` events. Event-derived values SHALL be encoded as data rather than executable shell or JSON syntax, and endpoint values SHALL not be written to logs or repository files.
 
-#### Scenario: Missing webhook configuration is safe
+#### Scenario: Missing selected webhook configuration is safe
 
-- **WHEN** a supported CI or pull request event has no `DISCORD_CI_WEBHOOK` secret
+- **WHEN** a supported event has no webhook secret for its event type
 - **THEN** no Discord request is made and the notification workflow exits successfully without changing CI or pull request state
 
 #### Scenario: Untrusted event text is rendered as data

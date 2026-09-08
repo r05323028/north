@@ -81,17 +81,19 @@ Red remote CI always wins over green local output.
 
 `.github/workflows/discord-ci-status.yml` listens for completed runs of `CI` and
 for pull request actions `opened`, `synchronize`, `reopened`, `ready_for_review`,
-and `review_requested`. Add repository Actions secret
-`DISCORD_CI_WEBHOOK` with the Discord incoming webhook URL. CI notifications
-include conclusion, triggering event, head branch, run number, actor, and link
-to the completed run. Pull request notifications include action, number, title,
-base/head branches, actor, and link. The workflow sends event metadata only; it
+and `review_requested`. Add repository Actions secrets
+`DISCORD_CI_WEBHOOK` for CI notifications and `DISCORD_PR_WEBHOOK` for pull
+request reminders. CI notifications include conclusion, triggering event, head
+branch, run number, actor, and link to the completed run. Pull request
+notifications include action, number, title, base/head branches, actor, and
+link. The workflow sends event metadata only; it
 does not check out or execute pull request code and needs no repository
 permissions.
 
-Missing `DISCORD_CI_WEBHOOK` skips either notification and succeeds. A
-configured webhook failure makes the notification workflow fail after bounded
-retries, but never changes `CI` or its required `gate` result. `workflow_run`
+Missing event-specific webhook (`DISCORD_CI_WEBHOOK` for CI or
+`DISCORD_PR_WEBHOOK` for pull requests) skips that notification and succeeds.
+A configured webhook failure makes the notification workflow fail after
+bounded retries, but never changes `CI` or its required `gate` result. `workflow_run`
 notifications start after this workflow exists on the default branch. Pull
 request events from forks cannot access repository secrets and therefore skip
 safely. Remove the secret or delete this workflow to roll back; existing CI

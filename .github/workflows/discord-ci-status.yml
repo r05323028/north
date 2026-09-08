@@ -20,7 +20,8 @@ jobs:
     steps:
       - name: Send Discord notification
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_CI_WEBHOOK }}
+          DISCORD_CI_WEBHOOK: ${{ secrets.DISCORD_CI_WEBHOOK }}
+          DISCORD_PR_WEBHOOK: ${{ secrets.DISCORD_PR_WEBHOOK }}
           EVENT_KIND: ${{ github.event_name }}
           CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           CI_EVENT: ${{ github.event.workflow_run.event }}
@@ -38,8 +39,16 @@ jobs:
         run: |
           set -eu
 
-          if [ -z "$DISCORD_WEBHOOK" ]; then
-            echo "DISCORD_CI_WEBHOOK is not configured; skipping Discord"
+          if [ "$EVENT_KIND" = "workflow_run" ]; then
+            webhook="$DISCORD_CI_WEBHOOK"
+            webhook_name=DISCORD_CI_WEBHOOK
+          else
+            webhook="$DISCORD_PR_WEBHOOK"
+            webhook_name=DISCORD_PR_WEBHOOK
+          fi
+
+          if [ -z "$webhook" ]; then
+            echo "$webhook_name is not configured; skipping Discord"
             echo "notification."
             exit 0
           fi
@@ -125,4 +134,4 @@ jobs:
             --max-time 30 \
             --header "Content-Type: application/json" \
             --data "$payload" \
-            "$DISCORD_WEBHOOK"
+            "$webhook"

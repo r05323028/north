@@ -25,11 +25,11 @@ The existing `.github/workflows/ci.yml` runs validation and computes `gate` for 
 
 2. **Use runner-native `curl` and `jq`.** Construct the Discord JSON payload with `jq --arg` so branch and actor values remain data even when supplied by pull requests. `curl` uses bounded retries and timeouts. This avoids an unpinned third-party action and adds no dependency.
 
-3. **Use `DISCORD_CI_WEBHOOK` as optional secret.** Pass the secret through the step environment. Missing configuration emits an explicit skip message and succeeds; configured delivery errors remain visible on the notification workflow while never affecting the already-completed CI workflow.
+3. **Use separate optional secrets.** Use `DISCORD_CI_WEBHOOK` for `workflow_run` notifications and `DISCORD_PR_WEBHOOK` for pull request reminders. Select the corresponding secret from event type. Missing configuration emits an explicit skip message and succeeds; configured delivery errors remain visible on the notification workflow while never affecting the already-completed CI workflow.
 
 4. **Grant no repository permissions.** The workflow only consumes `workflow_run` and `pull_request` metadata and sends an outbound webhook; it does not checkout code, execute pull request code, or call the GitHub API.
 
-5. **Document repository setup.** `docs/development/ci.md` will name the secret, explain event coverage and failure isolation, and describe local parity limits.
+5. **Document repository setup.** `docs/development/ci.md` will name both secrets, explain event coverage and failure isolation, and describe local parity limits.
 
 ## Risks / Trade-offs
 
@@ -41,6 +41,6 @@ The existing `.github/workflows/ci.yml` runs validation and computes `gate` for 
 ## Migration Plan
 
 1. Merge the workflow and documentation.
-2. Add repository Actions secret `DISCORD_CI_WEBHOOK` containing the Discord webhook URL.
+2. Add repository Actions secrets `DISCORD_CI_WEBHOOK` for CI and `DISCORD_PR_WEBHOOK` for pull request reminders.
 3. Confirm one completed CI run and one selected pull request event produce the expected messages.
 4. Roll back by deleting the notification workflow or removing the secret; existing CI validation and `gate` remain unchanged.
