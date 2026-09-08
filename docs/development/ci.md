@@ -77,21 +77,27 @@ Known limitations of act parity (documented, not hidden):
 
 Red remote CI always wins over green local output.
 
-## Discord CI status notification
+## Discord notifications
 
-`.github/workflows/discord-ci-status.yml` listens for completed runs of `CI`,
-covering its existing `main` push and pull request triggers. Add repository
-Actions secret `DISCORD_CI_WEBHOOK` with the Discord incoming webhook URL. The
-notification includes conclusion, triggering event, head branch, run number,
-actor, and link to the completed run. It sends workflow metadata only; it does
-not check out repository code or need repository permissions.
+`.github/workflows/discord-ci-status.yml` listens for completed runs of `CI` and
+for pull request actions `opened`, `synchronize`, `reopened`, `ready_for_review`,
+and `review_requested`. Add repository Actions secret
+`DISCORD_CI_WEBHOOK` with the Discord incoming webhook URL. CI notifications
+include conclusion, triggering event, head branch, run number, actor, and link
+to the completed run. Pull request notifications include action, number, title,
+base/head branches, actor, and link. The workflow sends event metadata only; it
+does not check out or execute pull request code and needs no repository
+permissions.
 
-Missing `DISCORD_CI_WEBHOOK` skips notification and succeeds. A configured
-webhook failure makes the notification workflow fail after bounded retries, but
-never changes `CI` or its required `gate` result. `workflow_run` notifications
-start after this workflow exists on the default branch. Remove the secret or
-delete this workflow to roll back; existing CI validation remains unchanged.
+Missing `DISCORD_CI_WEBHOOK` skips either notification and succeeds. A
+configured webhook failure makes the notification workflow fail after bounded
+retries, but never changes `CI` or its required `gate` result. `workflow_run`
+notifications start after this workflow exists on the default branch. Pull
+request events from forks cannot access repository secrets and therefore skip
+safely. Remove the secret or delete this workflow to roll back; existing CI
+validation remains unchanged.
 
-Local `act` parity does not replay `workflow_run` completion delivery or call a
-real Discord endpoint. Validate notification behavior with a completed remote CI
-run after configuring the secret.
+Local `act` parity does not replay `workflow_run` completion delivery or real
+Discord/remote pull request events. Validate notification behavior with a
+completed remote CI run and a selected pull request event after configuring the
+secret.

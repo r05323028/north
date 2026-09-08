@@ -1,12 +1,14 @@
 ---
 name: Discord CI status
 
-# Intentional workflow_run: no checkout or write token.
+# Intentional metadata-only triggers: no checkout or write token.
 # yamllint disable rule:truthy
 on: # zizmor: ignore[dangerous-triggers]
   workflow_run:
     workflows: ["CI"]
     types: [completed]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, review_requested]
 # yamllint enable rule:truthy
 
 permissions: {}
@@ -16,15 +18,23 @@ jobs:
     name: Notify Discord
     runs-on: ubuntu-latest
     steps:
-      - name: Send CI status
+      - name: Send Discord notification
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_CI_WEBHOOK }}
-          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
-          EVENT_NAME: ${{ github.event.workflow_run.event }}
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
-          RUN_URL: ${{ github.event.workflow_run.html_url }}
-          ACTOR: ${{ github.event.workflow_run.actor.login }}
+          EVENT_KIND: ${{ github.event_name }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CI_EVENT: ${{ github.event.workflow_run.event }}
+          CI_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CI_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          CI_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CI_ACTOR: ${{ github.event.workflow_run.actor.login }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_ACTOR: ${{ github.actor }}
         run: |
           set -eu
 
@@ -34,46 +44,74 @@ jobs:
             exit 0
           fi
 
-          case "$CONCLUSION" in
-            success)
-              color=5763719
-              ;;
-            failure)
-              color=15548997
-              ;;
-            cancelled|timed_out|action_required)
-              color=16705372
-              ;;
-            *)
-              color=9807270
-              ;;
-          esac
+          if [ "$EVENT_KIND" = "workflow_run" ]; then
+            case "$CI_CONCLUSION" in
+              success)
+                color=5763719
+                ;;
+              failure)
+                color=15548997
+                ;;
+              cancelled|timed_out|action_required)
+                color=16705372
+                ;;
+              *)
+                color=9807270
+                ;;
+            esac
 
-          payload="$(
-            jq -n \
-              --arg conclusion "$CONCLUSION" \
-              --arg event "$EVENT_NAME" \
-              --arg branch "$HEAD_BRANCH" \
-              --arg run "$RUN_NUMBER" \
-              --arg url "$RUN_URL" \
-              --arg actor "$ACTOR" \
-              --argjson color "$color" \
-              '{
-                username: "North CI",
-                embeds: [{
-                  title: ("CI " + $conclusion),
-                  description: ("CI completed for `" + $branch + "`"),
-                  color: $color,
-                  fields: [
-                    {name: "Status", value: $conclusion, inline: true},
-                    {name: "Event", value: $event, inline: true},
-                    {name: "Run", value: ("#" + $run), inline: true},
-                    {name: "Actor", value: $actor, inline: true}
-                  ],
-                  url: $url
-                }]
-              }'
-          )"
+            payload="$(
+              jq -n \
+                --arg conclusion "$CI_CONCLUSION" \
+                --arg event "$CI_EVENT" \
+                --arg branch "$CI_BRANCH" \
+                --arg run "$CI_RUN_NUMBER" \
+                --arg url "$CI_RUN_URL" \
+                --arg actor "$CI_ACTOR" \
+                --argjson color "$color" \
+                '{
+                  username: "North CI",
+                  embeds: [{
+                    title: ("CI " + $conclusion),
+                    description: ("CI completed for `" + $branch + "`"),
+                    color: $color,
+                    fields: [
+                      {name: "Status", value: $conclusion, inline: true},
+                      {name: "Event", value: $event, inline: true},
+                      {name: "Run", value: ("#" + $run), inline: true},
+                      {name: "Actor", value: $actor, inline: true}
+                    ],
+                    url: $url
+                  }]
+                }'
+            )"
+          else
+            payload="$(
+              jq -n \
+                --arg action "$PR_ACTION" \
+                --arg number "$PR_NUMBER" \
+                --arg title "$PR_TITLE" \
+                --arg url "$PR_URL" \
+                --arg base "$PR_BASE_BRANCH" \
+                --arg head "$PR_HEAD_BRANCH" \
+                --arg actor "$PR_ACTOR" \
+                '{
+                  username: "North CI",
+                  embeds: [{
+                    title: ("PR " + $action),
+                    description: ("#" + $number + " " + $title),
+                    color: 3447003,
+                    fields: [
+                      {name: "Event", value: "pull_request", inline: true},
+                      {name: "Base", value: $base, inline: true},
+                      {name: "Head", value: $head, inline: true},
+                      {name: "Actor", value: $actor, inline: true}
+                    ],
+                    url: $url
+                  }]
+                }'
+            )"
+          fi
 
           curl \
             --fail-with-body \
