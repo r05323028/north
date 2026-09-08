@@ -22,16 +22,16 @@ The repository SHALL attempt one Discord notification for every completed run of
 
 ### Requirement: Selected pull request events notify Discord
 
-The repository SHALL attempt one Discord notification for each `pull_request` event whose action is `opened`, `synchronize`, `reopened`, `ready_for_review`, or `review_requested`. The notification SHALL identify the action, pull request number and title, base and head branches, actor, and link to the pull request.
+The repository SHALL attempt one Discord notification for each `pull_request` event whose action is `opened`, `synchronize`, `reopened`, `ready_for_review`, or `review_requested`. The notification SHALL forward the original GitHub `pull_request` event envelope to the Discord GitHub-compatible `/github` endpoint; that payload identifies the action, pull request number and title, base and head branches, actor, and link to the pull request.
 
 #### Scenario: Pull request lifecycle event is reported
 
-- **WHEN** a selected pull request action occurs and `DISCORD_PR_WEBHOOK` contains a direct Discord incoming webhook URL
+- **WHEN** a selected pull request action occurs and `DISCORD_PR_WEBHOOK` contains a Discord webhook URL ending in `/github`
 - **THEN** the notification contains the action, pull request context, and link without checking out or executing pull request code
 
 ### Requirement: Webhook configuration stays secret
 
-The notification endpoint SHALL come only from `DISCORD_CI_WEBHOOK` for `workflow_run` events or `DISCORD_PR_WEBHOOK` for `pull_request` events. Event-derived values SHALL be encoded as data rather than executable shell or JSON syntax, and endpoint values SHALL not be written to logs or repository files.
+The notification endpoint SHALL come only from `DISCORD_CI_WEBHOOK` for `workflow_run` events or `DISCORD_PR_WEBHOOK` for `pull_request` events. The pull request endpoint SHALL use Discord's GitHub-compatible `/github` path. Event-derived values SHALL be forwarded or encoded as data rather than executable shell or JSON syntax, and endpoint values SHALL not be written to logs or repository files.
 
 #### Scenario: Missing selected webhook configuration is safe
 

@@ -29,13 +29,6 @@ jobs:
           CI_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
           CI_RUN_URL: ${{ github.event.workflow_run.html_url }}
           CI_ACTOR: ${{ github.event.workflow_run.actor.login }}
-          PR_ACTION: ${{ github.event.action }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
-          PR_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
-          PR_ACTOR: ${{ github.actor }}
         run: |
           set -eu
 
@@ -96,31 +89,7 @@ jobs:
                 }'
             )"
           else
-            payload="$(
-              jq -n \
-                --arg action "$PR_ACTION" \
-                --arg number "$PR_NUMBER" \
-                --arg title "$PR_TITLE" \
-                --arg url "$PR_URL" \
-                --arg base "$PR_BASE_BRANCH" \
-                --arg head "$PR_HEAD_BRANCH" \
-                --arg actor "$PR_ACTOR" \
-                '{
-                  username: "North CI",
-                  embeds: [{
-                    title: ("PR " + $action),
-                    description: ("#" + $number + " " + $title),
-                    color: 3447003,
-                    fields: [
-                      {name: "Event", value: "pull_request", inline: true},
-                      {name: "Base", value: $base, inline: true},
-                      {name: "Head", value: $head, inline: true},
-                      {name: "Actor", value: $actor, inline: true}
-                    ],
-                    url: $url
-                  }]
-                }'
-            )"
+            payload="$(<"$GITHUB_EVENT_PATH")"
           fi
 
           curl \
@@ -132,5 +101,5 @@ jobs:
             --connect-timeout 10 \
             --max-time 30 \
             --header "Content-Type: application/json" \
-            --data "$payload" \
+            --data-binary "$payload" \
             "$webhook"

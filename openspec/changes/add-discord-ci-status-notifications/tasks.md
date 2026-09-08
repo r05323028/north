@@ -2,7 +2,7 @@
 
 ## 1. Discord workflow
 
-- [x] 1.1 Add `.github/workflows/discord-ci-status.yml` with `workflow_run` and `pull_request` triggers, optional `DISCORD_CI_WEBHOOK`/`DISCORD_PR_WEBHOOK` handling, safe payload construction, bounded delivery retries, and no dependency on `CI.gate`.
+- [x] 1.1 Add `.github/workflows/discord-ci-status.yml` with `workflow_run` and `pull_request` triggers, optional `DISCORD_CI_WEBHOOK`/`DISCORD_PR_WEBHOOK` handling, safe CI payload construction, GitHub event forwarding for PR reminders, bounded delivery retries, and no dependency on `CI.gate`.
 - [x] 1.2 Validate workflow structure, secret isolation, event-derived JSON encoding, and failure isolation for CI and pull request notifications with targeted static checks plus `git diff --check`.
 - [x] 1.3 Add `pull_request` notifications for `opened`, `synchronize`, `reopened`, `ready_for_review`, and `review_requested` without checkout or pull request code execution.
 

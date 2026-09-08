@@ -83,13 +83,13 @@ Red remote CI always wins over green local output.
 for pull request actions `opened`, `synchronize`, `reopened`, `ready_for_review`,
 and `review_requested`. Add repository Actions secrets
 `DISCORD_CI_WEBHOOK` for CI notifications and `DISCORD_PR_WEBHOOK` for pull
-request reminders (use a direct Discord incoming webhook URL). CI notifications
-include conclusion, triggering event, head
-branch, run number, actor, and link to the completed run. Pull request
-notifications include action, number, title, base/head branches, actor, and
-link. The workflow sends event metadata only; it
-does not check out or execute pull request code and needs no repository
-permissions.
+request reminders. Set `DISCORD_PR_WEBHOOK` to a Discord webhook URL ending in
+`/github`; this is Discord's GitHub-compatible endpoint. CI notifications
+include conclusion, triggering event, head branch, run number, actor, and link
+to the completed run. Pull request reminders forward the original GitHub event
+payload and include action, number, title, base/head branches, actor, and link.
+The workflow sends event metadata only; it does not check out or execute
+pull request code and needs no repository permissions.
 
 Missing event-specific webhook (`DISCORD_CI_WEBHOOK` for CI or
 `DISCORD_PR_WEBHOOK` for pull requests) skips that notification and succeeds.
