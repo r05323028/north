@@ -91,23 +91,28 @@ Red remote CI always wins over green local output.
 `.github/workflows/discord-ci-status.yml` listens for completed runs of `CI` and
 for pull request actions `opened`, `synchronize`, `reopened`, `ready_for_review`,
 and `review_requested`. Add repository Actions secrets
-`DISCORD_CI_WEBHOOK` for CI notifications and `DISCORD_PR_WEBHOOK` for pull
-request reminders. Set `DISCORD_PR_WEBHOOK` to a Discord webhook URL ending in
-`/github`; this is Discord's GitHub-compatible endpoint. CI notifications
-include conclusion, triggering event, head branch, run number, actor, and link
-to the completed run. Pull request reminders forward the original GitHub event
-payload and include action, number, title, base/head branches, actor, and link.
-The workflow sends event metadata only; it does not check out or execute
-pull request code and needs no repository permissions.
+`DISCORD_CI_WEBHOOK` for generic CI notifications and `DISCORD_PR_WEBHOOK` for
+review-channel notifications. Set both to normal Discord webhook URLs. Do not
+append `/github` to `DISCORD_PR_WEBHOOK`; the workflow strips that legacy suffix
+if it is still present during migration.
 
-Missing event-specific webhook (`DISCORD_CI_WEBHOOK` for CI or
-`DISCORD_PR_WEBHOOK` for pull requests) skips that notification and succeeds.
-A configured webhook failure makes the notification workflow fail after
-bounded retries, but never changes `CI` or its required `gate` result. `workflow_run`
-notifications start after this workflow exists on the default branch. Pull
-request events from forks cannot access repository secrets and therefore skip
-safely. Remove the secret or delete this workflow to roll back; existing CI
-validation remains unchanged.
+Generic CI notifications include conclusion, triggering event, head branch, run
+number, actor, and a link to the completed run. Pull request lifecycle events
+produce linked embeds with repository, action, PR number/title, author, and
+source branch. A completed `CI` run associated with a PR additionally produces
+a review embed like `[repo] Checks Successful on PR: #<number> <title>` with
+linked `PR Author` and `Workflow Run` fields plus `Source Branch`. Failure,
+cancellation, timeout, and action-required conclusions use non-success colors.
+
+The workflow uses only event metadata and a read-only `pull-requests: read`
+permission to resolve PR title and author for completed PR runs. It does not
+check out or execute pull request code. Missing event-specific webhook
+configuration skips that notification and succeeds. Configured webhook or
+metadata delivery failure is visible after bounded retries, but never changes
+`CI` or its required `gate` result. `workflow_run` notifications start after
+this workflow exists on the default branch. Pull request events from forks
+cannot access repository secrets and therefore skip safely. Remove the secret
+or delete this workflow to roll back; existing CI validation remains unchanged.
 
 Local `act` parity does not replay `workflow_run` completion delivery or real
 Discord/remote pull request events. Validate notification behavior with a

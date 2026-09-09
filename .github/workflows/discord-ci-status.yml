@@ -11,7 +11,8 @@ on: # zizmor: ignore[dangerous-triggers]
     types: [opened, synchronize, reopened, ready_for_review, review_requested]
 # yamllint enable rule:truthy
 
-permissions: {}
+permissions:
+  pull-requests: read
 
 jobs:
   notify:
@@ -22,6 +23,9 @@ jobs:
         env:
           DISCORD_CI_WEBHOOK: ${{ secrets.DISCORD_CI_WEBHOOK }}
           DISCORD_PR_WEBHOOK: ${{ secrets.DISCORD_PR_WEBHOOK }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          REPOSITORY: ${{ github.repository }}
           EVENT_KIND: ${{ github.event_name }}
           CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           CI_EVENT: ${{ github.event.workflow_run.event }}
@@ -29,77 +33,262 @@ jobs:
           CI_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
           CI_RUN_URL: ${{ github.event.workflow_run.html_url }}
           CI_ACTOR: ${{ github.event.workflow_run.actor.login }}
+          CI_WORKFLOW: ${{ github.event.workflow_run.name }}
+          CI_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_URL: ${{ github.event.pull_request.user.html_url }}
+          PR_SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -eu
 
+          delivery_failed=0
+
+          send_payload() {
+            target="$1"
+            body="$2"
+            curl \
+              --fail-with-body \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-delay 2 \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --header "Content-Type: application/json" \
+              --data-binary "$body" \
+              "$target"
+          }
+
+          normalize_pr_webhook() {
+            value="${1%/}"
+            value="${value%/github}"
+            printf '%s' "$value"
+          }
+
           if [ "$EVENT_KIND" = "workflow_run" ]; then
-            webhook="$DISCORD_CI_WEBHOOK"
-            webhook_name=DISCORD_CI_WEBHOOK
+            if [ -z "$DISCORD_CI_WEBHOOK" ]; then
+              echo "DISCORD_CI_WEBHOOK is not configured;"
+              echo "skipping Discord CI notification."
+            else
+              case "$CI_CONCLUSION" in
+                success)
+                  color=5763719
+                  ;;
+                failure)
+                  color=15548997
+                  ;;
+                cancelled|timed_out|action_required)
+                  color=16705372
+                  ;;
+                *)
+                  color=9807270
+                  ;;
+              esac
+
+              payload="$(
+                jq -n \
+                  --arg conclusion "$CI_CONCLUSION" \
+                  --arg event "$CI_EVENT" \
+                  --arg branch "$CI_BRANCH" \
+                  --arg run "$CI_RUN_NUMBER" \
+                  --arg url "$CI_RUN_URL" \
+                  --arg actor "$CI_ACTOR" \
+                  --argjson color "$color" \
+                  '{
+                    embeds: [{
+                      title: ("CI " + $conclusion),
+                      description: ("CI completed for `" + $branch + "`"),
+                      color: $color,
+                      fields: [
+                        {name: "Status", value: $conclusion, inline: true},
+                        {name: "Event", value: $event, inline: true},
+                        {name: "Run", value: ("#" + $run), inline: true},
+                        {name: "Actor", value: $actor, inline: true}
+                      ],
+                      url: $url
+                    }]
+                  }'
+              )"
+
+              if ! send_payload "$DISCORD_CI_WEBHOOK" "$payload"; then
+                delivery_failed=1
+              fi
+            fi
+
+            if [ "$CI_EVENT" != "pull_request" ] || \
+              [ -z "$CI_PR_NUMBER" ]; then
+              echo "CI run is not associated with a pull request;"
+              echo "skipping PR checks embed."
+            elif [ -z "$DISCORD_PR_WEBHOOK" ]; then
+              echo "DISCORD_PR_WEBHOOK is not configured;"
+              echo "skipping PR checks embed."
+            else
+              pr_webhook="$(normalize_pr_webhook "$DISCORD_PR_WEBHOOK")"
+              pr_api_url="${GITHUB_API_URL%/}/repos/${REPOSITORY}"
+              pr_api_url="$pr_api_url/pulls/$CI_PR_NUMBER"
+
+              if ! pr_json="$(
+                curl \
+                  --fail \
+                  --silent \
+                  --show-error \
+                  --retry 3 \
+                  --retry-delay 2 \
+                  --connect-timeout 10 \
+                  --max-time 30 \
+                  --header "Accept: application/vnd.github+json" \
+                  --header "Authorization: Bearer $GITHUB_TOKEN" \
+                  --header "X-GitHub-Api-Version: 2022-11-28" \
+                  "$pr_api_url"
+              )"; then
+                echo "PR metadata lookup failed;"
+                echo "skipping PR checks embed."
+                delivery_failed=1
+              else
+                pr_title="$(
+                  printf '%s' "$pr_json" |
+                    jq -r '.title // ""'
+                )"
+                pr_url="$(
+                  printf '%s' "$pr_json" |
+                    jq -r '.html_url // ""'
+                )"
+                pr_author="$(
+                  printf '%s' "$pr_json" |
+                    jq -r '.user.login // ""'
+                )"
+                pr_author_url="$(
+                  printf '%s' "$pr_json" |
+                    jq -r '.user.html_url // ""'
+                )"
+
+                case "$CI_CONCLUSION" in
+                  success)
+                    pr_status=Successful
+                    pr_verb=succeeded
+                    pr_color=5763719
+                    ;;
+                  failure)
+                    pr_status=Failed
+                    pr_verb=failed
+                    pr_color=15548997
+                    ;;
+                  cancelled)
+                    pr_status=Cancelled
+                    pr_verb="was cancelled"
+                    pr_color=16705372
+                    ;;
+                  timed_out)
+                    pr_status="Timed Out"
+                    pr_verb="timed out"
+                    pr_color=16705372
+                    ;;
+                  action_required)
+                    pr_status="Action Required"
+                    pr_verb="requires action"
+                    pr_color=16705372
+                    ;;
+                  *)
+                    pr_status="$CI_CONCLUSION"
+                    pr_verb="$CI_CONCLUSION"
+                    pr_color=9807270
+                    ;;
+                esac
+
+                description="GitHub Actions run $CI_RUN_NUMBER"
+                description="$description $pr_verb."
+                title="[$REPOSITORY] Checks $pr_status on PR:"
+                title="$title #$CI_PR_NUMBER $pr_title"
+                author_value="$pr_author"
+                if [ -n "$pr_author_url" ]; then
+                  author_value="[$pr_author]($pr_author_url)"
+                fi
+                run_value="$CI_WORKFLOW #$CI_RUN_NUMBER"
+                if [ -n "$CI_RUN_URL" ]; then
+                  run_value="[$run_value]($CI_RUN_URL)"
+                fi
+
+                pr_payload="$(
+                  jq -n \
+                    --arg title "$title" \
+                    --arg description "$description" \
+                    --arg author "$author_value" \
+                    --arg workflow "$run_value" \
+                    --arg branch "$CI_BRANCH" \
+                    --arg url "$pr_url" \
+                    --argjson color "$pr_color" \
+                    '{
+                      embeds: [{
+                        title: ($title | .[0:256]),
+                        description: $description,
+                        color: $color,
+                        fields: [
+                          {name: "PR Author", value: $author, inline: true},
+                          {name: "Workflow Run", value: $workflow,
+                            inline: true},
+                          {name: "Source Branch", value: $branch, inline: true}
+                        ],
+                        url: $url
+                      }]
+                    }'
+                )"
+
+                if ! send_payload "$pr_webhook" "$pr_payload"; then
+                  delivery_failed=1
+                fi
+              fi
+            fi
+          elif [ -z "$DISCORD_PR_WEBHOOK" ]; then
+            echo "DISCORD_PR_WEBHOOK is not configured;"
+            echo "skipping Discord PR notification."
           else
-            webhook="$DISCORD_PR_WEBHOOK"
-            webhook_name=DISCORD_PR_WEBHOOK
-          fi
-
-          if [ -z "$webhook" ]; then
-            echo "$webhook_name is not configured; skipping Discord"
-            echo "notification."
-            exit 0
-          fi
-
-          if [ "$EVENT_KIND" = "workflow_run" ]; then
-            case "$CI_CONCLUSION" in
-              success)
-                color=5763719
-                ;;
-              failure)
-                color=15548997
-                ;;
-              cancelled|timed_out|action_required)
-                color=16705372
-                ;;
-              *)
-                color=9807270
-                ;;
+            case "$PR_ACTION" in
+              opened) action_label=Opened ;;
+              synchronize) action_label=Updated ;;
+              reopened) action_label=Reopened ;;
+              ready_for_review) action_label="Ready for Review" ;;
+              review_requested) action_label="Review Requested" ;;
+              *) action_label="$PR_ACTION" ;;
             esac
+
+            pr_webhook="$(normalize_pr_webhook "$DISCORD_PR_WEBHOOK")"
+            title="[$REPOSITORY] Pull Request $action_label:"
+            title="$title #$PR_NUMBER $PR_TITLE"
+            author_value="$PR_AUTHOR"
+            if [ -n "$PR_AUTHOR_URL" ]; then
+              author_value="[$PR_AUTHOR]($PR_AUTHOR_URL)"
+            fi
 
             payload="$(
               jq -n \
-                --arg conclusion "$CI_CONCLUSION" \
-                --arg event "$CI_EVENT" \
-                --arg branch "$CI_BRANCH" \
-                --arg run "$CI_RUN_NUMBER" \
-                --arg url "$CI_RUN_URL" \
-                --arg actor "$CI_ACTOR" \
-                --argjson color "$color" \
+                --arg title "$title" \
+                --arg action "$PR_ACTION" \
+                --arg author "$author_value" \
+                --arg branch "$PR_SOURCE_BRANCH" \
+                --arg url "$PR_URL" \
+                --argjson color 3447003 \
                 '{
-                  username: "North CI",
-                  sender: "North CI",
                   embeds: [{
-                    title: ("CI " + $conclusion),
-                    description: ("CI completed for `" + $branch + "`"),
+                    title: ($title | .[0:256]),
+                    description: ("Pull request event: " + $action + "."),
                     color: $color,
                     fields: [
-                      {name: "Status", value: $conclusion, inline: true},
-                      {name: "Event", value: $event, inline: true},
-                      {name: "Run", value: ("#" + $run), inline: true},
-                      {name: "Actor", value: $actor, inline: true}
+                      {name: "PR Author", value: $author, inline: true},
+                      {name: "Action", value: $action, inline: true},
+                      {name: "Source Branch", value: $branch, inline: true}
                     ],
                     url: $url
                   }]
                 }'
             )"
-          else
-            payload="$(<"$GITHUB_EVENT_PATH")"
+
+            if ! send_payload "$pr_webhook" "$payload"; then
+              delivery_failed=1
+            fi
           fi
 
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            --retry 3 \
-            --retry-delay 2 \
-            --connect-timeout 10 \
-            --max-time 30 \
-            --header "Content-Type: application/json" \
-            --data-binary "$payload" \
-            "$webhook"
+          exit "$delivery_failed"
