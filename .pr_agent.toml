@@ -1,5 +1,5 @@
 [config]
-model = "openai/muse-spark-1.3-contributor"
+model = "openai/mimo-v2.5"
 fallback_models = []
 custom_model_max_tokens = 32000
 

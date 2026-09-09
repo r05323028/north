@@ -45,6 +45,28 @@ function requirement(
   };
 }
 
+function reviewPacketFor(current: Requirement, assessment_id = "assessment-1") {
+  return {
+    assessment_id,
+    requirement_revision: current.revision,
+    requirement_state_version: current.state_version,
+    goal: current.title,
+    scope: current.description,
+    summary: current.summary,
+    acceptance_criteria: current.acceptance_criteria,
+    assumptions: current.assumptions,
+    open_questions: current.open_questions,
+    blockers: [],
+    assessment_assumptions: ["Email provider is configured."],
+    repositories_reviewed: [
+      {
+        repository_id: "repository-1",
+        commit_sha: "abcdef0123456789abcdef0123456789abcdef01",
+      },
+    ],
+  };
+}
+
 function jsonHeaders() {
   return { "Content-Type": "application/json" };
 }
@@ -311,26 +333,29 @@ type WorkspaceRouteState = {
   current: () => Requirement;
   messages: WorkspaceMessage[];
   requests: string[];
+  role?: "Owner" | "Admin" | "RequirementManager" | "Requester";
+  reviewPacket?: () => unknown;
+  eventBody?: () => string;
   session?: () => WorkspaceRunFixture | null;
   extra: (route: Route, url: URL) => Promise<boolean>;
 };
 
-async function installWorkspaceRoutes(
-  page: Page,
-  state: WorkspaceRouteState,
-) {
+async function installWorkspaceRoutes(page: Page, state: WorkspaceRouteState) {
   await page.route("**/auth/me", async (route) => {
     await route.fulfill({
       body: JSON.stringify({
         id: "user-1",
         email: "user@example.com",
-        role: "Requester",
+        role: state.role ?? "Requester",
       }),
       headers: jsonHeaders(),
     });
   });
   await page.route("**/events", async (route) => {
-    await route.fulfill({ body: ":\n\n", headers: eventHeaders });
+    await route.fulfill({
+      body: state.eventBody?.() ?? ":\n\n",
+      headers: eventHeaders,
+    });
   });
   await page.route("**/requirements/**", async (route) => {
     const request = route.request();
@@ -380,6 +405,17 @@ async function installWorkspaceRoutes(
       await route.fulfill({
         status: 201,
         body: JSON.stringify(persisted),
+        headers: jsonHeaders(),
+      });
+      return;
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === "/requirements/r-1/review-packet" &&
+      state.reviewPacket
+    ) {
+      await route.fulfill({
+        body: JSON.stringify(state.reviewPacket()),
         headers: jsonHeaders(),
       });
       return;
@@ -603,7 +639,10 @@ test("workspace browser states support reload retry, cancellation pending, termi
         });
         return true;
       }
-      if (request.method() === "PATCH" && url.pathname === "/requirements/r-1") {
+      if (
+        request.method() === "PATCH" &&
+        url.pathname === "/requirements/r-1"
+      ) {
         patchCalls += 1;
         current = {
           ...current,
@@ -791,4 +830,243 @@ test("workspace browser states support reload retry, cancellation pending, termi
   );
   expect(lastMessagePost).toBeGreaterThanOrEqual(0);
   expect(lastStartPost).toBeGreaterThan(lastMessagePost);
+});
+
+test("human review stays in canonical workspace and hides actions from Requesters", async ({
+  page,
+}) => {
+  const current = requirement("r-1", "ready", "Review requirement");
+  const requests: string[] = [];
+  await installWorkspaceRoutes(page, {
+    current: () => current,
+    messages: [],
+    requests,
+    reviewPacket: () => reviewPacketFor(current),
+    extra: async () => false,
+  });
+
+  await page.goto("/requirements/r-1");
+  await expect(page.getByTestId("human-review-panel")).toContainText(
+    "Review requirement",
+  );
+  await expect(
+    page.getByRole("button", { name: "Accept Requirement" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Request Changes" }),
+  ).toHaveCount(0);
+  const duplicateRoute = await page.request.get(
+    new URL("/requirements/r-1/review", page.url()).toString(),
+  );
+  expect(duplicateRoute.status()).toBe(404);
+});
+
+test("reviewer completes decisions, stale repair, acknowledgement, and Reopen", async ({
+  page,
+}) => {
+  let current = requirement("r-1", "ready", "Review requirement");
+  let assessmentId = "assessment-1";
+  let staleRequest = false;
+  const requests: string[] = [];
+  const reviewBodies: Array<{
+    action: string;
+    body: Record<string, unknown>;
+  }> = [];
+
+  await installWorkspaceRoutes(page, {
+    current: () => current,
+    messages: [],
+    requests,
+    role: "RequirementManager",
+    reviewPacket: () => reviewPacketFor(current, assessmentId),
+    extra: async (route, url) => {
+      const request = route.request();
+      const action = ["accept", "reject", "request-changes", "reopen"].find(
+        (candidate) => url.pathname === `/requirements/r-1/${candidate}`,
+      );
+      if (request.method() !== "POST" || !action) return false;
+      const body = JSON.parse(request.postData() ?? "{}") as Record<
+        string,
+        unknown
+      >;
+      reviewBodies.push({ action, body });
+      if (staleRequest) {
+        staleRequest = false;
+        current = {
+          ...current,
+          status: "ready",
+          revision: current.revision + 1,
+          state_version: current.state_version + 1,
+        };
+        assessmentId = "assessment-refreshed";
+        await route.fulfill({
+          status: 409,
+          body: JSON.stringify({ error: "state_version_conflict" }),
+          headers: jsonHeaders(),
+        });
+        return true;
+      }
+      current = {
+        ...current,
+        status:
+          action === "accept"
+            ? "accepted"
+            : action === "reject"
+              ? "rejected"
+              : "discussing",
+        state_version: current.state_version + 1,
+      };
+      await route.fulfill({
+        body: JSON.stringify(current),
+        headers: jsonHeaders(),
+      });
+      return true;
+    },
+  });
+
+  await page.goto("/requirements/r-1");
+  await expect(
+    page.getByRole("button", { name: "Accept Requirement" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Accept Requirement" }).click();
+  await expect.poll(() => reviewBodies.length).toBe(1);
+  expect(reviewBodies[0]).toEqual({
+    action: "accept",
+    body: {
+      assessment_id: "assessment-1",
+      expected_state_version: 1,
+    },
+  });
+
+  current = {
+    ...current,
+    status: "ready",
+    revision: 2,
+    state_version: 2,
+  };
+  assessmentId = "assessment-2";
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Request Changes" }),
+  ).toBeVisible();
+  await page
+    .getByRole("textbox", { name: "Request Changes feedback" })
+    .fill("Clarify recovery expiry.");
+  await page.getByRole("button", { name: "Request Changes" }).click();
+  await expect.poll(() => reviewBodies.length).toBe(2);
+  expect(reviewBodies[1]).toEqual({
+    action: "request-changes",
+    body: {
+      assessment_id: "assessment-2",
+      expected_state_version: 2,
+      feedback: "Clarify recovery expiry.",
+    },
+  });
+
+  current = {
+    ...current,
+    status: "ready",
+    revision: 3,
+    state_version: 4,
+  };
+  assessmentId = "assessment-3";
+  await page.reload();
+  await page.getByRole("button", { name: "Reject Requirement" }).click();
+  await expect.poll(() => reviewBodies.length).toBe(3);
+  expect(reviewBodies[2]).toEqual({
+    action: "reject",
+    body: {
+      assessment_id: "assessment-3",
+      expected_state_version: 4,
+    },
+  });
+  await expect(
+    page.getByRole("button", { name: "Reopen Requirement" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Reopen Requirement" }).click();
+  await expect.poll(() => reviewBodies.length).toBe(4);
+  expect(reviewBodies[3]).toEqual({
+    action: "reopen",
+    body: { expected_state_version: 5 },
+  });
+
+  current = {
+    ...current,
+    status: "ready",
+    revision: 4,
+    state_version: 6,
+  };
+  assessmentId = "assessment-old";
+  staleRequest = true;
+  await page.reload();
+  await page
+    .getByRole("textbox", { name: "Request Changes feedback" })
+    .fill("Preserve through stale repair.");
+  await page.getByRole("button", { name: "Request Changes" }).click();
+  await expect.poll(() => reviewBodies.length).toBe(5);
+  await expect(page.getByText(/Review became stale/)).toBeVisible();
+  await expect(
+    page.getByRole("textbox", { name: "Request Changes feedback" }),
+  ).toHaveValue("Preserve through stale repair.");
+  await page.getByRole("button", { name: "Review refreshed packet" }).click();
+  await page.getByRole("button", { name: "Request Changes" }).click();
+  await expect.poll(() => reviewBodies.length).toBe(6);
+  expect(reviewBodies[5]).toEqual({
+    action: "request-changes",
+    body: {
+      assessment_id: "assessment-refreshed",
+      expected_state_version: 7,
+      feedback: "Preserve through stale repair.",
+    },
+  });
+});
+
+test("duplicate SSE hints and focus repair refetch canonical review state", async ({
+  page,
+}) => {
+  const current = requirement("r-1", "ready", "Repair review requirement");
+  const requests: string[] = [];
+  let eventConnections = 0;
+  const hint = `event: requirement.changed\\ndata: ${JSON.stringify({
+    category: "requirement.changed",
+    requirement_id: "r-1",
+  })}\\n\\n`;
+  await installWorkspaceRoutes(page, {
+    current: () => current,
+    messages: [],
+    requests,
+    role: "Owner",
+    reviewPacket: () => reviewPacketFor(current),
+    eventBody: () => {
+      eventConnections += 1;
+      return eventConnections === 1 ? hint + hint : ":\\n\\n";
+    },
+    extra: async () => false,
+  });
+
+  await page.goto("/requirements/r-1");
+  await expect(
+    page.getByRole("button", { name: "Accept Requirement" }),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        requests.filter((request) => request === "GET /requirements/r-1")
+          .length,
+    )
+    .toBeGreaterThan(1);
+  const beforeFocus = requests.filter(
+    (request) => request === "GET /requirements/r-1",
+  ).length;
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect
+    .poll(
+      () =>
+        requests.filter((request) => request === "GET /requirements/r-1")
+          .length,
+    )
+    .toBeGreaterThan(beforeFocus);
+  await expect(
+    page.getByRole("button", { name: "Accept Requirement" }),
+  ).toBeVisible();
 });

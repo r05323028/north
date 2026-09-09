@@ -23,9 +23,19 @@
   `clarification/start` is the only identity-creating call; active dispatch and
   cancellation carry that run ID explicitly. The wire `session` wrapper remains
   a compatibility detail.
-- Server owns durable business state, session ownership, command outbox, and
-  execution retry policy. Daemon reports execution facts and owns only local
-  transport/runtime recovery.
+- Server owns durable business state, session ownership, and command outbox.
+  Daemon reports clarification execution facts and owns local transport/runtime
+  recovery. Durable retry policy is **Specified — implementation pending** in
+  `execution-retry-authority`, not current daemon behavior.
+- Human review is **Enforced** in the canonical `/requirements/[id]`
+  workspace. The browser loads Review Packet truth, sends lifecycle-specific
+  mutation identities, repairs stale state through canonical HTTP, and requires
+  generation-bound acknowledgement without owning Requirement lifecycle.
+- Public endpoint abuse protection is **Specified — implementation pending**.
+  Its target resolves a normalized effective client address, derives an IPv4
+  `/32` or IPv6 `/64` CIDR primary limiter key, reuses that CIDR value as the
+  durable setup quota key, and returns generic 429 responses. Untrusted
+  forwarding headers remain ignored by default.
 - Server↔daemon command/event delivery is at-least-once. Stable ids prevent
   duplicate effects; independent per-session sequence spaces detect gaps.
 
@@ -34,8 +44,8 @@
 | Crate | Responsibility |
 | --- | --- |
 | north-domain | requirements, lifecycle, readiness, roles — pure logic |
-| north-server | HTTP/SSE API, auth, sessions, business transitions, command outbox, daemon routing, execution policy |
-| north-daemon | daemon-initiated connection, durable transport journal, runtime coordination, fact/event reporting; production agent runtime and repository checkouts remain downstream |
+| north-server | HTTP/SSE API, auth, sessions, business transitions, command outbox, daemon routing, and landed clarification projections |
+| north-daemon | daemon-initiated connection, durable transport journal, landed Pi clarification runtime, fact/event reporting, and authorized repository inspection |
 | north-protocol | command/event/control envelopes and compatibility metadata only |
 | north-persistence | SQL storage and transactional row↔domain mapping |
 

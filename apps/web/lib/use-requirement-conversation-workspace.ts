@@ -2,17 +2,19 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiError } from "@/lib/api/client";
+import { ApiError, InvalidServerDataError } from "@/lib/api/client";
 import {
   getActivityPage,
   getLatestClarificationRun,
   getReadiness,
 } from "@/lib/api/clarification";
+import { getReviewPacket } from "@/lib/api/review";
 import type {
   ActivityItem,
   ClarificationRun,
   CurrentUser,
   ReadinessView,
+  ReviewPacket,
 } from "@/lib/api/contracts";
 import { getConversationPage } from "@/lib/api/conversations";
 import { getCurrentUser } from "@/lib/api/current-user";
@@ -50,6 +52,7 @@ export type WorkspaceResource =
   | "readiness"
   | "activity"
   | "session"
+  | "review_packet"
   | "current_user";
 
 export type WorkspaceResourceErrors = Partial<
@@ -60,6 +63,7 @@ export type RequirementConversationWorkspaceState = {
   requirement: Requirement | null;
   conversation: ConversationHistory | null;
   readiness: ReadinessView | null;
+  reviewPacket: ReviewPacket | null;
   activityHistory: ActivityHistory | null;
   activities: ActivityItem[];
   activity_next_offset: number | null;
@@ -80,6 +84,7 @@ const emptyState = (): RequirementConversationWorkspaceState => ({
   requirement: null,
   conversation: null,
   readiness: null,
+  reviewPacket: null,
   activityHistory: null,
   activities: [],
   activity_next_offset: null,
@@ -243,6 +248,21 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         resourceErrors: initial ? {} : current.resourceErrors,
       }));
 
+      const requirementPromise = getRequirement(requirementId);
+      const reviewPacketPromise = requirementPromise.then(
+        async (requirement) => {
+          if (requirement.status !== "ready") return null;
+          const packet = await getReviewPacket(requirementId);
+          if (
+            packet.requirement_revision !== requirement.revision ||
+            packet.requirement_state_version !== requirement.state_version
+          ) {
+            throw new InvalidServerDataError("Review packet is not current");
+          }
+          return packet;
+        },
+        () => null,
+      );
       const conversationPromise = previousConversation
         ? repairConversationHistory(
             (offset, limit) =>
@@ -257,11 +277,12 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         ? repairActivityHistory(requirementId, previousActivity)
         : loadActivityHistory(requirementId);
       const results = await Promise.allSettled([
-        getRequirement(requirementId),
+        requirementPromise,
         conversationPromise,
         getReadiness(requirementId),
         activityPromise,
         getLatestClarificationRun(requirementId),
+        reviewPacketPromise,
         getCurrentUser(),
       ]);
 
@@ -298,9 +319,26 @@ export function useRequirementConversationWorkspace(requirementId: string) {
         recordFailure(3, "activity", "Activity");
         if (results[4].status === "fulfilled") next.run = results[4].value;
         recordFailure(4, "session", "Clarification run");
-        if (results[5].status === "fulfilled")
-          next.currentUser = results[5].value;
-        recordFailure(5, "current_user", "Current user");
+        if (results[6].status === "fulfilled") {
+          next.currentUser = results[6].value;
+        }
+        recordFailure(6, "current_user", "Current user");
+        if (results[0].status === "fulfilled") {
+          const loadedRequirement = results[0].value;
+          if (loadedRequirement.status === "ready") {
+            if (
+              results[5].status === "fulfilled" &&
+              results[5].value !== null
+            ) {
+              next.reviewPacket = results[5].value;
+            } else {
+              next.reviewPacket = null;
+            }
+            recordFailure(5, "review_packet", "Review packet");
+          } else {
+            next.reviewPacket = null;
+          }
+        }
 
         const failures = Object.values(resourceErrors);
         const initialError =
@@ -432,14 +470,27 @@ export function useRequirementConversationWorkspace(requirementId: string) {
   const applyRequirement = useCallback(
     (requirement: Requirement) => {
       if (requirement.id !== requirementId) return;
-      setState((current) => ({
-        ...current,
-        requirement,
-        resourceErrors: {
-          ...current.resourceErrors,
-          requirement: undefined,
-        },
-      }));
+      setState((current) => {
+        const packetIsCurrent =
+          requirement.status === "ready" &&
+          current.reviewPacket !== null &&
+          current.reviewPacket.requirement_revision === requirement.revision &&
+          current.reviewPacket.requirement_state_version ===
+            requirement.state_version;
+        return {
+          ...current,
+          requirement,
+          reviewPacket: packetIsCurrent ? current.reviewPacket : null,
+          resourceErrors: {
+            ...current.resourceErrors,
+            requirement: undefined,
+            review_packet:
+              requirement.status === "ready"
+                ? current.resourceErrors.review_packet
+                : undefined,
+          },
+        };
+      });
     },
     [requirementId],
   );

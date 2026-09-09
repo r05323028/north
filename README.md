@@ -2,6 +2,11 @@
 
 ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/r05323028/north/ci.yml)
 ![GitHub License](https://img.shields.io/github/license/r05323028/north)
+[![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=north&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=north)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=north&metric=coverage)](https://sonarcloud.io/summary/new_code?id=north)
+[![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=north&metric=ncloc)](https://sonarcloud.io/summary/new_code?id=north)
+[![Duplicated Lines (%)](https://sonarcloud.io/api/project_badges/measure?project=north&metric=duplicated_lines_density)](https://sonarcloud.io/summary/new_code?id=north)
+[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=north&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=north)
 
 Self-hosted requirement management: requesters collaborate with an AI agent to turn
 ambiguous requests into structured, reviewable requirements.

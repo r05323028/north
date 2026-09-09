@@ -121,6 +121,7 @@ function deferred<T>() {
 }
 
 let currentRequirement = { ...requirement };
+let currentReviewPacket: unknown = null;
 let conversationPages = new Map<number, ConversationPage>();
 let activityPages = new Map<
   number,
@@ -135,6 +136,8 @@ function valueFor(path: string): unknown {
   }
   if (url.pathname === "/requirements/requirement-1/readiness")
     return { assessment: null };
+  if (url.pathname === "/requirements/requirement-1/review-packet")
+    return currentReviewPacket;
   if (url.pathname === "/requirements/requirement-1/activity") {
     return activityPages.get(Number(url.searchParams.get("offset") ?? 0));
   }
@@ -176,6 +179,7 @@ function Probe({ beforeRefresh }: ProbeProps) {
           loadingActivityMore: state.loadingActivityMore,
           conversation: state.conversation?.messages.map(({ id }) => id) ?? [],
           activities: state.activities.map(({ id }) => id),
+          reviewPacket: state.reviewPacket?.assessment_id ?? null,
           initialError: state.initialError,
           refreshError: state.refreshError,
           resourceErrors: state.resourceErrors,
@@ -207,6 +211,7 @@ type ProbeState = {
   loadingActivityMore: boolean;
   conversation: string[];
   activities: number[];
+  reviewPacket: string | null;
   initialError: string | null;
   refreshError: string | null;
   resourceErrors: Record<string, string>;
@@ -227,6 +232,7 @@ async function settle() {
 
 function setupPages() {
   currentRequirement = { ...requirement };
+  currentReviewPacket = null;
   conversationPages = new Map([
     [0, conversationPage(["A", "B"], 2)],
     [2, conversationPage(["C", "D"], null)],
@@ -302,14 +308,10 @@ function stubStalePaginationRequests(
         if (offset === 0)
           return Promise.resolve(response(conversationPage(["X", "A"], 2)));
         if (offset === 2)
-          return Promise.resolve(
-            response(conversationPage(["B", "C"], null)),
-          );
+          return Promise.resolve(response(conversationPage(["B", "C"], null)));
       } else {
         if (offset === 0)
-          return Promise.resolve(
-            response({ activities: [], next_offset: 2 }),
-          );
+          return Promise.resolve(response({ activities: [], next_offset: 2 }));
         if (offset === 2)
           return Promise.resolve(
             response({
@@ -342,10 +344,7 @@ function mountProbe(): MountedProbe {
   return { container, root: createRoot(container) };
 }
 
-async function renderProbe(
-  mounted: MountedProbe,
-  props: ProbeProps = {},
-) {
+async function renderProbe(mounted: MountedProbe, props: ProbeProps = {}) {
   await act(async () => {
     mounted.root.render(<Probe {...props} />);
     await settle();
@@ -1093,6 +1092,163 @@ describe("useRequirementConversationWorkspace", () => {
     expect(retryState.resourceErrors.conversation).toContain(
       "retry conversation offline",
     );
+    await unmountProbe({ container, root });
+  });
+
+  it("loads Review Packet only for Ready and drops it when state becomes non-Ready", async () => {
+    setupPages();
+    currentRequirement = {
+      ...requirement,
+      status: "ready",
+      revision: 4,
+      state_version: 9,
+    };
+    currentReviewPacket = {
+      assessment_id: "assessment-1",
+      requirement_revision: 4,
+      requirement_state_version: 9,
+      goal: "Goal",
+      scope: "Scope",
+      summary: "Summary",
+      acceptance_criteria: [],
+      assumptions: [],
+      open_questions: [],
+      blockers: [],
+      assessment_assumptions: [],
+      repositories_reviewed: [],
+    };
+    const { container, root } = mountProbe();
+    await renderProbe({ container, root });
+    expect(probeState(container).reviewPacket).toBe("assessment-1");
+    expect(
+      fetchMock.mock.calls.some(
+        ([path]) => path === "/requirements/requirement-1/review-packet",
+      ),
+    ).toBe(true);
+
+    currentRequirement = { ...requirement, status: "discussing" };
+    currentReviewPacket = null;
+    const refresh = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "refresh",
+    );
+    if (!refresh) throw new Error("refresh control missing");
+    await act(async () => {
+      refresh.click();
+      await settle();
+    });
+    expect(probeState(container).reviewPacket).toBeNull();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([path]) => path === "/requirements/requirement-1/review-packet",
+      ),
+    ).toHaveLength(1);
+    await unmountProbe({ container, root });
+  });
+
+  it("skips packet requests for non-Ready Requirements", async () => {
+    setupPages();
+    const { container, root } = mountProbe();
+    await renderProbe({ container, root });
+    expect(
+      fetchMock.mock.calls.some(
+        ([path]) => path === "/requirements/requirement-1/review-packet",
+      ),
+    ).toBe(false);
+    expect(probeState(container).reviewPacket).toBeNull();
+    await unmountProbe({ container, root });
+  });
+
+  it("surfaces Ready packet failures without enabling review state", async () => {
+    setupPages();
+    currentRequirement = {
+      ...requirement,
+      status: "ready",
+      revision: 4,
+      state_version: 9,
+    };
+    fetchMock.mockImplementation((path: string) => {
+      if (path === "/requirements/requirement-1/review-packet") {
+        return Promise.reject(new Error("review packet offline"));
+      }
+      return Promise.resolve(response(valueFor(path)));
+    });
+    const { container, root } = mountProbe();
+    await renderProbe({ container, root });
+    const state = probeState(container);
+    expect(state.reviewPacket).toBeNull();
+    expect(state.resourceErrors.review_packet).toContain(
+      "review packet offline",
+    );
+    await unmountProbe({ container, root });
+  });
+
+  it("suppresses an older Review Packet response after a newer refresh", async () => {
+    setupPages();
+    currentRequirement = {
+      ...requirement,
+      status: "ready",
+      revision: 1,
+      state_version: 1,
+    };
+    const oldPacket = deferred<ReturnType<typeof response>>();
+    let packetCalls = 0;
+    fetchMock.mockImplementation((path: string) => {
+      if (path === "/requirements/requirement-1/review-packet") {
+        packetCalls += 1;
+        if (packetCalls === 1) return oldPacket.promise;
+        return Promise.resolve(
+          response({
+            assessment_id: "assessment-new",
+            requirement_revision: 1,
+            requirement_state_version: 1,
+            goal: "New goal",
+            scope: "Scope",
+            summary: "Summary",
+            acceptance_criteria: [],
+            assumptions: [],
+            open_questions: [],
+            blockers: [],
+            assessment_assumptions: [],
+            repositories_reviewed: [],
+          }),
+        );
+      }
+      return Promise.resolve(response(valueFor(path)));
+    });
+    const { container, root } = mountProbe();
+    await act(async () => {
+      root.render(<Probe />);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const refresh = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "refresh",
+    );
+    if (!refresh) throw new Error("refresh control missing");
+    await act(async () => {
+      refresh.click();
+      await settle();
+    });
+    expect(probeState(container).reviewPacket).toBe("assessment-new");
+    oldPacket.resolve(
+      response({
+        assessment_id: "assessment-old",
+        requirement_revision: 1,
+        requirement_state_version: 1,
+        goal: "Old goal",
+        scope: "Scope",
+        summary: "Summary",
+        acceptance_criteria: [],
+        assumptions: [],
+        open_questions: [],
+        blockers: [],
+        assessment_assumptions: [],
+        repositories_reviewed: [],
+      }),
+    );
+    await act(async () => {
+      await settle();
+    });
+    expect(probeState(container).reviewPacket).toBe("assessment-new");
     await unmountProbe({ container, root });
   });
 });

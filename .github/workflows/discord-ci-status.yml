@@ -1,0 +1,105 @@
+---
+name: Discord CI status
+
+# Intentional metadata-only triggers: no checkout or write token.
+# yamllint disable rule:truthy
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, review_requested]
+# yamllint enable rule:truthy
+
+permissions: {}
+
+jobs:
+  notify:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Discord notification
+        env:
+          DISCORD_CI_WEBHOOK: ${{ secrets.DISCORD_CI_WEBHOOK }}
+          DISCORD_PR_WEBHOOK: ${{ secrets.DISCORD_PR_WEBHOOK }}
+          EVENT_KIND: ${{ github.event_name }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CI_EVENT: ${{ github.event.workflow_run.event }}
+          CI_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          CI_RUN_NUMBER: ${{ github.event.workflow_run.run_number }}
+          CI_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CI_ACTOR: ${{ github.event.workflow_run.actor.login }}
+        run: |
+          set -eu
+
+          if [ "$EVENT_KIND" = "workflow_run" ]; then
+            webhook="$DISCORD_CI_WEBHOOK"
+            webhook_name=DISCORD_CI_WEBHOOK
+          else
+            webhook="$DISCORD_PR_WEBHOOK"
+            webhook_name=DISCORD_PR_WEBHOOK
+          fi
+
+          if [ -z "$webhook" ]; then
+            echo "$webhook_name is not configured; skipping Discord"
+            echo "notification."
+            exit 0
+          fi
+
+          if [ "$EVENT_KIND" = "workflow_run" ]; then
+            case "$CI_CONCLUSION" in
+              success)
+                color=5763719
+                ;;
+              failure)
+                color=15548997
+                ;;
+              cancelled|timed_out|action_required)
+                color=16705372
+                ;;
+              *)
+                color=9807270
+                ;;
+            esac
+
+            payload="$(
+              jq -n \
+                --arg conclusion "$CI_CONCLUSION" \
+                --arg event "$CI_EVENT" \
+                --arg branch "$CI_BRANCH" \
+                --arg run "$CI_RUN_NUMBER" \
+                --arg url "$CI_RUN_URL" \
+                --arg actor "$CI_ACTOR" \
+                --argjson color "$color" \
+                '{
+                  username: "North CI",
+                  sender: "North CI",
+                  embeds: [{
+                    title: ("CI " + $conclusion),
+                    description: ("CI completed for `" + $branch + "`"),
+                    color: $color,
+                    fields: [
+                      {name: "Status", value: $conclusion, inline: true},
+                      {name: "Event", value: $event, inline: true},
+                      {name: "Run", value: ("#" + $run), inline: true},
+                      {name: "Actor", value: $actor, inline: true}
+                    ],
+                    url: $url
+                  }]
+                }'
+            )"
+          else
+            payload="$(<"$GITHUB_EVENT_PATH")"
+          fi
+
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-delay 2 \
+            --connect-timeout 10 \
+            --max-time 30 \
+            --header "Content-Type: application/json" \
+            --data-binary "$payload" \
+            "$webhook"

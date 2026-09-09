@@ -31,12 +31,21 @@ as a required branch-protection check.
 Repository administrators must add an `OPENCODE_API_KEY` Actions secret under
 **Settings → Secrets and variables → Actions**. The workflow maps that secret
 to PR-Agent's `OPENAI_KEY` input and routes
-`openai/muse-spark-1.3-contributor` through OpenCode Go's OpenAI-compatible
-endpoint. The workflow uses `pull_request_target` so fork pull requests can
-use that secret. It does not checkout or execute pull-request code, grants
+`openai/mimo-v2.5` through OpenCode Go's Chat Completions endpoint. The
+workflow supplies `LITELLM.EXTRA_HEADERS` with a stable per-PR
+`x-opencode-session` and identifies itself as `north-pr-agent/1.0`, as required
+by OpenCode Go. The workflow uses `pull_request_target` so fork pull requests
+can use that secret. It does not checkout or execute pull-request code, grants
 only `contents: read`, `issues: write`, and `pull-requests: write`, and pins
 PR-Agent to release `v0.44.0` by commit SHA. Review `the-pr-agent/pr-agent`
 before changing that pin.
+
+Because `pull_request_target` runs the workflow from the base branch and
+PR-Agent loads repository settings from the default branch, the workflow also
+pins provider/model/reviewer settings and disables that repository-settings
+lookup. This prevents a new PR from inheriting stale model configuration before
+its `.pr_agent.toml` reaches the default branch; keep the workflow values and
+`.pr_agent.toml` synchronized.
 
 PR-Agent review is advisory. To roll it back, disable/remove the workflow and
 revoke `OPENCODE_API_KEY`; existing CI and `gate` remain unchanged.
@@ -76,3 +85,31 @@ Known limitations of act parity (documented, not hidden):
 - act validates job steps, not branch-protection semantics.
 
 Red remote CI always wins over green local output.
+
+## Discord notifications
+
+`.github/workflows/discord-ci-status.yml` listens for completed runs of `CI` and
+for pull request actions `opened`, `synchronize`, `reopened`, `ready_for_review`,
+and `review_requested`. Add repository Actions secrets
+`DISCORD_CI_WEBHOOK` for CI notifications and `DISCORD_PR_WEBHOOK` for pull
+request reminders. Set `DISCORD_PR_WEBHOOK` to a Discord webhook URL ending in
+`/github`; this is Discord's GitHub-compatible endpoint. CI notifications
+include conclusion, triggering event, head branch, run number, actor, and link
+to the completed run. Pull request reminders forward the original GitHub event
+payload and include action, number, title, base/head branches, actor, and link.
+The workflow sends event metadata only; it does not check out or execute
+pull request code and needs no repository permissions.
+
+Missing event-specific webhook (`DISCORD_CI_WEBHOOK` for CI or
+`DISCORD_PR_WEBHOOK` for pull requests) skips that notification and succeeds.
+A configured webhook failure makes the notification workflow fail after
+bounded retries, but never changes `CI` or its required `gate` result. `workflow_run`
+notifications start after this workflow exists on the default branch. Pull
+request events from forks cannot access repository secrets and therefore skip
+safely. Remove the secret or delete this workflow to roll back; existing CI
+validation remains unchanged.
+
+Local `act` parity does not replay `workflow_run` completion delivery or real
+Discord/remote pull request events. Validate notification behavior with a
+completed remote CI run and a selected pull request event after configuring the
+secret.

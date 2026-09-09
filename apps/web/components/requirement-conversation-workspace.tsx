@@ -16,6 +16,7 @@ import type {
   CurrentUser,
   Message,
   ReadinessView,
+  ReviewPacket,
 } from "@/lib/api/contracts";
 import { postRequesterMessage } from "@/lib/api/conversations";
 import {
@@ -37,6 +38,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { StatusBadge } from "@/components/ui/status";
 import { Textarea } from "@/components/ui/textarea";
+import { RequirementReviewPanel } from "@/components/requirement-review-panel";
 import { PageHeader } from "@/components/north-shell";
 
 type StructuredDraft = {
@@ -778,15 +780,21 @@ function RequirementEditor({
 function LiveRequirementPanel({
   requirement,
   readiness,
+  reviewPacket,
   currentUser,
   resourceError,
+  reviewResourceError,
+  refreshing,
   onApplyRequirement,
   onRefresh,
 }: {
   requirement: Requirement | null;
   readiness: ReadinessView | null;
+  reviewPacket: ReviewPacket | null;
   currentUser: CurrentUser | null;
   resourceError?: string;
+  reviewResourceError?: string;
+  refreshing: boolean;
   onApplyRequirement: (requirement: Requirement) => void;
   onRefresh: () => Promise<void>;
 }) {
@@ -978,6 +986,15 @@ function LiveRequirementPanel({
               />
             )}
             <ReadinessPanel readiness={readiness} />
+            <RequirementReviewPanel
+              currentUser={currentUser}
+              onApplyRequirementAction={onApplyRequirement}
+              onRefreshAction={onRefresh}
+              refreshing={refreshing}
+              requirement={requirement}
+              resourceError={reviewResourceError}
+              reviewPacket={reviewPacket}
+            />
           </>
         )}
       </CardContent>
@@ -1069,11 +1086,14 @@ export function RequirementConversationWorkspace({ id }: { id: string }) {
             onApplyRequirement={workspace.applyRequirement}
             onRefresh={workspace.refresh}
             readiness={workspace.readiness}
+            refreshing={workspace.refreshing}
             requirement={workspace.requirement}
             resourceError={
               workspace.resourceErrors.requirement ??
               workspace.resourceErrors.readiness
             }
+            reviewPacket={workspace.reviewPacket}
+            reviewResourceError={workspace.resourceErrors.review_packet}
           />
         </section>
       </div>
