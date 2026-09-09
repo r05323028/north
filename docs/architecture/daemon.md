@@ -112,11 +112,7 @@ one complete command envelope, and persists that exact payload atomically with
 `execution_sessions.daemon_id`. `DaemonRuntime::persist_and_dispatch_command`
 then dispatches the persisted envelope through its pinned owner. Reconnect
 reconciles only sessions pinned
-to that identity; North 0.1.0 does not perform automatic live migration. Business retry policy remains server-owned. The durable retry worker,
-`session.resume` scheduling, attempt accounting, and terminal retry policy are
-**Specified — implementation pending** in `execution-retry-authority`; current
-reconnect only delivers existing outbox work. Revoked owners are never replaced
-automatically.
+to that identity; North 0.1.0 does not perform automatic live migration. Business retry policy remains server-owned. The durable retry worker polls due rows with database row locks, creates one pinned `session.resume` attempt atomically with its outbox row and counter, and leaves delivery to reconnect/replay. Revoked owners are never replaced automatically.
 
 The current registration model defines daemon registrations as instance-scoped
 identities with credentials owned by the account recorded in `created_by`.
@@ -130,16 +126,15 @@ WebSocket reconnect/backoff and local Journal/runtime transport recovery are
 current daemon mechanics. They do not consume the server's business attempt
 budget. Event replay remains delivery recovery and does not consume that budget.
 
-The landed clarification runtime persists `Idle`, `Running`, `Completed`, or
-`Failed`; its current `session.failed` projection terminalizes the clarification
-run as an operational failure and does not mutate Requirement lifecycle.
-
-Execution retry is **Specified — implementation pending**. The
-`execution-retry-authority` target adds `Retrying`, attempt identity/count,
-snapshotted limits, durable `next_retry_at`, safe failure classification,
-server-owned `session.resume`, and terminal `Failed` policy. Requirement
-lifecycle remains separate; daemon reconnect and journal replay remain transport
-recovery.
+The clarification runtime persists `Idle`, `Running`, `Retrying`, `Completed`,
+or terminal `Failed`. `session.failed` closes the current attempt and the server
+chooses bounded retry, exhaustion, unknown-outcome, owner-unavailable, or
+cancellation policy without mutating Requirement lifecycle. `Retrying` keeps the
+logical run and sequential slot active until a durable due `session.resume` is
+created or policy terminalizes it. Attempt identity/count, snapshotted limits,
+`next_retry_at`, safe failure classification, and current-attempt clearing are
+server-owned persistence state; daemon reconnect and journal replay remain
+transport recovery.
 
 WebSocket reconnect/backoff, journal replay, ACK retry, and event replay are
 transport recovery and consume no business attempt. Public endpoint abuse

@@ -12,7 +12,7 @@ use north_persistence::{
 };
 use rand::{rng, Rng};
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, time::Duration};
 
 pub const SESSION_COOKIE_NAME: &str = "north_session";
 pub const VERIFICATION_CODE_LENGTH: usize = 6;
@@ -185,6 +185,7 @@ impl IntoResponse for AuthHttpError {
 /// logout is protected and receives CurrentUser through request extensions.
 pub fn router(state: AuthState) -> Router {
     state.daemon_runtime().start();
+    start_retry_worker(&state);
     let public = Router::new()
         .route("/auth/request-code", post(request_code))
         .route("/auth/verify", post(verify_code))
@@ -202,6 +203,43 @@ pub fn router(state: AuthState) -> Router {
             auth_middleware,
         ));
     public.merge(protected).with_state(state)
+}
+
+fn start_retry_worker(state: &AuthState) {
+    let store = state.store.clone();
+    let runtime = state.daemon_runtime.clone();
+    let events = state.events.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(
+            north_persistence::RETRY_POLL_INTERVAL_SECONDS,
+        ));
+        loop {
+            ticker.tick().await;
+            let work = match store
+                .claim_due_retries(
+                    north_persistence::RETRY_DISCOVERY_BATCH_SIZE,
+                    crate::clarification::build_resume_payload,
+                )
+                .await
+            {
+                Ok(work) => work,
+                Err(error) => {
+                    eprintln!("retry discovery failed: {error:?}");
+                    continue;
+                }
+            };
+            for item in work {
+                if let Some(requirement_id) = item.requirement_id {
+                    events.session_changed(requirement_id);
+                }
+                if let Some(command) = item.command {
+                    if let Err(error) = runtime.dispatch_pinned_command(&command).await {
+                        eprintln!("retry dispatch failed: {error:?}");
+                    }
+                }
+            }
+        }
+    });
 }
 
 pub async fn request_code(

@@ -22,8 +22,8 @@ mod requirements;
 pub use clarification::{
     ClarificationActivity, ClarificationCommandResult, ClarificationError, ClarificationEvent,
     ClarificationEventError, ClarificationPhase, ClarificationRun, ClarificationStartInput,
-    ClarificationStartResult, ClarificationStatus, ReadinessView, MAX_CONTEXT_BYTES,
-    MAX_CONTEXT_MESSAGES,
+    ClarificationStartResult, ClarificationStatus, ReadinessView, RetryWork, MAX_CONTEXT_BYTES,
+    MAX_CONTEXT_MESSAGES, RETRY_DISCOVERY_BATCH_SIZE, RETRY_POLL_INTERVAL_SECONDS,
 };
 pub use conversations::{
     ConversationError, ConversationPage, ConversationRecord, MessageKind, MessageRecord,

@@ -12,7 +12,8 @@ use north_persistence::{
     ReadinessView, RepositoryRecord, RequirementError, RequirementRecord,
 };
 use north_protocol::{
-    Command, CommandEnvelope, MessageSend, ServerFrame, SessionCancel, SessionStart, SCHEMA_VERSION,
+    Command, CommandEnvelope, MessageSend, ServerFrame, SessionCancel, SessionResume, SessionStart,
+    SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -46,6 +47,11 @@ pub struct ClarificationRunResponse {
     pub phase: String,
     pub status: String,
     pub cancel_requested: bool,
+    pub attempt_count: u64,
+    pub next_retry_at: Option<String>,
+    pub failure_reason: Option<String>,
+    pub retrying: bool,
+    pub failed: bool,
     pub created_at: String,
     pub updated_at: String,
     pub last_activity_at: String,
@@ -60,6 +66,11 @@ impl From<&ClarificationRun> for ClarificationRunResponse {
             phase: run.phase.as_str().into(),
             status: run.status.as_str().into(),
             cancel_requested: run.cancel_requested,
+            attempt_count: run.attempt_count,
+            next_retry_at: run.next_retry_at.clone(),
+            failure_reason: run.failure_reason.clone(),
+            retrying: run.status == ClarificationStatus::Retrying,
+            failed: run.status == ClarificationStatus::Failed,
             created_at: run.created_at.clone(),
             updated_at: run.updated_at.clone(),
             last_activity_at: run.last_activity_at.clone(),
@@ -549,6 +560,24 @@ fn build_message_payload(
     .map_err(|_| north_persistence::PersistenceError::InvalidCommandPayload)
 }
 
+pub(crate) fn build_resume_payload(
+    _daemon_id: &str,
+    run_id: &str,
+    command_id: &str,
+    sequence: u64,
+) -> Result<String, north_persistence::PersistenceError> {
+    ServerFrame::Command(CommandEnvelope {
+        command_id: command_id.to_owned(),
+        session_id: run_id.to_owned(),
+        server_command_seq: sequence,
+        sent_at: server_time(),
+        schema_version: SCHEMA_VERSION,
+        command: Command::SessionResume(SessionResume {}),
+    })
+    .to_json()
+    .map_err(|_| north_persistence::PersistenceError::InvalidCommandPayload)
+}
+
 fn build_cancel_payload(
     _daemon_id: &str,
     run_id: &str,
@@ -618,6 +647,11 @@ mod tests {
             phase: "active".into(),
             status: "starting".into(),
             cancel_requested: false,
+            attempt_count: 1,
+            next_retry_at: None,
+            failure_reason: None,
+            retrying: false,
+            failed: false,
             created_at: "now".into(),
             updated_at: "now".into(),
             last_activity_at: "now".into(),

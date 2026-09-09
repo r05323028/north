@@ -437,6 +437,22 @@ impl PiClarificationAdapter {
         control: &RuntimeControl,
     ) -> Result<Vec<RuntimeFact>, RuntimeOperationError> {
         check_cancellation(control)?;
+        let mut assessment = AssessmentContext {
+            requirement_id: start.requirement.id.clone(),
+            requirement_revision: start.requirement.revision,
+            repositories_reviewed: Vec::new(),
+            evidence: Vec::new(),
+            context: Some(start.clone()),
+            in_flight: true,
+        };
+        self.persist_context(&input.session_id, &assessment)
+            .map_err(RuntimeOperationError::from)?;
+        self.sessions
+            .lock()
+            .map_err(|_| {
+                RuntimeOperationError::from(RuntimeError::new("Pi session state lock poisoned"))
+            })?
+            .insert(input.session_id.clone(), assessment.clone());
         let sources = start
             .repositories
             .iter()
@@ -491,14 +507,8 @@ impl PiClarificationAdapter {
         }
         check_cancellation(control)?;
 
-        let mut assessment = AssessmentContext {
-            requirement_id: start.requirement.id.clone(),
-            requirement_revision: start.requirement.revision,
-            repositories_reviewed: reviewed.clone(),
-            evidence: evidence.clone(),
-            context: Some(start.clone()),
-            in_flight: true,
-        };
+        assessment.repositories_reviewed = reviewed.clone();
+        assessment.evidence = evidence.clone();
         self.persist_context(&input.session_id, &assessment)
             .map_err(RuntimeOperationError::from)?;
         self.sessions
@@ -613,12 +623,32 @@ impl PiClarificationAdapter {
         ))
     }
 
+    fn retain_context_after_error(&self, session_id: &str) -> Result<(), RuntimeError> {
+        let Some(mut context) = self.load_context(session_id)? else {
+            return Ok(());
+        };
+        context.in_flight = false;
+        self.persist_context(session_id, &context)?;
+        self.sessions
+            .lock()
+            .map_err(|_| RuntimeError::new("Pi session state lock poisoned"))?
+            .insert(session_id.to_owned(), context);
+        Ok(())
+    }
+
     fn cleanup_after_error(
         &self,
         session_id: &str,
         error: RuntimeOperationError,
     ) -> RuntimeOperationError {
-        match self.clear_session(session_id) {
+        let terminal = matches!(&error, RuntimeOperationError::Cancelled)
+            || error.to_string().contains("execution_outcome_unknown");
+        let cleanup = if terminal {
+            self.clear_session(session_id)
+        } else {
+            self.retain_context_after_error(session_id)
+        };
+        match cleanup {
             Ok(()) => error,
             Err(cleanup) => {
                 RuntimeOperationError::Failed(RuntimeError::new(format!("{error}; {cleanup}",)))
@@ -751,7 +781,20 @@ impl PiClarificationAdapter {
             RuntimeCommand::Cancel { reason } => self.cancel(&input, &reason, control),
             RuntimeCommand::Resume => {
                 check_cancellation(control)?;
-                Ok(Vec::new())
+                let context = self
+                    .load_context(&input.session_id)
+                    .map_err(RuntimeOperationError::from)?
+                    .ok_or_else(|| {
+                        RuntimeOperationError::Failed(RuntimeError::new(
+                            "Pi clarification resume has no retained session context",
+                        ))
+                    })?;
+                let start = context.context.ok_or_else(|| {
+                    RuntimeOperationError::Failed(RuntimeError::new(
+                        "Pi clarification resume has no immutable start context",
+                    ))
+                })?;
+                self.start(&input, start, control)
             }
         };
         if control.is_cancellation_requested() && !cancellation_command {

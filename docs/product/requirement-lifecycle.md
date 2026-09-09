@@ -103,14 +103,12 @@ history projection.
 
 ## Execution state boundary
 
-Current landed clarification runtime keeps execution facts separate from
-Requirement lifecycle. It projects `Idle` / `Running` / `Completed` / `Failed`,
-and a current `session.failed` terminalizes the clarification run with
-operational failure status without changing Requirement content, lifecycle,
-revision, or readiness.
-
-**Specified — implementation pending:** `execution-retry-authority` will add
-logical-run versus execution-attempt state, retry scheduling, attempt
-accounting, durable `next_retry_at`, public `retrying`/`failed` projections,
-and unknown-outcome terminality. Until implemented, documentation must not read
-those target states as current behavior. See docs/architecture/daemon.md.
+Clarification execution facts remain separate from Requirement lifecycle. The
+server projects `Idle` / `Running` / `Retrying` / `Completed` / `Failed`; a known
+`session.failed` can keep the logical run active while a durable retry is due.
+Exhaustion, unknown outcome, owner invalidation, or cancellation produces safe
+terminal `failed` without changing Requirement content, lifecycle, revision, or
+readiness. The existing session read is the only public run projection and
+exposes bounded attempt count, nullable due time, and safe failure reason.
+`session.resume` is server-created from persisted retry state; daemon
+recoverability does not choose business retry. See docs/architecture/daemon.md.

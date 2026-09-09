@@ -72,8 +72,10 @@ member so `cargo test --workspace` executes it.
 
 Human-review browser integration, including Review Packet loading, stale repair,
 and generation-bound acknowledgement, is **Enforced** by Web Vitest and
-Playwright web-boundary coverage. Public endpoint abuse limiting and durable
-execution retry remain specified targets for their owning changes.
+Playwright web-boundary coverage. Public endpoint abuse limiting remains a
+specified target; execution retry is implemented and covered by Rust unit tests
+and server integration paths. PostgreSQL restart/concurrency proofs require
+`NORTH_TEST_DATABASE_URL` and remain unexecuted when unavailable.
 
 PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it.
 

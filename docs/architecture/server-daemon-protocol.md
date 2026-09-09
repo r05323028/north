@@ -132,22 +132,20 @@ The durable-delivery rules below define the North 0.1 contract. The wire,
 transport, server outbox/event ledger, daemon local journal, replay, bounded gap
 handling, reconciliation, and identity tombstones are delivery concerns. The
 daemon journal retains full payloads until explicit safe compaction. The
-server-owned `execution-retry-authority` is a **Specified — implementation
-pending** coordination layer above this delivery contract; its target owns
-attempt identity, policy, and due `session.resume` creation.
+server-owned execution-retry authority is a coordination layer above this
+delivery contract; it owns attempt identity, policy, and due `session.resume`
+creation.
 `requirement.assessed` evidence, repository citation gates, revision checks, and
 post-commit ACKs remain server readiness concerns.
 
 Runtime events retain the same identity, sequence, dedupe, and ACK-after-commit
-boundary. The landed clarification-runtime projection handles `session.started`,
+boundary. The clarification projection handles `session.started`,
 `agent.message`, `agent.activity`, `session.completed`, and `session.failed` in
-server-owned transactions. Currently, `session.failed` terminalizes the
-clarification run with operational failure status and does not mutate Requirement
-lifecycle. The retry interpretation of that event — attempt identity, known
-retry scheduling, `next_retry_at`, and terminal unknown-outcome policy — is
-**Specified — implementation pending** in `execution-retry-authority`.
-Duplicate facts return their recorded outcome. Transport replay and reconnect
-remain separate from business retry and never create a new attempt.
+server-owned transactions. `session.failed` closes the current attempt, then
+server policy chooses retrying or safe terminal failure without mutating
+Requirement lifecycle. Duplicate facts return their recorded outcome. Transport
+replay and reconnect remain separate from business retry and never create a new
+attempt.
 
 Only delivery envelopes carry envelope fields:
 
@@ -206,11 +204,10 @@ emits journaled `session.failed` with `recoverable: false`,
 `execution_outcome_unknown`, the command/runtime identity, and
 `automatic_resubmit=false`. `recoverable` is only the daemon's fact about local
 resume/reattach ability; `false` means the existing operation cannot be safely
-recovered locally. The landed clarification projection currently terminalizes
-that run; the retry interpretation of this fact is **Specified — implementation
-pending** in `execution-retry-authority`. The daemon never blindly resubmits a
-side-effecting operation; any later attempt is an explicit server-directed
-command with a new identity.
+recovered locally. The server maps this fact to safe terminal
+`execution_outcome_unknown`; that logical run never receives `session.resume`.
+The daemon never blindly resubmits a side-effecting operation; any later attempt
+is an explicit server-directed command with a new identity.
 
 The readiness path validates assessment event identity, session binding,
 and `daemon_event_seq`/sequence identity before comparing
@@ -223,12 +220,11 @@ valid `Discussing` -> `Ready` promotion, records the resulting Ready-generation
 identity/sequence/rejection boundary and then enter their server-owned
 clarification projection. `session.started`, `agent.message`, and
 `agent.activity` update their canonical run/message/activity reads; `session.completed`
-closes successful execution; and the landed `session.failed` projection
-terminalizes the current clarification run with operational failure status.
-The future retry policy is **Specified — implementation pending** and must not
-be read into this current delivery contract. Duplicate facts remain inert, and
-no event mutates Requirement lifecycle outside its existing revision-bound domain
-operation.
+closes successful execution; and `session.failed` closes the current attempt
+before server-owned retry, exhaustion, unknown-outcome, owner, or cancellation
+policy. Duplicate facts remain inert, and no event mutates Requirement lifecycle
+outside its existing revision-bound domain operation. `Retrying` remains the same
+logical session with no current attempt until durable `session.resume` scheduling.
 Accepted evidence creates/binds `assessment_id`
 and `accepted_state_version`; neither is an inbound assessment concurrency
 token. Later human Accept, Reject, or Request Changes uses `assessment_id`,
@@ -320,9 +316,8 @@ ACK-after-commit, bounded gap handling, reconnect reconciliation, session
 ownership, retry-policy authority, and Requirement transaction semantics. The
 current implementation provides the wire/transport boundaries, daemon
 registration and revocation, server ACK/event ledgers, and the daemon Journal
-coordinator. Durable attempt scheduling is **Specified — implementation
-pending** in `execution-retry-authority`; reconnect and journal replay remain
-delivery recovery.
+coordinator. Durable attempt scheduling is implemented by the server persistence
+worker; reconnect and journal replay remain delivery recovery.
 
 ## Session routing and state ownership
 

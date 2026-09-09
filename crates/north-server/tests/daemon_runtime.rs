@@ -1766,7 +1766,8 @@ async fn clarification_start_reuse_cancel_and_terminal_slot_release() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let cancelled: serde_json::Value = response_json(response).await;
     assert_eq!(cancelled["session"]["phase"], "terminal");
-    assert_eq!(cancelled["session"]["status"], "unavailable");
+    assert_eq!(cancelled["session"]["status"], "failed");
+    assert_eq!(cancelled["session"]["failure_reason"], "cancelled");
     assert_eq!(cancelled["session"]["cancel_requested"], true);
 
     let response = app
@@ -2353,8 +2354,11 @@ async fn clarification_runtime_projects_existing_events_and_releases_slot() {
         .expect("failed session read response");
     let failed_session: serde_json::Value = response_json(response).await;
     assert_eq!(failed_session["session"]["run_id"], next_run_id);
-    assert_eq!(failed_session["session"]["phase"], "terminal");
-    assert_eq!(failed_session["session"]["status"], "unavailable");
+    assert_eq!(failed_session["session"]["phase"], "active");
+    assert_eq!(failed_session["session"]["status"], "retrying");
+    assert_eq!(failed_session["session"]["attempt_count"], 1);
+    assert_eq!(failed_session["session"]["retrying"], true);
+    assert!(failed_session["session"]["next_retry_at"].is_string());
     let response = app
         .clone()
         .oneshot(request(
@@ -2367,10 +2371,12 @@ async fn clarification_runtime_projects_existing_events_and_releases_slot() {
             Body::empty(),
         ))
         .await
-        .expect("completed failed-run cancellation response");
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+        .expect("retrying failed-run cancellation response");
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     let failed_cancel: serde_json::Value = response_json(response).await;
-    assert_eq!(failed_cancel["error"], "conflict");
+    assert_eq!(failed_cancel["session"]["phase"], "terminal");
+    assert_eq!(failed_cancel["session"]["status"], "failed");
+    assert_eq!(failed_cancel["session"]["failure_reason"], "cancelled");
 
     let stale_message = store
         .post_requester_message(&requirement.id, &user.user.id, "stale run message")
@@ -3138,6 +3144,204 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
             panic!("assignment/cancellation race left run awaiting");
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for retry integration tests");
+    let _database_test_guard = database_test_lock().await;
+    let pool = PoolOptions::new()
+        .max_connections(16)
+        .connect(&database_url)
+        .await
+        .expect("connect test database");
+    north_server::run_migrations(&pool)
+        .await
+        .expect("run migrations");
+    let store = AuthStore::new(pool.clone());
+    let email = unique_email("retry-worker");
+    store
+        .issue_code(&email, "777777")
+        .await
+        .expect("issue user code");
+    let user = store
+        .verify_code(&email, "777777")
+        .await
+        .expect("verify user code");
+    let daemon_id = unique_email("retry-worker-daemon").replace(['@', '.'], "-");
+    sqlx::query(
+        "INSERT INTO daemon_registrations
+            (daemon_id, credential_hash, label, created_by, protocol_version)
+         VALUES ($1, $2, $3, $4, '0.1')",
+    )
+    .bind(&daemon_id)
+    .bind(vec![9_u8; 32])
+    .bind("retry worker daemon")
+    .bind(&user.user.id)
+    .execute(&pool)
+    .await
+    .expect("insert retry daemon");
+
+    let session_id = unique_email("retry-session").replace(['@', '.'], "-");
+    let seed_attempt_id = format!("{session_id}-attempt-1");
+    let seed_command_id = format!("{session_id}-start");
+    let seed_failure_id = format!("{session_id}-failure");
+    sqlx::query(
+        "INSERT INTO execution_sessions
+            (id, daemon_id, state, attempt_count, max_attempts, next_retry_at,
+             failure_class, failure_reason)
+         VALUES ($1, $2, 'Retrying', 1, 3,
+                 CURRENT_TIMESTAMP - INTERVAL '1 second',
+                 'runtime_failure', 'runtime_failure')",
+    )
+    .bind(&session_id)
+    .bind(&daemon_id)
+    .execute(&pool)
+    .await
+    .expect("insert due retry session");
+    sqlx::query(
+        "INSERT INTO execution_attempts
+            (id, session_id, attempt_number, command_id, command_kind, outcome,
+             failure_event_id, failure_class, failure_reason)
+         VALUES ($1, $2, 1, $3, 'session.start', 'failed', $4,
+                 'runtime_failure', 'runtime_failure')",
+    )
+    .bind(&seed_attempt_id)
+    .bind(&session_id)
+    .bind(&seed_command_id)
+    .bind(&seed_failure_id)
+    .execute(&pool)
+    .await
+    .expect("insert failed seed attempt");
+    sqlx::query(
+        "INSERT INTO server_command_outbox
+            (command_id, session_id, daemon_id, server_command_seq, payload,
+             payload_digest, command_identity_digest)
+         VALUES ($1, $2, $3, 1, '{}', 'seed-digest', 'seed-identity')",
+    )
+    .bind(&seed_command_id)
+    .bind(&session_id)
+    .bind(&daemon_id)
+    .execute(&pool)
+    .await
+    .expect("insert seed command");
+
+    let left_store = AuthStore::new(pool.clone());
+    let right_store = AuthStore::new(pool.clone());
+    let (left, right) = tokio::join!(
+        left_store.claim_due_retries(1, |_, _, _, _| { Ok::<_, PersistenceError>("{}".into()) }),
+        right_store.claim_due_retries(1, |_, _, _, _| { Ok::<_, PersistenceError>("{}".into()) }),
+    );
+    let left = left.expect("left retry claim");
+    let right = right.expect("right retry claim");
+    assert_eq!(left.len() + right.len(), 1);
+    let resume_command_id = left
+        .into_iter()
+        .chain(right)
+        .find_map(|work| work.command.map(|command| command.command_id))
+        .expect("one resume command");
+    let (state, attempt_count, current_attempt_id, next_retry_at): (
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT state, attempt_count, current_attempt_id, next_retry_at::text
+         FROM execution_sessions WHERE id = $1",
+    )
+    .bind(&session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read claimed retry");
+    assert_eq!(state, "Running");
+    assert_eq!(attempt_count, 2);
+    assert!(current_attempt_id.is_some());
+    assert!(next_retry_at.is_none());
+    let attempt_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+            .bind(&session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count retry attempts");
+    assert_eq!(attempt_rows, 2);
+    let resume_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM server_command_outbox
+         WHERE session_id = $1 AND command_id = $2",
+    )
+    .bind(&session_id)
+    .bind(&resume_command_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count resume commands");
+    assert_eq!(resume_rows, 1);
+
+    let revoked_session_id = unique_email("revoked-retry-session").replace(['@', '.'], "-");
+    let revoked_attempt_id = format!("{revoked_session_id}-attempt-1");
+    let revoked_command_id = format!("{revoked_session_id}-start");
+    let revoked_failure_id = format!("{revoked_session_id}-failure");
+    sqlx::query(
+        "INSERT INTO execution_sessions
+            (id, daemon_id, state, attempt_count, max_attempts, next_retry_at,
+             failure_class, failure_reason)
+         VALUES ($1, $2, 'Retrying', 1, 3,
+                 CURRENT_TIMESTAMP - INTERVAL '1 second',
+                 'runtime_failure', 'runtime_failure')",
+    )
+    .bind(&revoked_session_id)
+    .bind(&daemon_id)
+    .execute(&pool)
+    .await
+    .expect("insert revoked retry session");
+    sqlx::query(
+        "INSERT INTO execution_attempts
+            (id, session_id, attempt_number, command_id, command_kind, outcome,
+             failure_event_id, failure_class, failure_reason)
+         VALUES ($1, $2, 1, $3, 'session.start', 'failed', $4,
+                 'runtime_failure', 'runtime_failure')",
+    )
+    .bind(&revoked_attempt_id)
+    .bind(&revoked_session_id)
+    .bind(&revoked_command_id)
+    .bind(&revoked_failure_id)
+    .execute(&pool)
+    .await
+    .expect("insert revoked seed attempt");
+    sqlx::query(
+        "INSERT INTO server_command_outbox
+            (command_id, session_id, daemon_id, server_command_seq, payload,
+             payload_digest, command_identity_digest)
+         VALUES ($1, $2, $3, 1, '{}', 'revoked-digest', 'revoked-identity')",
+    )
+    .bind(&revoked_command_id)
+    .bind(&revoked_session_id)
+    .bind(&daemon_id)
+    .execute(&pool)
+    .await
+    .expect("insert revoked seed command");
+    sqlx::query(
+        "UPDATE daemon_registrations SET revoked_at = CURRENT_TIMESTAMP WHERE daemon_id = $1",
+    )
+    .bind(&daemon_id)
+    .execute(&pool)
+    .await
+    .expect("revoke retry daemon");
+
+    let revoked_work = store
+        .claim_due_retries(1, |_, _, _, _| Ok::<_, PersistenceError>("{}".into()))
+        .await
+        .expect("claim revoked retry");
+    assert_eq!(revoked_work.len(), 1);
+    assert!(revoked_work[0].command.is_none());
+    let (revoked_state, revoked_reason): (String, String) =
+        sqlx::query_as("SELECT state, failure_reason FROM execution_sessions WHERE id = $1")
+            .bind(&revoked_session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read revoked retry");
+    assert_eq!(revoked_state, "Failed");
+    assert_eq!(revoked_reason, "owner_unavailable");
 }
 
 async fn app_for_request_body(

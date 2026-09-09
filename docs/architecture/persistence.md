@@ -9,7 +9,7 @@ server at startup.
 | Class | Examples | Rules |
 | --- | --- | --- |
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
-| Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, server command outbox, event dedupe/rejection records, sequence watermarks; retry attempt state and keyed setup quota are specified targets | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
+| Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, execution attempts, server command outbox, event dedupe/rejection records, sequence watermarks; keyed setup quota is a specified target | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
 Migrations 0003–0005 implement requirements and transition audit,
 one-to-one conversations/messages, and immutable revision-bound readiness
@@ -24,18 +24,18 @@ implement daemon registration/setup-request, execution-session/outbox records,
 and requirement binding used to authorize assessment events. Migration 0013
 adds the configured repository catalog. Migration 0014 adds immutable outbox
 payload fingerprints, command/event contiguous watermarks, and durable server
-event identity/outcome records. Migration 0015 adds clarification-run context,
-cancellation/runtime outcome fields, and coarse activity records. Readiness
-evidence rows are append-only; database triggers reject direct mutation of
-evidence, repository source identity, and command outbox payloads. Requirement
-delete is restrictive so evidence never changes via a cascade. Requirements
-with readiness evidence must be retained (or receive a future tombstone design).
-**Specified — implementation pending:** execution retry state is designed as
-durable coordination state, not an in-memory timer. When implemented, attempt
-rows, unique command/failure identities, `attempt_count`, snapshotted limits,
-safe failure class, and `next_retry_at` will be transactionally bound to the
-session and command outbox. Startup will discover due rows from the indexed
-database; reconnect/replay will not increment attempts.
+event identity/outcome records. Migration 0015 adds clarification-run context, cancellation/runtime outcome fields, and coarse
+activity records. Migration 0016 adds durable attempt rows, bounded failure
+classes, snapshotted retry limits, `attempt_count`, `current_attempt_id`, and
+indexed `next_retry_at`; legacy starts are backfilled conservatively, including
+compacted starts whose payload is gone. Readiness evidence rows are append-only;
+database triggers reject direct mutation of evidence, repository source identity,
+and command outbox payloads. Requirement delete is restrictive so evidence never
+changes via a cascade. Requirements with readiness evidence must be retained (or
+receive a future tombstone design). Retry attempt rows, unique command/failure
+identities, counters, due scheduling, and outbox resume commands are committed
+transactionally. Startup/polling discovers due rows from the database;
+reconnect/replay does not increment attempts.
 
 **Specified — implementation pending:** public creation protection will add a
 nullable PostgreSQL `CIDR` setup `client_network_key` plus the unclaimed-key
@@ -116,10 +116,12 @@ dispatch, or cancellation never rolls back the durable requester message.
 
 Clarification runs are durable sequential-slot state. A non-terminal
 `awaiting_assignment` or `active` run occupies its Requirement slot; only a
-terminal run releases it. The public read projection exposes `run_id`,
-`start_message_id`, phase, coarse status, cancellation intent, and safe
-timestamps. Browser `/events` notifications do not become a second persistence
-source; canonical HTTP reads repair missed or reordered hints.
+terminal run releases it. `Retrying` is active, clears its current attempt, and
+waits on durable `next_retry_at`; due work creates one new attempt and pinned
+resume command. The public read projection exposes `run_id`, `start_message_id`,
+phase, coarse status, safe attempt count/due time/failure reason, cancellation
+intent, and safe timestamps. Browser `/events` notifications do not become a
+second persistence source; canonical HTTP reads repair missed or reordered hints.
 
 ## First-owner bootstrap
 

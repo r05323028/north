@@ -544,6 +544,24 @@ async fn historical_main_head_upgrades_to_current_head() {
         )),
     )
     .await;
+    apply_migration(
+        &mut connection,
+        "0015_clarification_runtime",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/0015_clarification_runtime.sql"
+        )),
+    )
+    .await;
+    apply_migration(
+        &mut connection,
+        "0016_execution_retry_authority",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/0016_execution_retry_authority.sql"
+        )),
+    )
+    .await;
 
     let repository_columns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)
@@ -667,6 +685,29 @@ async fn historical_main_head_upgrades_to_current_head() {
     .await
     .expect("inspect delivery columns");
     assert_eq!(delivery_column_count, 7);
+    let retry_column_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'execution_sessions'
+           AND column_name IN (
+               'attempt_count', 'max_attempts', 'next_retry_at',
+               'failure_class', 'current_attempt_id'
+           )",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("inspect retry columns");
+    assert_eq!(retry_column_count, 5);
+    let attempt_table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_class
+         WHERE relnamespace = current_schema()::regnamespace
+           AND relname = 'execution_attempts'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("inspect attempt table");
+    assert_eq!(attempt_table_count, 1);
     let legacy_event_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments")
         .fetch_one(&mut connection)
         .await

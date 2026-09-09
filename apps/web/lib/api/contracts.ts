@@ -12,11 +12,23 @@ export type ClarificationPhase = (typeof requirementRunPhases)[number];
 export const clarificationStatuses = [
   "starting",
   "running",
+  "retrying",
   "completed",
+  "failed",
   "unavailable",
 ] as const;
 
+export const clarificationFailureReasons = [
+  "runtime_failure",
+  "execution_outcome_unknown",
+  "retry_exhausted",
+  "owner_unavailable",
+  "cancelled",
+] as const;
+
 export type ClarificationStatus = (typeof clarificationStatuses)[number];
+export type ClarificationFailureReason =
+  (typeof clarificationFailureReasons)[number];
 
 export type MessageKind = "requester" | "agent" | "system";
 export const messageKinds = ["requester", "agent", "system"] as const;
@@ -48,6 +60,11 @@ export type ClarificationRun = {
   phase: ClarificationPhase;
   status: ClarificationStatus;
   cancel_requested: boolean;
+  attempt_count: number;
+  next_retry_at: string | null;
+  failure_reason: ClarificationFailureReason | null;
+  retrying: boolean;
+  failed: boolean;
   created_at: string;
   updated_at: string;
   last_activity_at: string;
@@ -222,6 +239,20 @@ function closedValue<T extends string>(
     : invalid(resource, field);
 }
 
+function nullableClosedValue<T extends string>(
+  record: Record<string, unknown>,
+  resource: string,
+  field: string,
+  values: readonly T[],
+): T | null {
+  const value = record[field];
+  if (value === null) return null;
+  return typeof value === "string" &&
+    (values as readonly string[]).includes(value)
+    ? (value as T)
+    : invalid(resource, field);
+}
+
 function requiredBoolean(
   record: Record<string, unknown>,
   resource: string,
@@ -310,6 +341,16 @@ export function parseClarificationRun(value: unknown): ClarificationRun {
       "Clarification run",
       "cancel_requested",
     ),
+    attempt_count: safeInteger(record, "Clarification run", "attempt_count", 0),
+    next_retry_at: nullableString(record, "Clarification run", "next_retry_at"),
+    failure_reason: nullableClosedValue(
+      record,
+      "Clarification run",
+      "failure_reason",
+      clarificationFailureReasons,
+    ),
+    retrying: requiredBoolean(record, "Clarification run", "retrying"),
+    failed: requiredBoolean(record, "Clarification run", "failed"),
     created_at: requiredString(record, "Clarification run", "created_at"),
     updated_at: requiredString(record, "Clarification run", "updated_at"),
     last_activity_at: requiredString(
@@ -523,6 +564,7 @@ export function isClarificationInputBlocked(
 ): boolean {
   return (
     run?.phase === "awaiting_assignment" ||
-    (run?.phase === "active" && run.cancel_requested)
+    (run?.phase === "active" &&
+      (run.cancel_requested || run.retrying || run.status === "retrying"))
   );
 }

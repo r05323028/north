@@ -3,12 +3,18 @@ use crate::{
     AuthStore, PersistenceError,
 };
 use north_domain::status::RequirementStatus;
+use rand::{rng, Rng};
 use serde_json::Value;
 use sqlx::{FromRow, Postgres, Transaction};
 use std::{error::Error, fmt};
 
 pub const MAX_CONTEXT_MESSAGES: usize = 50;
 pub const MAX_CONTEXT_BYTES: usize = 32 * 1024;
+pub const DEFAULT_MAX_ATTEMPTS: u64 = 3;
+pub const RETRY_DISCOVERY_BATCH_SIZE: i64 = 32;
+pub const RETRY_POLL_INTERVAL_SECONDS: u64 = 1;
+const RETRY_BASE_SECONDS: i64 = 5;
+const RETRY_MAX_SECONDS: i64 = 5 * 60;
 const MAX_ACTIVITY_CHARS: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +38,9 @@ impl ClarificationPhase {
 pub enum ClarificationStatus {
     Starting,
     Running,
+    Retrying,
     Completed,
+    Failed,
     Unavailable,
 }
 
@@ -41,7 +49,9 @@ impl ClarificationStatus {
         match self {
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::Retrying => "retrying",
             Self::Completed => "completed",
+            Self::Failed => "failed",
             Self::Unavailable => "unavailable",
         }
     }
@@ -58,7 +68,11 @@ pub struct ClarificationRun {
     pub created_at: String,
     pub updated_at: String,
     pub last_activity_at: String,
+    pub attempt_count: u64,
+    pub next_retry_at: Option<String>,
+    pub failure_reason: Option<String>,
     pub(crate) daemon_id: Option<String>,
+    pub(crate) current_attempt_id: Option<String>,
     pub(crate) start_command_id: Option<String>,
     pub(crate) cancel_command_id: Option<String>,
 }
@@ -219,6 +233,11 @@ struct RunRow {
     created_at: String,
     updated_at: String,
     last_activity_at: String,
+    runtime_id: Option<String>,
+    attempt_count: i64,
+    next_retry_at: Option<String>,
+    failure_reason: Option<String>,
+    current_attempt_id: Option<String>,
     start_command_id: Option<String>,
     cancel_command_id: Option<String>,
 }
@@ -233,19 +252,28 @@ impl RunRow {
         let phase = match (self.state.as_str(), self.daemon_id.is_some()) {
             ("Completed" | "Failed", _) => ClarificationPhase::Terminal,
             ("Idle", false) => ClarificationPhase::AwaitingAssignment,
-            ("Idle" | "Running", true) => ClarificationPhase::Active,
+            ("Idle" | "Running" | "Retrying", true) => ClarificationPhase::Active,
             _ => return Err(ClarificationError::InvalidSessionState),
         };
+        let attempt_count = u64::try_from(self.attempt_count)
+            .map_err(|_| ClarificationError::InvalidSessionState)?;
         let status = match self.state.as_str() {
             "Idle" if self.daemon_id.is_some() && self.daemon_connected => {
                 ClarificationStatus::Starting
             }
             "Idle" => ClarificationStatus::Unavailable,
+            "Running"
+                if self.runtime_id.is_none()
+                    && self.current_attempt_id.is_some()
+                    && self.daemon_connected =>
+            {
+                ClarificationStatus::Starting
+            }
             "Running" if self.daemon_connected => ClarificationStatus::Running,
             "Running" => ClarificationStatus::Unavailable,
-            "Completed" if self.daemon_id.is_some() => ClarificationStatus::Completed,
-            "Completed" => ClarificationStatus::Unavailable,
-            "Failed" | "Retrying" => ClarificationStatus::Unavailable,
+            "Retrying" => ClarificationStatus::Retrying,
+            "Completed" => ClarificationStatus::Completed,
+            "Failed" => ClarificationStatus::Failed,
             _ => return Err(ClarificationError::InvalidSessionState),
         };
         Ok(ClarificationRun {
@@ -258,6 +286,10 @@ impl RunRow {
             created_at: self.created_at,
             updated_at: self.updated_at,
             last_activity_at: self.last_activity_at,
+            attempt_count,
+            next_retry_at: self.next_retry_at,
+            failure_reason: self.failure_reason,
+            current_attempt_id: self.current_attempt_id,
             daemon_id: self.daemon_id,
             start_command_id: self.start_command_id,
             cancel_command_id: self.cancel_command_id,
@@ -327,7 +359,8 @@ impl AuthStore {
         }
 
         let occupant = sqlx::query_as::<_, RunRow>(
-            "SELECT id, requirement_id, start_message_id, daemon_id, state,
+            "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
+                    next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                     COALESCE((
                         SELECT connected_at IS NOT NULL
                             AND revoked_at IS NULL
@@ -394,9 +427,20 @@ impl AuthStore {
                     &payload,
                 )
                 .await?;
+                let attempt_id = execution_attempt_id(&run.run_id, 1);
+                insert_execution_attempt(
+                    &mut transaction,
+                    &attempt_id,
+                    &run.run_id,
+                    1,
+                    &command_id,
+                    "session.start",
+                )
+                .await?;
                 sqlx::query(
                     "UPDATE execution_sessions
                      SET daemon_id = $2, start_command_id = $3,
+                         attempt_count = 1, current_attempt_id = $4,
                          updated_at = CURRENT_TIMESTAMP,
                          last_activity_at = CURRENT_TIMESTAMP
                      WHERE id = $1",
@@ -404,6 +448,7 @@ impl AuthStore {
                 .bind(&run.run_id)
                 .bind(&daemon_id)
                 .bind(&command_id)
+                .bind(&attempt_id)
                 .execute(&mut *transaction)
                 .await?;
                 command_id
@@ -411,10 +456,16 @@ impl AuthStore {
                 run.start_command_id.clone().unwrap_or_default()
             };
             let row = run_row(&mut transaction, &run.run_id).await?;
+            let run = row.into_run()?;
+            let command_id = if run.status == ClarificationStatus::Retrying {
+                None
+            } else {
+                (!command_id.is_empty()).then_some(command_id)
+            };
             transaction.commit().await?;
             return Ok(ClarificationStartResult {
-                run: row.into_run()?,
-                command_id: (!command_id.is_empty()).then_some(command_id),
+                run,
+                command_id,
                 reused: true,
             });
         }
@@ -501,8 +552,8 @@ impl AuthStore {
             "INSERT INTO execution_sessions
                 (id, daemon_id, requirement_id, state, start_message_id,
                  start_context, start_command_id, repository_ids,
-                 repository_context_initialized)
-             VALUES ($1, $2, $3, 'Idle', $4, $5, $6, $7, TRUE)",
+                 repository_context_initialized, attempt_count, max_attempts)
+             VALUES ($1, $2, $3, 'Idle', $4, $5, $6, $7, TRUE, 0, $8)",
         )
         .bind(&run_id)
         .bind(daemon_id.as_deref())
@@ -511,19 +562,43 @@ impl AuthStore {
         .bind(context)
         .bind(start_command_id.as_deref())
         .bind(repository_ids)
+        .bind(
+            i64::try_from(DEFAULT_MAX_ATTEMPTS)
+                .map_err(|_| ClarificationError::InvalidSessionState)?,
+        )
         .execute(&mut *transaction)
         .await?;
         if let Some((daemon_id, payload)) = command {
+            let command_id = start_command_id
+                .as_deref()
+                .ok_or(ClarificationError::InvalidSessionState)?;
             insert_command(
                 &mut transaction,
-                start_command_id
-                    .as_deref()
-                    .ok_or(ClarificationError::InvalidSessionState)?,
+                command_id,
                 &run_id,
                 &daemon_id,
                 1,
                 &payload,
             )
+            .await?;
+            let attempt_id = execution_attempt_id(&run_id, 1);
+            insert_execution_attempt(
+                &mut transaction,
+                &attempt_id,
+                &run_id,
+                1,
+                command_id,
+                "session.start",
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE execution_sessions
+                 SET attempt_count = 1, current_attempt_id = $2
+                 WHERE id = $1",
+            )
+            .bind(&run_id)
+            .bind(&attempt_id)
+            .execute(&mut *transaction)
             .await?;
         }
         let run = run_row(&mut transaction, &run_id).await?.into_run()?;
@@ -540,7 +615,8 @@ impl AuthStore {
         requirement_id: &str,
     ) -> Result<Option<ClarificationRun>, ClarificationError> {
         let row = sqlx::query_as::<_, RunRow>(
-            "SELECT id, requirement_id, start_message_id, daemon_id, state,
+            "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
+                    next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                     COALESCE((
                         SELECT connected_at IS NOT NULL
                             AND revoked_at IS NULL
@@ -585,7 +661,8 @@ impl AuthStore {
     {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query_as::<_, RunRow>(
-            "SELECT id, requirement_id, start_message_id, daemon_id, state,
+            "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
+                    next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                     COALESCE((
                         SELECT connected_at IS NOT NULL
                             AND revoked_at IS NULL
@@ -610,6 +687,7 @@ impl AuthStore {
         if !matches!(run.phase, ClarificationPhase::Active)
             || run.cancel_requested
             || run.daemon_id.is_none()
+            || run.current_attempt_id.is_none()
         {
             return Err(ClarificationError::RunNotEligible);
         }
@@ -703,7 +781,8 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await?;
         let row = sqlx::query_as::<_, RunRow>(
-            "SELECT id, requirement_id, start_message_id, daemon_id, state,
+            "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
+                    next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                     COALESCE((
                         SELECT connected_at IS NOT NULL
                             AND revoked_at IS NULL
@@ -738,7 +817,10 @@ impl AuthStore {
         sqlx::query(
             "UPDATE execution_sessions
              SET cancel_requested = TRUE,
-                 state = CASE WHEN daemon_id IS NULL THEN 'Completed' ELSE state END,
+                 state = CASE WHEN current_attempt_id IS NULL THEN 'Failed' ELSE state END,
+                 next_retry_at = CASE WHEN current_attempt_id IS NULL THEN NULL ELSE next_retry_at END,
+                 failure_class = CASE WHEN current_attempt_id IS NULL THEN 'cancelled' ELSE failure_class END,
+                 failure_reason = CASE WHEN current_attempt_id IS NULL THEN 'cancelled' ELSE failure_reason END,
                  updated_at = CURRENT_TIMESTAMP,
                  last_activity_at = CURRENT_TIMESTAMP
              WHERE id = $1",
@@ -747,6 +829,13 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await?;
         let current = run_row(&mut transaction, run_id).await?.into_run()?;
+        if current.current_attempt_id.is_none() {
+            transaction.commit().await?;
+            return Ok(ClarificationCommandResult {
+                run: current,
+                command_id: String::new(),
+            });
+        }
         let Some(daemon_id) = current.daemon_id.as_deref() else {
             transaction.commit().await?;
             return Ok(ClarificationCommandResult {
@@ -873,7 +962,8 @@ impl AuthStore {
         let mut transaction = self.pool.begin().await?;
         let session = sqlx::query_as::<_, ProjectionSessionRow>(
             "SELECT event_ack_through_seq, event_ack_sparse,
-                    start_message_id, state, daemon_id
+                    start_message_id, state, daemon_id, runtime_id,
+                    current_attempt_id, attempt_count, max_attempts, cancel_requested
              FROM execution_sessions WHERE id = $1 FOR UPDATE",
         )
         .bind(session_id)
@@ -934,8 +1024,20 @@ impl AuthStore {
             Some("session_terminal")
         } else if session.daemon_id.is_none() {
             Some("session_unassigned")
+        } else if session.current_attempt_id.is_none()
+            && matches!(
+                &event,
+                ClarificationEvent::SessionStarted { .. }
+                    | ClarificationEvent::AgentMessage { .. }
+                    | ClarificationEvent::Activity { .. }
+                    | ClarificationEvent::Completed { .. }
+                    | ClarificationEvent::Failed { .. }
+            )
+        {
+            Some("attempt_not_active")
         } else if matches!(&event, ClarificationEvent::SessionStarted { .. })
-            && session.state != "Idle"
+            && (session.state != "Idle"
+                && !(session.state == "Running" && session.runtime_id.is_none()))
         {
             Some("session_already_started")
         } else {
@@ -976,6 +1078,8 @@ impl AuthStore {
                 sqlx::query(
                     "UPDATE execution_sessions
                      SET state = 'Running', runtime_id = $2,
+                         next_retry_at = NULL, failure_class = NULL,
+                         failure_reason = NULL,
                          started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                          updated_at = CURRENT_TIMESTAMP,
                          last_activity_at = CURRENT_TIMESTAMP
@@ -1034,9 +1138,27 @@ impl AuthStore {
                 touch_session(&mut transaction, session_id).await?;
             }
             ClarificationEvent::Completed { summary } => {
+                let attempt_id = session
+                    .current_attempt_id
+                    .as_deref()
+                    .ok_or(ClarificationEventError::Projection)?;
+                let closed = sqlx::query(
+                    "UPDATE execution_attempts
+                     SET outcome = 'completed', closed_at = CURRENT_TIMESTAMP
+                     WHERE id = $1 AND session_id = $2 AND outcome IS NULL",
+                )
+                .bind(attempt_id)
+                .bind(session_id)
+                .execute(&mut *transaction)
+                .await?;
+                if closed.rows_affected() != 1 {
+                    return Err(ClarificationEventError::Projection);
+                }
                 sqlx::query(
                     "UPDATE execution_sessions
                      SET state = 'Completed', terminal_summary = $2,
+                         current_attempt_id = NULL, next_retry_at = NULL,
+                         failure_class = NULL, failure_reason = NULL,
                          updated_at = CURRENT_TIMESTAMP,
                          last_activity_at = CURRENT_TIMESTAMP
                      WHERE id = $1",
@@ -1047,15 +1169,77 @@ impl AuthStore {
                 .await?;
             }
             ClarificationEvent::Failed { reason, .. } => {
+                let attempt_id = session
+                    .current_attempt_id
+                    .as_deref()
+                    .ok_or(ClarificationEventError::Projection)?;
+                let safe_class = if session.cancel_requested {
+                    "cancelled"
+                } else if is_unknown_failure(&reason) {
+                    "execution_outcome_unknown"
+                } else {
+                    "runtime_failure"
+                };
+                let owner_valid = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM daemon_registrations
+                         WHERE daemon_id = $1 AND revoked_at IS NULL
+                     )",
+                )
+                .bind(session.daemon_id.as_deref())
+                .fetch_optional(&mut *transaction)
+                .await?
+                .unwrap_or(false);
+                let (state, retry_delay, final_class) = if session.cancel_requested {
+                    ("Failed", None, "cancelled")
+                } else if safe_class == "execution_outcome_unknown" {
+                    ("Failed", None, safe_class)
+                } else if !owner_valid {
+                    ("Failed", None, "owner_unavailable")
+                } else if session.attempt_count >= session.max_attempts {
+                    ("Failed", None, "retry_exhausted")
+                } else {
+                    (
+                        "Retrying",
+                        Some(retry_delay_seconds(session.attempt_count)),
+                        safe_class,
+                    )
+                };
+                let closed = sqlx::query(
+                    "UPDATE execution_attempts
+                     SET outcome = 'failed', failure_event_id = $2,
+                         failure_class = $3, failure_reason = $4,
+                         closed_at = CURRENT_TIMESTAMP
+                     WHERE id = $1 AND session_id = $5 AND outcome IS NULL",
+                )
+                .bind(attempt_id)
+                .bind(event_id)
+                .bind(final_class)
+                .bind(final_class)
+                .bind(session_id)
+                .execute(&mut *transaction)
+                .await?;
+                if closed.rows_affected() != 1 {
+                    return Err(ClarificationEventError::Projection);
+                }
                 sqlx::query(
                     "UPDATE execution_sessions
-                     SET state = 'Failed', failure_reason = $2,
+                     SET state = $2, runtime_id = NULL,
+                         current_attempt_id = NULL, next_retry_at = CASE
+                             WHEN $3::double precision IS NULL THEN NULL
+                             ELSE CURRENT_TIMESTAMP
+                                  + ($3::double precision * INTERVAL '1 second')
+                         END,
+                         failure_class = $4, failure_reason = $5,
                          updated_at = CURRENT_TIMESTAMP,
                          last_activity_at = CURRENT_TIMESTAMP
                      WHERE id = $1",
                 )
                 .bind(session_id)
-                .bind(reason)
+                .bind(state)
+                .bind(retry_delay.map(|seconds| seconds as f64))
+                .bind(final_class)
+                .bind(final_class)
                 .execute(&mut *transaction)
                 .await?;
             }
@@ -1083,6 +1267,161 @@ impl AuthStore {
             rejection_reason: None,
             duplicate: false,
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryWork {
+    pub requirement_id: Option<String>,
+    pub command: Option<crate::PinnedCommand>,
+}
+
+#[derive(Debug, FromRow)]
+struct DueRetryRow {
+    id: String,
+    requirement_id: Option<String>,
+    daemon_id: Option<String>,
+    attempt_count: i64,
+    max_attempts: i64,
+    cancel_requested: bool,
+}
+
+impl AuthStore {
+    /// Claim due retry rows from PostgreSQL and create each resume attempt in
+    /// the same transaction as its outbox row and counter update.
+    pub async fn claim_due_retries<F>(
+        &self,
+        limit: i64,
+        build_payload: F,
+    ) -> Result<Vec<RetryWork>, ClarificationError>
+    where
+        F: Fn(&str, &str, &str, u64) -> Result<String, PersistenceError> + Send + Sync,
+    {
+        if !(1..=1000).contains(&limit) {
+            return Err(ClarificationError::InvalidContext);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let rows = sqlx::query_as::<_, DueRetryRow>(
+            "SELECT id, requirement_id, daemon_id, attempt_count, max_attempts,
+                    cancel_requested
+             FROM execution_sessions
+             WHERE state = 'Retrying'
+               AND next_retry_at <= CURRENT_TIMESTAMP
+               AND current_attempt_id IS NULL
+             ORDER BY next_retry_at ASC, id ASC
+             LIMIT $1
+             FOR UPDATE SKIP LOCKED",
+        )
+        .bind(limit)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut work = Vec::with_capacity(rows.len());
+        for row in rows {
+            let requirement_id = row.requirement_id.clone();
+            let terminal_class = if row.cancel_requested {
+                Some("cancelled")
+            } else if row.attempt_count >= row.max_attempts {
+                Some("retry_exhausted")
+            } else {
+                let owner_valid = if let Some(daemon_id) = row.daemon_id.as_deref() {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT revoked_at IS NULL
+                         FROM daemon_registrations
+                         WHERE daemon_id = $1
+                         FOR UPDATE",
+                    )
+                    .bind(daemon_id)
+                    .fetch_optional(&mut *transaction)
+                    .await?
+                    .unwrap_or(false)
+                } else {
+                    false
+                };
+                (!owner_valid).then_some("owner_unavailable")
+            };
+            if let Some(class) = terminal_class {
+                sqlx::query(
+                    "UPDATE execution_sessions
+                     SET state = 'Failed', next_retry_at = NULL,
+                         current_attempt_id = NULL, failure_class = $2,
+                         failure_reason = $2, updated_at = CURRENT_TIMESTAMP,
+                         last_activity_at = CURRENT_TIMESTAMP
+                     WHERE id = $1",
+                )
+                .bind(&row.id)
+                .bind(class)
+                .execute(&mut *transaction)
+                .await?;
+                work.push(RetryWork {
+                    requirement_id,
+                    command: None,
+                });
+                continue;
+            }
+
+            let daemon_id = row
+                .daemon_id
+                .as_deref()
+                .ok_or(ClarificationError::InvalidSessionState)?;
+            let attempt_number = u64::try_from(
+                row.attempt_count
+                    .checked_add(1)
+                    .ok_or(ClarificationError::InvalidSessionState)?,
+            )
+            .map_err(|_| ClarificationError::InvalidSessionState)?;
+            let command_id = crate::random_hex(16);
+            let sequence = next_command_sequence(&mut transaction, &row.id).await?;
+            let payload = build_payload(daemon_id, &row.id, &command_id, sequence)
+                .map_err(|_| ClarificationError::InvalidContext)?;
+            insert_command(
+                &mut transaction,
+                &command_id,
+                &row.id,
+                daemon_id,
+                sequence,
+                &payload,
+            )
+            .await?;
+            let attempt_id = execution_attempt_id(&row.id, attempt_number);
+            insert_execution_attempt(
+                &mut transaction,
+                &attempt_id,
+                &row.id,
+                attempt_number,
+                &command_id,
+                "session.resume",
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE execution_sessions
+                 SET state = 'Running', attempt_count = $2,
+                     current_attempt_id = $3, next_retry_at = NULL,
+                     runtime_id = NULL, failure_class = NULL,
+                     failure_reason = NULL, updated_at = CURRENT_TIMESTAMP,
+                     last_activity_at = CURRENT_TIMESTAMP
+                 WHERE id = $1",
+            )
+            .bind(&row.id)
+            .bind(row.attempt_count + 1)
+            .bind(&attempt_id)
+            .execute(&mut *transaction)
+            .await?;
+            work.push(RetryWork {
+                requirement_id,
+                command: Some(crate::PinnedCommand {
+                    command_id,
+                    session_id: row.id,
+                    daemon_id: daemon_id.to_owned(),
+                    server_command_seq: sequence,
+                    payload_digest: crate::payload_digest(&payload),
+                    command_identity_digest: crate::command_identity_digest(&payload),
+                    payload,
+                    compacted: false,
+                }),
+            });
+        }
+        transaction.commit().await?;
+        Ok(work)
     }
 }
 
@@ -1118,6 +1457,11 @@ struct ProjectionSessionRow {
     start_message_id: Option<String>,
     state: String,
     daemon_id: Option<String>,
+    runtime_id: Option<String>,
+    current_attempt_id: Option<String>,
+    attempt_count: i64,
+    max_attempts: i64,
+    cancel_requested: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -1253,7 +1597,8 @@ async fn run_row(
     run_id: &str,
 ) -> Result<RunRow, ClarificationError> {
     Ok(sqlx::query_as::<_, RunRow>(
-        "SELECT id, requirement_id, start_message_id, daemon_id, state,
+        "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
+                    next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                 COALESCE((
                     SELECT connected_at IS NOT NULL
                         AND revoked_at IS NULL
@@ -1278,7 +1623,8 @@ async fn run_row_for_requirement(
     run_id: &str,
 ) -> Result<Option<RunRow>, ClarificationError> {
     Ok(sqlx::query_as::<_, RunRow>(
-        "SELECT id, requirement_id, start_message_id, daemon_id, state,
+        "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
+                    next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                 COALESCE((
                     SELECT connected_at IS NOT NULL
                         AND revoked_at IS NULL
@@ -1338,6 +1684,55 @@ async fn next_command_sequence(
     .fetch_one(&mut **transaction)
     .await?;
     u64::try_from(next).map_err(|_| ClarificationError::InvalidSessionState)
+}
+
+fn execution_attempt_id(session_id: &str, attempt_number: u64) -> String {
+    format!(
+        "attempt-{}-{attempt_number}",
+        crate::payload_digest(session_id)
+    )
+}
+
+fn is_unknown_failure(reason: &str) -> bool {
+    reason
+        .to_ascii_lowercase()
+        .contains("execution_outcome_unknown")
+}
+
+fn retry_delay_seconds(attempt_count: i64) -> i64 {
+    let exponent = attempt_count.saturating_sub(1).min(6) as u32;
+    let base = RETRY_BASE_SECONDS
+        .saturating_mul(1_i64 << exponent)
+        .min(RETRY_MAX_SECONDS);
+    let jitter_percent: i64 = rng().random_range(0..=25);
+    base.saturating_add(base.saturating_mul(jitter_percent) / 100)
+        .min(RETRY_MAX_SECONDS)
+}
+
+async fn insert_execution_attempt(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt_id: &str,
+    session_id: &str,
+    attempt_number: u64,
+    command_id: &str,
+    command_kind: &str,
+) -> Result<(), ClarificationError> {
+    if !matches!(command_kind, "session.start" | "session.resume") {
+        return Err(ClarificationError::InvalidSessionState);
+    }
+    sqlx::query(
+        "INSERT INTO execution_attempts
+            (id, session_id, attempt_number, command_id, command_kind)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(attempt_id)
+    .bind(session_id)
+    .bind(i64::try_from(attempt_number).map_err(|_| ClarificationError::InvalidSessionState)?)
+    .bind(command_id)
+    .bind(command_kind)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 async fn insert_command(
@@ -1466,6 +1861,34 @@ mod tests {
         assert_eq!(MAX_CONTEXT_BYTES, 32 * 1024);
         assert_eq!(ClarificationPhase::Active.as_str(), "active");
         assert_eq!(ClarificationStatus::Unavailable.as_str(), "unavailable");
+        assert_eq!(ClarificationStatus::Retrying.as_str(), "retrying");
+        assert_eq!(ClarificationStatus::Failed.as_str(), "failed");
+    }
+
+    #[test]
+    fn retrying_and_failed_runs_keep_safe_projection() {
+        let retrying = test_run_row("Retrying", Some("daemon-1"), false, false)
+            .into_run()
+            .expect("retrying run");
+        assert_eq!(retrying.phase, ClarificationPhase::Active);
+        assert_eq!(retrying.status, ClarificationStatus::Retrying);
+
+        let mut failed = test_run_row("Failed", Some("daemon-1"), false, false);
+        failed.failure_reason = Some("retry_exhausted".into());
+        let failed = failed.into_run().expect("failed run");
+        assert_eq!(failed.phase, ClarificationPhase::Terminal);
+        assert_eq!(failed.status, ClarificationStatus::Failed);
+        assert_eq!(failed.failure_reason.as_deref(), Some("retry_exhausted"));
+    }
+
+    #[test]
+    fn retry_delay_is_bounded_and_unknown_failures_are_classified() {
+        for attempt_count in 1..=20 {
+            let delay = retry_delay_seconds(attempt_count);
+            assert!((RETRY_BASE_SECONDS..=RETRY_MAX_SECONDS).contains(&delay));
+        }
+        assert!(is_unknown_failure("execution_outcome_unknown"));
+        assert!(!is_unknown_failure("runtime process exited"));
     }
 
     #[test]
@@ -1503,6 +1926,11 @@ mod tests {
             state: state.into(),
             daemon_connected,
             cancel_requested,
+            runtime_id: Some("runtime-1".into()),
+            attempt_count: 1,
+            next_retry_at: None,
+            failure_reason: None,
+            current_attempt_id: Some("attempt-1".into()),
             created_at: "now".into(),
             updated_at: "now".into(),
             last_activity_at: "now".into(),
