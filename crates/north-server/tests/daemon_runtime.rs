@@ -3334,14 +3334,39 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
         .expect("claim revoked retry");
     assert_eq!(revoked_work.len(), 1);
     assert!(revoked_work[0].command.is_none());
-    let (revoked_state, revoked_reason): (String, String) =
-        sqlx::query_as("SELECT state, failure_reason FROM execution_sessions WHERE id = $1")
+    let (
+        revoked_state,
+        revoked_reason,
+        revoked_owner,
+        revoked_attempt_count,
+        revoked_current_attempt,
+    ): (String, String, Option<String>, i64, Option<String>) = sqlx::query_as(
+        "SELECT state, failure_reason, daemon_id, attempt_count, current_attempt_id
+         FROM execution_sessions WHERE id = $1",
+    )
+    .bind(&revoked_session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read revoked retry");
+    assert_eq!(revoked_state, "Failed");
+    assert_eq!(revoked_reason, "owner_unavailable");
+    assert_eq!(revoked_owner.as_deref(), Some(daemon_id.as_str()));
+    assert_eq!(revoked_attempt_count, 1);
+    assert!(revoked_current_attempt.is_none());
+    let revoked_attempts: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&revoked_session_id)
             .fetch_one(&pool)
             .await
-            .expect("read revoked retry");
-    assert_eq!(revoked_state, "Failed");
-    assert_eq!(revoked_reason, "owner_unavailable");
+            .expect("count revoked attempts");
+    let revoked_commands: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+            .bind(&revoked_session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count revoked commands");
+    assert_eq!(revoked_attempts, 1);
+    assert_eq!(revoked_commands, 1);
 }
 
 async fn app_for_request_body(

@@ -44,6 +44,20 @@ jobs:
   rust-coverage:
     name: Rust coverage
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: north
+          POSTGRES_PASSWORD: north
+          POSTGRES_DB: north
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U north -d north"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -56,8 +70,14 @@ jobs:
       - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7
         with:
           tool: cargo-llvm-cov
+      # Coverage must execute PostgreSQL-backed tests
+      # marked ignored in normal runs.
       - name: Generate Rust coverage (lcov)
-        run: cargo llvm-cov --workspace --lcov --output-path rust-lcov.info
+        env:
+          NORTH_TEST_DATABASE_URL: postgres://north:north@127.0.0.1:5432/north
+        run: >-
+          cargo llvm-cov --workspace --lcov --output-path rust-lcov.info --
+          --include-ignored
       # Codecov Action v7.0.0
       - name: Upload Rust coverage
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
