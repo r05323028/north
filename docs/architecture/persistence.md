@@ -34,8 +34,10 @@ and command outbox payloads. Requirement delete is restrictive so evidence never
 changes via a cascade. Requirements with readiness evidence must be retained (or
 receive a future tombstone design). Retry attempt rows, unique command/failure
 identities, counters, due scheduling, and outbox resume commands are committed
-transactionally. Startup/polling discovers due rows from the database;
-reconnect/replay does not increment attempts.
+transactionally. PostgreSQL row locks are shared across connections, pools,
+processes, and server instances; `FOR UPDATE SKIP LOCKED` therefore lets only
+one concurrent worker claim each due row. Startup/polling discovers due rows
+from the database; reconnect/replay does not increment attempts.
 
 **Specified — implementation pending:** public creation protection will add a
 nullable PostgreSQL `CIDR` setup `client_network_key` plus the unclaimed-key

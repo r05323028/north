@@ -233,6 +233,8 @@ fn start_retry_worker(state: &AuthState) {
                     events.session_changed(requirement_id);
                 }
                 if let Some(command) = item.command {
+                    // Claim commits Running/current-attempt before this best-effort send;
+                    // durable outbox replay owns later delivery without another attempt.
                     if let Err(error) = runtime.dispatch_pinned_command(&command).await {
                         eprintln!("retry dispatch failed: {error:?}");
                     }

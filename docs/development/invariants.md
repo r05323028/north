@@ -41,8 +41,8 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Browser SSE is notification; reconnect/refocus/hints refetch canonical API state | Partially Enforced | authenticated `/events`, post-commit identity hints, lagged-stream termination, workspace hook/unit/Playwright coverage; full server-backed assembled E2E remains pending |
 | Clarification mutation identity is explicit and stale runs cannot be retargeted | Enforced | public `ClarificationRun.run_id`/wire session projection, explicit dispatch/cancel URLs, server run binding, and web/API tests |
 | Requester message persistence is independent from runtime intent | Enforced | persistence-only conversation POST, explicit start/dispatch operations, component/API tests, and server integration coverage |
-| Daemon reports facts/events; server owns business transitions | Partially Enforced | server-owned clarification event projection, attempt/retry transactions, durable due worker, and unit tests; PostgreSQL race/restart execution pending |
-| Server is sole owner of durable business state | Partially Enforced | dependency boundaries plus transactional execution-attempt/retry state, outbox scheduling, and targeted tests; PostgreSQL execution proof pending |
+| Daemon reports facts/events; server owns business transitions | Partially Enforced | server-owned clarification event projection, attempt/retry transactions, durable due worker, and unit tests; PostgreSQL retry race/restart execution runs in `retry_authority`; broader domain transitions remain separately covered |
+| Server is sole owner of durable business state | Partially Enforced | dependency boundaries plus transactional execution-attempt/retry state, outbox scheduling, and targeted tests; PostgreSQL retry-state execution proof runs in `retry_authority`; this change does not exhaustively prove every durable state path |
 | Setup approval state changes require authenticated same-origin POST | Enforced | read-only approval GET, Origin/Host validation, and PostgreSQL HTTP-boundary tests |
 | Public auth/setup request endpoints have resource-aware abuse limits | Specified | `harden-public-endpoint-abuse-protection`; normalized effective address, IPv4 `/32`/IPv6 `/64` primary key, durable setup quota, proxy, 429, and concurrency proofs pending |
 | Every server command is durable before dispatch and idempotent at daemon boundary | Enforced | immutable outbox transaction, payload digest, daemon Journal, stable command/runtime identity, and duplicate suppression |
@@ -56,10 +56,10 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Expired daemon setup rows have bounded retention | Partially Enforced | indexed 24-hour retention and 100-row opportunistic cleanup on setup create/poll; no scheduler in 0.1.0 |
 | Setup claim response is retry-idempotent after a lost response | Specified | accepted 0.1.0 one-shot claim trade-off; no plaintext credential recovery |
 | Daemon credentials are user-owned; Admin/Owner revocation cuts access | Enforced | migration 0007, device-flow claim, authenticated WS registration, owner/admin revoke routes, per-frame connection revalidation, and PostgreSQL integration coverage |
-| Server owns execution state, retry budget, attempt count, and terminal Failed | Partially Enforced | migration 0016, locked due-row worker, current-attempt transactions, safe failure policy, and targeted unit/integration paths; DB run pending |
+| Server owns execution state, retry budget, attempt count, and terminal Failed | Partially Enforced | migration 0016, locked due-row worker, current-attempt transactions, safe failure policy, and targeted unit/integration paths; PostgreSQL retry-state proof runs in `retry_authority` |
 | Daemon has no business retry policy authority | Enforced | daemon reports failure facts and retains local context; server alone budgets, schedules, pins, and terminalizes attempts |
-| Execution failure never mutates Requirement lifecycle state | Partially Enforced | failure projection updates execution sessions/attempts only; requirement transition path remains separate; DB isolation run pending |
-| Retry-waiting runs retain sequential slot; terminal failure releases it | Partially Enforced | partial unique clarification slot index plus Retrying active projection and local terminal cancellation; DB concurrency run pending |
+| Execution failure never mutates Requirement lifecycle state | Partially Enforced | failure projection updates execution sessions/attempts only; requirement transition path remains separate; PostgreSQL Requirement-isolation proof runs in `retry_authority` |
+| Retry-waiting runs retain sequential slot; terminal failure releases it | Partially Enforced | partial unique clarification slot index plus Retrying active projection and local terminal cancellation; PostgreSQL slot/cancellation/concurrency proof runs in `retry_authority` |
 
 ## Repository access
 

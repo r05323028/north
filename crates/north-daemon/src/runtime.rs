@@ -1770,6 +1770,19 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         )?
         .with_agent_command(command);
         let facts = second.dispatch(RuntimeInput {
+            operation_id: "resume-operation".into(),
+            session_id: "session-1".into(),
+            command: RuntimeCommand::Resume,
+        })?;
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            RuntimeFact::Assessed {
+                requirement_id,
+                requirement_revision: 3,
+                ..
+            } if requirement_id == "requirement-1"
+        )));
+        let facts = second.dispatch(RuntimeInput {
             operation_id: "message-operation".into(),
             session_id: "session-1".into(),
             command: RuntimeCommand::Message {
@@ -1786,6 +1799,119 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
             } if requirement_id == "requirement-1"
         )));
         assert!(second.context_path("session-1").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn retryable_failure_retains_context_for_resume() -> Result<(), Box<dyn std::error::Error>> {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let directory = tempfile::tempdir()?;
+        let command = directory.path().join("fake-pi");
+        fs::write(&command, "#!/bin/sh\nexit 17\n")?;
+        let mut permissions = fs::metadata(&command)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&command, permissions)?;
+        let adapter = PiClarificationAdapter::new(
+            RepositoryInspector::new(
+                directory.path().join("cache"),
+                directory.path().join("workspaces"),
+            )?,
+            directory.path().join("sessions"),
+        )?
+        .with_agent_command(command);
+        let start = RuntimeInput {
+            operation_id: "start-operation".into(),
+            session_id: "session-1".into(),
+            command: RuntimeCommand::Start {
+                requirement: RequirementSnapshot {
+                    id: "requirement-1".into(),
+                    revision: 3,
+                    title: "Title".into(),
+                    description: "Description".into(),
+                    summary: "Summary".into(),
+                    acceptance_criteria: vec!["Criterion".into()],
+                    assumptions: vec!["Assumption".into()],
+                    open_questions: vec!["Question".into()],
+                },
+                conversation: Vec::new(),
+                repositories: Vec::new(),
+            },
+        };
+        assert!(adapter.dispatch(start).is_err());
+        let context_path = adapter.context_path("session-1");
+        let retained: AssessmentContext = serde_json::from_slice(&fs::read(&context_path)?)?;
+        assert!(!retained.in_flight);
+        assert_eq!(
+            retained
+                .context
+                .as_ref()
+                .map(|context| context.requirement.id.as_str()),
+            Some("requirement-1")
+        );
+        assert!(adapter
+            .dispatch(RuntimeInput {
+                operation_id: "resume-operation".into(),
+                session_id: "session-1".into(),
+                command: RuntimeCommand::Resume,
+            })
+            .is_err());
+        let retained_after_resume: AssessmentContext =
+            serde_json::from_slice(&fs::read(&context_path)?)?;
+        assert!(!retained_after_resume.in_flight);
+        assert_eq!(
+            retained_after_resume
+                .context
+                .as_ref()
+                .map(|context| context.requirement.revision),
+            Some(3)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resume_rejects_missing_or_corrupt_retained_context() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::fs;
+
+        let directory = tempfile::tempdir()?;
+        let adapter = PiClarificationAdapter::new(
+            RepositoryInspector::new(
+                directory.path().join("cache"),
+                directory.path().join("workspaces"),
+            )?,
+            directory.path().join("sessions"),
+        )?;
+        let missing = match adapter.dispatch(RuntimeInput {
+            operation_id: "missing-operation".into(),
+            session_id: "missing-session".into(),
+            command: RuntimeCommand::Resume,
+        }) {
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "missing retained context unexpectedly succeeded",
+                )
+                .into())
+            }
+            Err(error) => error,
+        };
+        assert!(missing.to_string().contains("no retained session context"));
+
+        fs::write(adapter.context_path("corrupt-session"), b"{")?;
+        let corrupt = match adapter.dispatch(RuntimeInput {
+            operation_id: "corrupt-operation".into(),
+            session_id: "corrupt-session".into(),
+            command: RuntimeCommand::Resume,
+        }) {
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "corrupt retained context unexpectedly succeeded",
+                )
+                .into())
+            }
+            Err(error) => error,
+        };
+        assert!(corrupt.to_string().contains("parse Pi session context"));
         Ok(())
     }
 
@@ -1939,6 +2065,7 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         assert_eq!(outcome, crate::journal::DispatchOutcome::DispatchSucceeded);
         assert!(matches!(events.as_slice(), [Event::SessionCompleted(_)]));
         worker.join().expect("join cancellation worker");
+        assert!(!adapter.context_path("session-1").exists());
         Ok(())
     }
 

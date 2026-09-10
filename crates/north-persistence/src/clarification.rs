@@ -1301,6 +1301,8 @@ impl AuthStore {
             return Err(ClarificationError::InvalidContext);
         }
         let mut transaction = self.pool.begin().await?;
+        // PostgreSQL row locks coordinate claims across independent pools and
+        // server instances; SKIP LOCKED makes competing workers skip locked rows.
         let rows = sqlx::query_as::<_, DueRetryRow>(
             "SELECT id, requirement_id, daemon_id, attempt_count, max_attempts,
                     cancel_requested

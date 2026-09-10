@@ -41,6 +41,14 @@ async fn test_pool() -> PgPool {
     pool
 }
 
+async fn independent_worker_pool() -> Result<PgPool, Box<dyn std::error::Error>> {
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")?;
+    Ok(PoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?)
+}
+
 fn unique_id(prefix: &str) -> String {
     format!(
         "{prefix}-{}",
@@ -279,7 +287,8 @@ fn hello(daemon_id: &str, credential: &str) -> DaemonFrame {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
-async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe() {
+async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
+) -> Result<(), Box<dyn std::error::Error>> {
     let _database_test_guard = database_test_lock().await;
     let pool = test_pool().await;
     let fixture = retry_fixture(&pool, "retry-claim").await;
@@ -361,15 +370,24 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe() {
     assert_eq!(persisted.attempt_count, 1);
     assert!(persisted.assigned());
 
+    let left_pool = independent_worker_pool().await?;
+    let right_pool = independent_worker_pool().await?;
+    let left_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&left_pool)
+        .await?;
+    let right_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&right_pool)
+        .await?;
+    assert_ne!(left_pid, right_pid);
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let left_barrier = barrier.clone();
-    let left_store = AuthStore::new(pool.clone());
+    let left_store = AuthStore::new(left_pool);
     let left = tokio::spawn(async move {
         left_barrier.wait().await;
         left_store.claim_due_retries(1, resume_payload).await
     });
     let right_barrier = barrier.clone();
-    let right_store = AuthStore::new(pool.clone());
+    let right_store = AuthStore::new(right_pool);
     let right = tokio::spawn(async move {
         right_barrier.wait().await;
         right_store.claim_due_retries(1, resume_payload).await
@@ -428,6 +446,7 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe() {
             .expect("count committed commands");
     assert_eq!(attempt_rows, 2);
     assert_eq!(command_rows, 2);
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -858,7 +877,7 @@ async fn postgres_retry_exhaustion_and_unknown_outcomes_are_terminal_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
-async fn postgres_reconnected_pinned_daemon_receives_durable_retry_resume() {
+async fn postgres_retry_dispatch_failure_redelivers_same_pinned_command() {
     let _database_test_guard = database_test_lock().await;
     let pool = test_pool().await;
     let fixture = retry_fixture(&pool, "retry-reconnect").await;
@@ -883,6 +902,52 @@ async fn postgres_reconnected_pinned_daemon_receives_durable_retry_resume() {
         .find_map(|item| item.command)
         .expect("durable resume command");
     assert_eq!(resume.daemon_id, fixture.daemon_id);
+
+    let runtime = north_server::daemon::DaemonRuntime::new(fixture.store.clone());
+    assert!(matches!(
+        runtime.dispatch_pinned_command(&resume).await,
+        Err(north_server::daemon::DaemonDispatchError::DaemonUnavailable)
+    ));
+    let next_poll = fixture
+        .store
+        .claim_due_retries(1, resume_payload)
+        .await
+        .expect("claim after dispatch failure");
+    assert!(next_poll.is_empty());
+    let (state, attempt_count, current_attempt_id): (String, i64, Option<String>) = sqlx::query_as(
+        "SELECT state, attempt_count, current_attempt_id
+             FROM execution_sessions WHERE id = $1",
+    )
+    .bind(&fixture.session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read committed retry after dispatch failure");
+    assert_eq!(state, "Running");
+    assert_eq!(attempt_count, 2);
+    let (attempt_id, attempt_command_id): (String, String) = sqlx::query_as(
+        "SELECT id, command_id FROM execution_attempts
+         WHERE session_id = $1 AND attempt_number = 2",
+    )
+    .bind(&fixture.session_id)
+    .fetch_one(&pool)
+    .await
+    .expect("read committed retry attempt");
+    assert_eq!(current_attempt_id.as_deref(), Some(attempt_id.as_str()));
+    assert_eq!(attempt_command_id, resume.command_id);
+    let attempt_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+            .bind(&fixture.session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count attempts after dispatch failure");
+    let command_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+            .bind(&fixture.session_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count commands after dispatch failure");
+    assert_eq!(attempt_rows, 2);
+    assert_eq!(command_rows, 2);
 
     let app = north_server::build_app(pool.clone(), Arc::new(north_server::LogCodeDelivery))
         .await
