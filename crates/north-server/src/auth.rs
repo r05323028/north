@@ -237,8 +237,8 @@ fn start_retry_worker(state: &AuthState) {
                     // durable outbox replay owns later delivery without another attempt.
                     if let Err(error) = runtime.dispatch_pinned_command(&command).await {
                         eprintln!(
-                            "retry dispatch failed session_id={} command_id={} daemon_id={}: {error:?}",
-                            command.session_id, command.command_id, command.daemon_id
+                            "retry dispatch failed command_id={} daemon_id={}: {error:?}",
+                            command.command_id, command.daemon_id
                         );
                     }
                 }
