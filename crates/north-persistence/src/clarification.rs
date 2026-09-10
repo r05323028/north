@@ -252,6 +252,9 @@ impl RunRow {
         let phase = match (self.state.as_str(), self.daemon_id.is_some()) {
             ("Completed" | "Failed", _) => ClarificationPhase::Terminal,
             ("Idle", false) => ClarificationPhase::AwaitingAssignment,
+            // Logical run lifecycle, not daemon transport `ConnectionPhase::Active`.
+            // Retrying stays slot-occupying with no current attempt until
+            // `claim_due_retries` durably creates `session.resume`.
             ("Idle" | "Running" | "Retrying", true) => ClarificationPhase::Active,
             _ => return Err(ClarificationError::InvalidSessionState),
         };

@@ -236,7 +236,10 @@ fn start_retry_worker(state: &AuthState) {
                     // Claim commits Running/current-attempt before this best-effort send;
                     // durable outbox replay owns later delivery without another attempt.
                     if let Err(error) = runtime.dispatch_pinned_command(&command).await {
-                        eprintln!("retry dispatch failed: {error:?}");
+                        eprintln!(
+                            "retry dispatch failed session_id={} command_id={} daemon_id={}: {error:?}",
+                            command.session_id, command.command_id, command.daemon_id
+                        );
                     }
                 }
             }
