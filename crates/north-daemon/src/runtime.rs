@@ -437,6 +437,22 @@ impl PiClarificationAdapter {
         control: &RuntimeControl,
     ) -> Result<Vec<RuntimeFact>, RuntimeOperationError> {
         check_cancellation(control)?;
+        let mut assessment = AssessmentContext {
+            requirement_id: start.requirement.id.clone(),
+            requirement_revision: start.requirement.revision,
+            repositories_reviewed: Vec::new(),
+            evidence: Vec::new(),
+            context: Some(start.clone()),
+            in_flight: true,
+        };
+        self.persist_context(&input.session_id, &assessment)
+            .map_err(RuntimeOperationError::from)?;
+        self.sessions
+            .lock()
+            .map_err(|_| {
+                RuntimeOperationError::from(RuntimeError::new("Pi session state lock poisoned"))
+            })?
+            .insert(input.session_id.clone(), assessment.clone());
         let sources = start
             .repositories
             .iter()
@@ -491,14 +507,8 @@ impl PiClarificationAdapter {
         }
         check_cancellation(control)?;
 
-        let mut assessment = AssessmentContext {
-            requirement_id: start.requirement.id.clone(),
-            requirement_revision: start.requirement.revision,
-            repositories_reviewed: reviewed.clone(),
-            evidence: evidence.clone(),
-            context: Some(start.clone()),
-            in_flight: true,
-        };
+        assessment.repositories_reviewed = reviewed.clone();
+        assessment.evidence = evidence.clone();
         self.persist_context(&input.session_id, &assessment)
             .map_err(RuntimeOperationError::from)?;
         self.sessions
@@ -613,12 +623,32 @@ impl PiClarificationAdapter {
         ))
     }
 
+    fn retain_context_after_error(&self, session_id: &str) -> Result<(), RuntimeError> {
+        let Some(mut context) = self.load_context(session_id)? else {
+            return Ok(());
+        };
+        context.in_flight = false;
+        self.persist_context(session_id, &context)?;
+        self.sessions
+            .lock()
+            .map_err(|_| RuntimeError::new("Pi session state lock poisoned"))?
+            .insert(session_id.to_owned(), context);
+        Ok(())
+    }
+
     fn cleanup_after_error(
         &self,
         session_id: &str,
         error: RuntimeOperationError,
     ) -> RuntimeOperationError {
-        match self.clear_session(session_id) {
+        let terminal = matches!(&error, RuntimeOperationError::Cancelled)
+            || error.to_string().contains("execution_outcome_unknown");
+        let cleanup = if terminal {
+            self.clear_session(session_id)
+        } else {
+            self.retain_context_after_error(session_id)
+        };
+        match cleanup {
             Ok(()) => error,
             Err(cleanup) => {
                 RuntimeOperationError::Failed(RuntimeError::new(format!("{error}; {cleanup}",)))
@@ -751,7 +781,20 @@ impl PiClarificationAdapter {
             RuntimeCommand::Cancel { reason } => self.cancel(&input, &reason, control),
             RuntimeCommand::Resume => {
                 check_cancellation(control)?;
-                Ok(Vec::new())
+                let context = self
+                    .load_context(&input.session_id)
+                    .map_err(RuntimeOperationError::from)?
+                    .ok_or_else(|| {
+                        RuntimeOperationError::Failed(RuntimeError::new(
+                            "Pi clarification resume has no retained session context",
+                        ))
+                    })?;
+                let start = context.context.ok_or_else(|| {
+                    RuntimeOperationError::Failed(RuntimeError::new(
+                        "Pi clarification resume has no immutable start context",
+                    ))
+                })?;
+                self.start(&input, start, control)
             }
         };
         if control.is_cancellation_requested() && !cancellation_command {
@@ -1727,6 +1770,19 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         )?
         .with_agent_command(command);
         let facts = second.dispatch(RuntimeInput {
+            operation_id: "resume-operation".into(),
+            session_id: "session-1".into(),
+            command: RuntimeCommand::Resume,
+        })?;
+        assert!(facts.iter().any(|fact| matches!(
+            fact,
+            RuntimeFact::Assessed {
+                requirement_id,
+                requirement_revision: 3,
+                ..
+            } if requirement_id == "requirement-1"
+        )));
+        let facts = second.dispatch(RuntimeInput {
             operation_id: "message-operation".into(),
             session_id: "session-1".into(),
             command: RuntimeCommand::Message {
@@ -1743,6 +1799,119 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
             } if requirement_id == "requirement-1"
         )));
         assert!(second.context_path("session-1").is_file());
+        Ok(())
+    }
+
+    #[test]
+    fn retryable_failure_retains_context_for_resume() -> Result<(), Box<dyn std::error::Error>> {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let directory = tempfile::tempdir()?;
+        let command = directory.path().join("fake-pi");
+        fs::write(&command, "#!/bin/sh\nexit 17\n")?;
+        let mut permissions = fs::metadata(&command)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&command, permissions)?;
+        let adapter = PiClarificationAdapter::new(
+            RepositoryInspector::new(
+                directory.path().join("cache"),
+                directory.path().join("workspaces"),
+            )?,
+            directory.path().join("sessions"),
+        )?
+        .with_agent_command(command);
+        let start = RuntimeInput {
+            operation_id: "start-operation".into(),
+            session_id: "session-1".into(),
+            command: RuntimeCommand::Start {
+                requirement: RequirementSnapshot {
+                    id: "requirement-1".into(),
+                    revision: 3,
+                    title: "Title".into(),
+                    description: "Description".into(),
+                    summary: "Summary".into(),
+                    acceptance_criteria: vec!["Criterion".into()],
+                    assumptions: vec!["Assumption".into()],
+                    open_questions: vec!["Question".into()],
+                },
+                conversation: Vec::new(),
+                repositories: Vec::new(),
+            },
+        };
+        assert!(adapter.dispatch(start).is_err());
+        let context_path = adapter.context_path("session-1");
+        let retained: AssessmentContext = serde_json::from_slice(&fs::read(&context_path)?)?;
+        assert!(!retained.in_flight);
+        assert_eq!(
+            retained
+                .context
+                .as_ref()
+                .map(|context| context.requirement.id.as_str()),
+            Some("requirement-1")
+        );
+        assert!(adapter
+            .dispatch(RuntimeInput {
+                operation_id: "resume-operation".into(),
+                session_id: "session-1".into(),
+                command: RuntimeCommand::Resume,
+            })
+            .is_err());
+        let retained_after_resume: AssessmentContext =
+            serde_json::from_slice(&fs::read(&context_path)?)?;
+        assert!(!retained_after_resume.in_flight);
+        assert_eq!(
+            retained_after_resume
+                .context
+                .as_ref()
+                .map(|context| context.requirement.revision),
+            Some(3)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resume_rejects_missing_or_corrupt_retained_context() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::fs;
+
+        let directory = tempfile::tempdir()?;
+        let adapter = PiClarificationAdapter::new(
+            RepositoryInspector::new(
+                directory.path().join("cache"),
+                directory.path().join("workspaces"),
+            )?,
+            directory.path().join("sessions"),
+        )?;
+        let missing = match adapter.dispatch(RuntimeInput {
+            operation_id: "missing-operation".into(),
+            session_id: "missing-session".into(),
+            command: RuntimeCommand::Resume,
+        }) {
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "missing retained context unexpectedly succeeded",
+                )
+                .into())
+            }
+            Err(error) => error,
+        };
+        assert!(missing.to_string().contains("no retained session context"));
+
+        fs::write(adapter.context_path("corrupt-session"), b"{")?;
+        let corrupt = match adapter.dispatch(RuntimeInput {
+            operation_id: "corrupt-operation".into(),
+            session_id: "corrupt-session".into(),
+            command: RuntimeCommand::Resume,
+        }) {
+            Ok(_) => {
+                return Err(std::io::Error::other(
+                    "corrupt retained context unexpectedly succeeded",
+                )
+                .into())
+            }
+            Err(error) => error,
+        };
+        assert!(corrupt.to_string().contains("parse Pi session context"));
         Ok(())
     }
 
@@ -1896,6 +2065,7 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         assert_eq!(outcome, crate::journal::DispatchOutcome::DispatchSucceeded);
         assert!(matches!(events.as_slice(), [Event::SessionCompleted(_)]));
         worker.join().expect("join cancellation worker");
+        assert!(!adapter.context_path("session-1").exists());
         Ok(())
     }
 

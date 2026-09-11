@@ -15,6 +15,11 @@ function run(overrides: Partial<ClarificationRun> = {}): ClarificationRun {
     phase: "active",
     status: "running",
     cancel_requested: false,
+    attempt_count: 1,
+    next_retry_at: null,
+    failure_reason: null,
+    retrying: false,
+    failed: false,
     created_at: "now",
     updated_at: "now",
     last_activity_at: "now",
@@ -46,6 +51,20 @@ describe("clarification composer intent", () => {
     });
   });
 
+  it("blocks dispatch while retry is waiting", () => {
+    const retrying = run({
+      status: "retrying",
+      retrying: true,
+      attempt_count: 2,
+      next_retry_at: "2026-01-03T00:00:05Z",
+    });
+    expect(clarificationIntent(retrying)).toEqual({
+      kind: "blocked",
+      reason: "retrying",
+    });
+    expect(runStatusMessage(retrying)).toContain("Attempt 2");
+  });
+
   it("allows a new start only after terminal outcome", () => {
     expect(clarificationIntent(run({ phase: "terminal" }))).toEqual({
       kind: "start",
@@ -59,5 +78,15 @@ describe("clarification composer intent", () => {
     expect(
       runStatusMessage(run({ phase: "terminal", status: "completed" })),
     ).toContain("Readiness");
+    expect(
+      runStatusMessage(
+        run({
+          phase: "terminal",
+          status: "failed",
+          failed: true,
+          failure_reason: "retry_exhausted",
+        }),
+      ),
+    ).toContain("retry_exhausted");
   });
 });

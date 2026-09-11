@@ -27,6 +27,11 @@ const run = {
   phase: "active",
   status: "running",
   cancel_requested: false,
+  attempt_count: 1,
+  next_retry_at: null,
+  failure_reason: null,
+  retrying: false,
+  failed: false,
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
   last_activity_at: "2026-01-01T00:00:00Z",
@@ -72,7 +77,12 @@ describe("shared browser contracts", () => {
       () => parseMessage({ ...message, kind: "clarification_question" }),
     ],
     ["run phase", () => parseClarificationRun({ ...run, phase: "queued" })],
-    ["run status", () => parseClarificationRun({ ...run, status: "failed" })],
+    ["run status", () => parseClarificationRun({ ...run, status: "broken" })],
+    [
+      "safe failure reason",
+      () =>
+        parseClarificationRun({ ...run, failure_reason: "raw runtime detail" }),
+    ],
     [
       "role",
       () =>

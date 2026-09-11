@@ -11,7 +11,10 @@ export type ComposerMode =
 export type ClarificationIntent =
   | { kind: "start" }
   | { kind: "dispatch"; run_id: string }
-  | { kind: "blocked"; reason: "awaiting_assignment" | "cancellation_pending" };
+  | {
+      kind: "blocked";
+      reason: "awaiting_assignment" | "cancellation_pending" | "retrying";
+    };
 
 export function composerMode(run: ClarificationRun | null): ComposerMode {
   if (!run) return "idle";
@@ -33,6 +36,9 @@ export function clarificationIntent(
   if (run.cancel_requested) {
     return { kind: "blocked", reason: "cancellation_pending" };
   }
+  if (run.retrying || run.status === "retrying") {
+    return { kind: "blocked", reason: "retrying" };
+  }
   return { kind: "dispatch", run_id: run.run_id };
 }
 
@@ -41,21 +47,28 @@ export function runStatusMessage(run: ClarificationRun | null): string {
   if (run.phase === "awaiting_assignment") {
     return "Runtime assignment unavailable. Retry same clarification or cancel.";
   }
-  if (run.phase === "active" && run.cancel_requested) {
-    return "Cancellation pending. Wait for canonical runtime completion.";
+  if (run.phase === "active") {
+    if (run.cancel_requested) {
+      return "Cancellation pending. Wait for canonical runtime completion.";
+    }
+    if (run.status === "unavailable") {
+      return "Pinned runtime unavailable. Later messages remain bound to this run.";
+    }
+    if (run.retrying || run.status === "retrying") {
+      return `Clarification retrying. Attempt ${run.attempt_count} is waiting for next run.`;
+    }
+    return "Clarification active";
   }
-  if (run.phase === "active" && run.status === "unavailable") {
-    return "Pinned runtime unavailable. Later messages remain bound to this run.";
-  }
-  if (run.phase === "active") return "Clarification active";
-  if (run.cancel_requested && run.status === "completed") {
-    return "Cancellation completed";
-  }
-  if (run.cancel_requested && run.status === "unavailable") {
-    return "Cancellation failed or unavailable";
+  if (run.cancel_requested) {
+    return run.status === "completed"
+      ? "Cancellation completed"
+      : "Cancellation failed or unavailable";
   }
   if (run.status === "completed") {
     return "Clarification completed. Readiness is assessed separately.";
+  }
+  if (run.failed && run.failure_reason) {
+    return `Clarification failed: ${run.failure_reason}. Start new clarification to retry.`;
   }
   return "Clarification failed or unavailable";
 }

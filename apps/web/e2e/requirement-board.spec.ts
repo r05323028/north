@@ -322,8 +322,19 @@ type WorkspaceRunFixture = {
   requirement_id: string;
   start_message_id: string;
   phase: "awaiting_assignment" | "active" | "terminal";
-  status: "starting" | "running" | "completed" | "unavailable";
+  status:
+    | "starting"
+    | "running"
+    | "retrying"
+    | "completed"
+    | "failed"
+    | "unavailable";
   cancel_requested: boolean;
+  attempt_count: number;
+  next_retry_at: string | null;
+  failure_reason: string | null;
+  retrying: boolean;
+  failed: boolean;
   created_at: string;
   updated_at: string;
   last_activity_at: string;
@@ -484,6 +495,11 @@ test("direct workspace loads canonical bundle and uses explicit start, dispatch,
           phase: "active",
           status: "starting",
           cancel_requested: false,
+          attempt_count: 1,
+          next_retry_at: null,
+          failure_reason: null,
+          retrying: false,
+          failed: false,
           created_at: "2026-01-01T00:01:00Z",
           updated_at: "2026-01-01T00:01:00Z",
           last_activity_at: "2026-01-01T00:01:00Z",
@@ -594,6 +610,11 @@ test("workspace browser states support reload retry, cancellation pending, termi
     phase: "awaiting_assignment",
     status: "unavailable",
     cancel_requested: false,
+    attempt_count: 0,
+    next_retry_at: null,
+    failure_reason: null,
+    retrying: false,
+    failed: false,
     created_at: "2026-01-01T00:01:00Z",
     updated_at: "2026-01-01T00:01:00Z",
     last_activity_at: "2026-01-01T00:01:00Z",
@@ -689,6 +710,11 @@ test("workspace browser states support reload retry, cancellation pending, termi
             phase: "awaiting_assignment",
             status: "unavailable",
             cancel_requested: false,
+            attempt_count: 0,
+            next_retry_at: null,
+            failure_reason: null,
+            retrying: false,
+            failed: false,
             created_at: "2026-01-01T00:03:00Z",
             updated_at: "2026-01-01T00:03:00Z",
             last_activity_at: "2026-01-01T00:03:00Z",

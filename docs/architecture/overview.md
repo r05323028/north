@@ -23,10 +23,10 @@
   `clarification/start` is the only identity-creating call; active dispatch and
   cancellation carry that run ID explicitly. The wire `session` wrapper remains
   a compatibility detail.
-- Server owns durable business state, session ownership, and command outbox.
-  Daemon reports clarification execution facts and owns local transport/runtime
-  recovery. Durable retry policy is **Specified — implementation pending** in
-  `execution-retry-authority`, not current daemon behavior.
+- Server owns durable business state, session ownership, command outbox, and
+  execution retry policy. Daemon reports clarification execution facts and owns
+  local transport/runtime recovery; due retries become explicit pinned
+  `session.resume` commands.
 - Human review is **Enforced** in the canonical `/requirements/[id]`
   workspace. The browser loads Review Packet truth, sends lifecycle-specific
   mutation identities, repairs stale state through canonical HTTP, and requires
@@ -44,8 +44,8 @@
 | Crate | Responsibility |
 | --- | --- |
 | north-domain | requirements, lifecycle, readiness, roles — pure logic |
-| north-server | HTTP/SSE API, auth, sessions, business transitions, command outbox, daemon routing, and landed clarification projections |
-| north-daemon | daemon-initiated connection, durable transport journal, landed Pi clarification runtime, fact/event reporting, and authorized repository inspection |
+| north-server | HTTP/SSE API, auth, sessions, business transitions, command outbox, daemon routing, clarification projections, and retry policy |
+| north-daemon | daemon-initiated connection, durable transport journal, landed Pi clarification runtime, fact/event reporting, authorized repository inspection, and local resume mechanics |
 | north-protocol | command/event/control envelopes and compatibility metadata only |
 | north-persistence | SQL storage and transactional row↔domain mapping |
 
