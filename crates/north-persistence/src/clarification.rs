@@ -1131,11 +1131,15 @@ impl AuthStore {
             ClarificationEvent::Activity { activity } => {
                 sqlx::query(
                     "INSERT INTO clarification_activities
-                        (event_id, session_id, activity) VALUES ($1, $2, $3)",
+                        (event_id, session_id, activity, expires_at)
+                     VALUES ($1, $2, $3,
+                         CURRENT_TIMESTAMP
+                         + ($4::double precision * INTERVAL '1 second'))",
                 )
                 .bind(event_id)
                 .bind(session_id)
                 .bind(activity)
+                .bind(self.retention.retention_seconds())
                 .execute(&mut *transaction)
                 .await?;
                 touch_session(&mut transaction, session_id).await?;

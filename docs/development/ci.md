@@ -10,7 +10,7 @@ checks, never replacements.
 | `pr-title` | PR title must be a Conventional Commit (squash-merge makes it the canonical subject on `main`) |
 | `rust` | fmt --check · clippy `-D warnings` · unit tests + architecture checks |
 | `rust-coverage` | Rust workspace LCOV coverage upload |
-| `daemon-integration` | PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository, and durable protocol integration tests |
+| `daemon-integration` | PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository, runtime activity retention, and durable protocol integration tests |
 | `web` | lint · typecheck · production build (`apps/web`) |
 | `web-e2e` | Playwright Board/List/create/detail and SSE browser-boundary workflows on `ubuntu-latest` |
 | `web-coverage` | Frontend Vitest LCOV coverage upload |

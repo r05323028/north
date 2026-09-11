@@ -18,6 +18,7 @@ mod delivery;
 mod readiness;
 mod repositories;
 mod requirements;
+mod retention;
 
 pub use clarification::{
     ClarificationActivity, ClarificationCommandResult, ClarificationError, ClarificationEvent,
@@ -43,6 +44,10 @@ pub use repositories::{repository_metadata, RepositoryRecord};
 pub use requirements::{
     RequirementError, RequirementListQuery, RequirementRecord, RequirementSort,
     RequirementTransition,
+};
+pub use retention::{
+    RetentionConfig, RetentionConfigError, DEFAULT_RETENTION_BATCH_SIZE, DEFAULT_RETENTION_SECONDS,
+    DEFAULT_RETENTION_SWEEP_SECONDS, MAX_RETENTION_BATCH_SIZE,
 };
 
 pub use sqlx::postgres::PgPoolOptions as PoolOptions;
@@ -184,11 +189,25 @@ pub struct AuthenticatedSession {
 #[derive(Clone)]
 pub struct AuthStore {
     pool: PgPool,
+    retention: RetentionConfig,
 }
 
 impl AuthStore {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            retention: RetentionConfig::default(),
+        }
+    }
+
+    /// Build a store with explicit validated retention settings.
+    pub fn with_retention(pool: PgPool, retention: RetentionConfig) -> Self {
+        Self { pool, retention }
+    }
+
+    /// Retention settings applied to ephemeral telemetry writes and sweeps.
+    pub fn retention(&self) -> RetentionConfig {
+        self.retention
     }
 
     pub fn pool(&self) -> &PgPool {

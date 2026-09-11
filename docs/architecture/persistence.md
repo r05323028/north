@@ -28,7 +28,10 @@ event identity/outcome records. Migration 0015 adds clarification-run context, c
 activity records. Migration 0016 adds durable attempt rows, bounded failure
 classes, snapshotted retry limits, `attempt_count`, `current_attempt_id`, and
 indexed `next_retry_at`; legacy starts are backfilled conservatively, including
-compacted starts whose payload is gone. Readiness evidence rows are append-only;
+compacted starts whose payload is gone. Migration 0017 adds ephemeral activity
+retention: `clarification_activities.expires_at`, a deterministic 7-day
+backfill, NOT NULL enforcement, and an `(expires_at, id)` sweep index.
+Readiness evidence rows are append-only;
 database triggers reject direct mutation of evidence, repository source identity,
 and command outbox payloads. Requirement delete is restrictive so evidence never
 changes via a cascade. Requirements with readiness evidence must be retained (or
@@ -71,7 +74,33 @@ created. Verification codes commit failed-attempt counts under row lock and are
 consumed after five failures. Setup rows older than 24 hours are removed in
 bounded batches using an expiry index when setup requests are created or polled.
 
-| Ephemeral (TTL) | runtime events, tool activity, transient execution logs | GC'd by a boring TTL job; expiry must never invalidate a Requirement |
+| Ephemeral (TTL) | `clarification_activities` (coarse agent/tool activity; observability only) | only allowlisted table; swept by bounded expiry GC; expiry must never invalidate a Requirement |
+
+Only tables on the explicit ephemeral allowlist may be swept; the 0.1.0
+allowlist contains exactly `clarification_activities`. New tables are durable
+by default because retention is a named persistence operation with fixed SQL
+and no generic deletion surface. Each activity row stores `expires_at` from
+the configured retention window (default 7 days); eligibility is
+`expires_at <= CURRENT_TIMESTAMP`. One scheduler cycle runs batch-bounded
+sweeps (default 500 rows per pass, at most 20 passes per cycle) ordered by
+`(expires_at, id)` using `FOR UPDATE SKIP LOCKED`, stopping when a pass deletes
+less than a full batch or the pass bound is reached; each pass commits its own
+short transaction, so a cycle recovers from a backlog larger than one batch
+without becoming one large transaction or an unbounded loop. The post-pass
+backlog check is a bounded `LIMIT 1` existence probe, never an exact count.
+Concurrent server instances delete disjoint rows, repeats are idempotent, and a
+cycle that hits the pass bound logs that expired activity rows remain so
+retention lag is observable. A failed cycle is logged and retried on the next
+tick. Invalid retention settings cannot exist: the typed
+configuration constructor rejects a non-positive window or cadence and a
+batch bound outside `1..=1000`, and server startup builds routes through
+`build_app_with_retention` (`build_app` delegates with the defaults).
+Retention changes apply prospectively: persisted rows keep the expiry computed
+when they were written, while the window drives future inserts and the cadence
+and batch bound drive future sweeps. Execution attempts, retry counters and
+limits, `next_retry_at`, current-attempt identity, failure classification,
+outbox rows, dedupe/rejection records, and watermarks are durable
+coordination state and are never retention targets.
 
 The daemon also keeps a local transport journal for command inbox and event
 replay. That journal is not server business state, not `north-persistence`, and
@@ -85,7 +114,11 @@ Invariants:
 
 - Ephemeral runtime data is never the sole source of truth for requirement or
   execution policy state.
-- TTL/GC deletes only ephemeral records; retention window is configuration.
+- TTL/GC deletes only allowlisted ephemeral records; the retention window,
+  cadence, and batch bound are validated configuration, and the persistence
+  API exposes no generic table deletion.
+- Purging every eligible telemetry row must leave canonical product and
+  coordination projections unchanged (amnesia proof).
 - Server command outbox rows are inserted before dispatch and remain eligible
   for resend until `command_ack` is durably recorded. The immutable complete
   envelope, payload digest, ACK processor, contiguous watermark, and ascending

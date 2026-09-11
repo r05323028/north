@@ -186,6 +186,7 @@ impl IntoResponse for AuthHttpError {
 pub fn router(state: AuthState) -> Router {
     state.daemon_runtime().start();
     start_retry_worker(&state);
+    start_retention_worker(&state);
     let public = Router::new()
         .route("/auth/request-code", post(request_code))
         .route("/auth/verify", post(verify_code))
@@ -242,6 +243,36 @@ fn start_retry_worker(state: &AuthState) {
                         );
                     }
                 }
+            }
+        }
+    });
+}
+
+/// Bounded drain of allowlisted ephemeral activity telemetry. The database is
+/// the sole expiry authority; a failed drain is logged and retried next tick.
+/// Each pass is an independent batch-bounded statement, and a cycle that hits
+/// the configured pass bound logs the remaining expired backlog so operators
+/// can detect retention lag.
+fn start_retention_worker(state: &AuthState) {
+    let store = state.store.clone();
+    let config = store.retention();
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(Duration::from_secs(config.sweep_interval_seconds()));
+        loop {
+            ticker.tick().await;
+            match store.drain_expired_clarification_activities().await {
+                Ok(result) if result.deleted == 0 => {}
+                Ok(result) => {
+                    eprintln!(
+                        "retention drain removed {} expired activity rows in {} passes",
+                        result.deleted, result.passes
+                    );
+                    if result.drain_limit_reached {
+                        eprintln!("retention drain limit reached; expired activity rows remain");
+                    }
+                }
+                Err(error) => eprintln!("retention drain failed: {error:?}"),
             }
         }
     });

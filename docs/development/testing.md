@@ -66,7 +66,7 @@ member so `cargo test --workspace` executes it.
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
 | Unit (Web) | Implemented — Vitest via `npm test` in `apps/web` |
-| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, durable coordination, and post-commit browser notification coverage; execute with `NORTH_TEST_DATABASE_URL` |
+| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, durable coordination, runtime activity retention, and post-commit browser notification coverage; execute with `NORTH_TEST_DATABASE_URL` |
 | E2E | Partial — Playwright web-boundary coverage includes Board/List/create/direct workspace, SSE invalidation, and human review; full server-backed assembled workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
@@ -78,7 +78,7 @@ and server integration paths. PostgreSQL restart/concurrency proofs run in
 `retry_authority` and require `NORTH_TEST_DATABASE_URL`; they are skipped only
 when that external database is unavailable.
 
-PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it.
+PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it. Runtime activity retention sweeps, their amnesia proof, and the migration-0017 expiry backfill run in `retention` and `migration_upgrade` under the same prerequisite.
 
 ## Coverage matrix
 
