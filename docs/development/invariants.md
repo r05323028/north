@@ -76,8 +76,8 @@ Specified with the owning change named. Documentation alone is not enforcement.
 
 | Invariant | Status | Enforcement |
 | --- | --- | --- |
-| Ephemeral runtime data never sole source of truth; TTL GC touches ephemeral tables only | Specified | pending introduce-runtime-event-retention |
-| Durable vs ephemeral class split | Specified | docs/architecture/persistence.md; retention implementation pending |
+| Ephemeral runtime data never sole source of truth; TTL GC touches the allowlisted ephemeral class only | Enforced | migration 0017 expiry, named bounded `FOR UPDATE SKIP LOCKED` sweep, and retention sweep tests; the TTL allowlist is exactly `clarification_activities`, with setup-row retention and outbox compaction separately classified by the (file, table) deletion firewall |
+| Durable vs ephemeral class split | Enforced | docs/architecture/persistence.md classification plus amnesia integration proof that purging all activity telemetry leaves every canonical projection unchanged |
 | Durable command/event sequence watermarks survive daemon restart and safe command compaction | Enforced | server execution-session watermarks and daemon Journal persisted high-water/tombstone state |
 
 ## Transport and protocol

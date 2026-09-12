@@ -48,13 +48,6 @@ struct RepositoryRow {
     disabled_at: Option<String>,
 }
 
-fn repository_row_select() -> &'static str {
-    "SELECT id, name, name_normalized, url, description,
-            created_at::text AS created_at, updated_at::text AS updated_at,
-            disabled_at::text AS disabled_at
-     FROM repositories"
-}
-
 pub fn repository_metadata(
     name: &str,
     url: &str,
@@ -97,52 +90,67 @@ impl AuthStore {
         name: &str,
     ) -> Result<Option<RepositoryRecord>, PersistenceError> {
         let normalized = name.trim().to_lowercase();
-        let query = format!("{} WHERE name_normalized = $1", repository_row_select());
-        sqlx::query_as::<_, RepositoryRow>(&query)
-            .bind(normalized)
-            .fetch_optional(&self.pool)
-            .await
-            .map(|row| row.map(Into::into))
-            .map_err(Into::into)
+        sqlx::query_as::<_, RepositoryRow>(
+            "SELECT id, name, name_normalized, url, description,
+                    created_at::text AS created_at, updated_at::text AS updated_at,
+                    disabled_at::text AS disabled_at
+             FROM repositories
+             WHERE name_normalized = $1",
+        )
+        .bind(normalized)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.map(Into::into))
+        .map_err(Into::into)
     }
 
     pub async fn repository_by_id(
         &self,
         repository_id: &str,
     ) -> Result<Option<RepositoryRecord>, PersistenceError> {
-        let query = format!("{} WHERE id = $1", repository_row_select());
-        sqlx::query_as::<_, RepositoryRow>(&query)
-            .bind(repository_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map(|row| row.map(Into::into))
-            .map_err(Into::into)
+        sqlx::query_as::<_, RepositoryRow>(
+            "SELECT id, name, name_normalized, url, description,
+                    created_at::text AS created_at, updated_at::text AS updated_at,
+                    disabled_at::text AS disabled_at
+             FROM repositories
+             WHERE id = $1",
+        )
+        .bind(repository_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.map(Into::into))
+        .map_err(Into::into)
     }
 
     /// Complete Admin/Owner management list, including disabled rows.
     pub async fn list_repositories(&self) -> Result<Vec<RepositoryRecord>, PersistenceError> {
-        let query = format!(
-            "{} ORDER BY name_normalized ASC, id ASC",
-            repository_row_select()
-        );
-        sqlx::query_as::<_, RepositoryRow>(&query)
-            .fetch_all(&self.pool)
-            .await
-            .map(|rows| rows.into_iter().map(Into::into).collect())
-            .map_err(Into::into)
+        sqlx::query_as::<_, RepositoryRow>(
+            "SELECT id, name, name_normalized, url, description,
+                    created_at::text AS created_at, updated_at::text AS updated_at,
+                    disabled_at::text AS disabled_at
+             FROM repositories
+             ORDER BY name_normalized ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
+        .map_err(Into::into)
     }
 
     /// Internal enabled-only catalog for server-assembled runtime context.
     pub async fn active_repositories(&self) -> Result<Vec<RepositoryRecord>, PersistenceError> {
-        let query = format!(
-            "{} WHERE disabled_at IS NULL ORDER BY name_normalized ASC, id ASC",
-            repository_row_select()
-        );
-        sqlx::query_as::<_, RepositoryRow>(&query)
-            .fetch_all(&self.pool)
-            .await
-            .map(|rows| rows.into_iter().map(Into::into).collect())
-            .map_err(Into::into)
+        sqlx::query_as::<_, RepositoryRow>(
+            "SELECT id, name, name_normalized, url, description,
+                    created_at::text AS created_at, updated_at::text AS updated_at,
+                    disabled_at::text AS disabled_at
+             FROM repositories
+             WHERE disabled_at IS NULL
+             ORDER BY name_normalized ASC, id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(Into::into).collect())
+        .map_err(Into::into)
     }
 
     pub async fn update_repository_metadata(
@@ -164,12 +172,17 @@ impl AuthStore {
         url: Option<&str>,
     ) -> Result<RepositoryRecord, PersistenceError> {
         let mut transaction = self.pool.begin().await?;
-        let query = format!("{} WHERE id = $1 FOR UPDATE", repository_row_select());
-        let existing = sqlx::query_as::<_, RepositoryRow>(&query)
-            .bind(repository_id)
-            .fetch_optional(&mut *transaction)
-            .await?
-            .ok_or(PersistenceError::RepositoryNotFound)?;
+        let existing = sqlx::query_as::<_, RepositoryRow>(
+            "SELECT id, name, name_normalized, url, description,
+                    created_at::text AS created_at, updated_at::text AS updated_at,
+                    disabled_at::text AS disabled_at
+             FROM repositories
+             WHERE id = $1 FOR UPDATE",
+        )
+        .bind(repository_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(PersistenceError::RepositoryNotFound)?;
         if let Some(url) = url {
             if url.trim() != existing.url {
                 return Err(PersistenceError::RepositoryUrlImmutable);
@@ -235,36 +248,47 @@ async fn lifecycle_repository(
     enable: bool,
 ) -> Result<RepositoryRecord, PersistenceError> {
     let mut transaction = pool.begin().await?;
-    let query = format!("{} WHERE id = $1 FOR UPDATE", repository_row_select());
-    let existing = sqlx::query_as::<_, RepositoryRow>(&query)
-        .bind(repository_id)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or(PersistenceError::RepositoryNotFound)?;
+    let existing = sqlx::query_as::<_, RepositoryRow>(
+        "SELECT id, name, name_normalized, url, description,
+                created_at::text AS created_at, updated_at::text AS updated_at,
+                disabled_at::text AS disabled_at
+         FROM repositories
+         WHERE id = $1 FOR UPDATE",
+    )
+    .bind(repository_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(PersistenceError::RepositoryNotFound)?;
     let already_in_target_state = existing.disabled_at.is_none() == enable;
     if already_in_target_state {
         transaction.commit().await?;
         return Ok(existing.into());
     }
-    let query = if enable {
-        "UPDATE repositories
-         SET disabled_at = NULL, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1
-         RETURNING id, name, name_normalized, url, description,
-                   created_at::text AS created_at, updated_at::text AS updated_at,
-                   disabled_at::text AS disabled_at"
-    } else {
-        "UPDATE repositories
-         SET disabled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-         WHERE id = $1
-         RETURNING id, name, name_normalized, url, description,
-                   created_at::text AS created_at, updated_at::text AS updated_at,
-                   disabled_at::text AS disabled_at"
-    };
-    let updated = sqlx::query_as::<_, RepositoryRow>(query)
+    let updated = if enable {
+        sqlx::query_as::<_, RepositoryRow>(
+            "UPDATE repositories
+             SET disabled_at = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1
+             RETURNING id, name, name_normalized, url, description,
+                       created_at::text AS created_at, updated_at::text AS updated_at,
+                       disabled_at::text AS disabled_at",
+        )
         .bind(repository_id)
         .fetch_one(&mut *transaction)
-        .await?;
+        .await?
+    } else {
+        sqlx::query_as::<_, RepositoryRow>(
+            "UPDATE repositories
+             SET disabled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1
+             RETURNING id, name, name_normalized, url, description,
+                       created_at::text AS created_at, updated_at::text AS updated_at,
+                       disabled_at::text AS disabled_at",
+        )
+        .bind(repository_id)
+        .fetch_one(&mut *transaction)
+        .await?
+    };
     transaction.commit().await?;
     Ok(updated.into())
 }

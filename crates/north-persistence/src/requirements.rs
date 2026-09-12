@@ -210,12 +210,9 @@ impl AuthStore {
         &self,
         query: &RequirementListQuery,
     ) -> Result<Vec<RequirementRecord>, RequirementError> {
-        let order = match query.sort {
-            RequirementSort::UpdatedAscending => "ASC",
-            RequirementSort::UpdatedDescending => "DESC",
-        };
+        let ascending = matches!(query.sort, RequirementSort::UpdatedAscending);
         let status = query.status.map(persisted_status);
-        let sql = format!(
+        let rows = sqlx::query_as::<_, RequirementRow>(
             "SELECT id, title, description, summary, acceptance_criteria,
                     assumptions, open_questions, status, revision, state_version,
                     created_by, created_at::text AS created_at,
@@ -229,14 +226,16 @@ impl AuthStore {
                     OR array_to_string(open_questions, ' ') ILIKE '%' || $1 || '%')
                AND ($2::text IS NULL OR status = $2)
                AND ($3::text IS NULL OR created_by = $3)
-             ORDER BY updated_at {order}, id ASC"
-        );
-        let rows = sqlx::query_as::<_, RequirementRow>(&sql)
-            .bind(query.search.as_deref())
-            .bind(status)
-            .bind(query.created_by.as_deref())
-            .fetch_all(&self.pool)
-            .await?;
+             ORDER BY CASE WHEN $4 THEN updated_at END ASC,
+                      CASE WHEN NOT $4 THEN updated_at END DESC,
+                      id ASC",
+        )
+        .bind(query.search.as_deref())
+        .bind(status)
+        .bind(query.created_by.as_deref())
+        .bind(ascending)
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(RequirementRow::into_record).collect()
     }
 

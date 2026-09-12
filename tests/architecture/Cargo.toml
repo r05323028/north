@@ -5,7 +5,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+proc-macro2 = "1"
 serde_json = "1"
+syn = { version = "2", features = ["full", "parsing", "visit"] }
 
 [lints]
 workspace = true

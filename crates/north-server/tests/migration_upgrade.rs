@@ -553,6 +553,24 @@ async fn historical_main_head_upgrades_to_current_head() {
         )),
     )
     .await;
+
+    let legacy_activity_session = unique("legacy-activity-session");
+    sqlx::query("INSERT INTO execution_sessions (id) VALUES ($1)")
+        .bind(&legacy_activity_session)
+        .execute(&mut connection)
+        .await
+        .expect("insert legacy activity session");
+    let legacy_activity_event = unique("legacy-activity");
+    sqlx::query(
+        "INSERT INTO clarification_activities (event_id, session_id, activity, created_at)
+         VALUES ($1, $2, 'legacy activity', CURRENT_TIMESTAMP - INTERVAL '30 days')",
+    )
+    .bind(&legacy_activity_event)
+    .bind(&legacy_activity_session)
+    .execute(&mut connection)
+    .await
+    .expect("insert legacy activity row");
+
     apply_migration(
         &mut connection,
         "0016_execution_retry_authority",
@@ -562,6 +580,66 @@ async fn historical_main_head_upgrades_to_current_head() {
         )),
     )
     .await;
+    apply_migration(
+        &mut connection,
+        "0017_runtime_event_retention",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/0017_runtime_event_retention.sql"
+        )),
+    )
+    .await;
+
+    let backfilled_expiry: bool = sqlx::query_scalar(
+        "SELECT expires_at = created_at + INTERVAL '7 days'
+         FROM clarification_activities
+         WHERE event_id = $1",
+    )
+    .bind(&legacy_activity_event)
+    .fetch_one(&mut connection)
+    .await
+    .expect("read backfilled activity expiry");
+    assert!(
+        backfilled_expiry,
+        "legacy activity rows must receive the deterministic default retention window"
+    );
+    let expiry_nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'clarification_activities'
+           AND column_name = 'expires_at'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("inspect activity expiry nullability");
+    assert_eq!(expiry_nullable, "NO");
+    let sweep_index: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM pg_indexes
+             WHERE schemaname = current_schema()
+               AND tablename = 'clarification_activities'
+               AND indexname = 'clarification_activities_expires_at_idx'
+         )",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("inspect activity sweep index");
+    assert!(sweep_index, "the expiry sweep index must exist");
+    let missing_expiry = sqlx::query(
+        "INSERT INTO clarification_activities (event_id, session_id, activity)
+         VALUES ($1, $2, 'missing expiry')",
+    )
+    .bind(unique("missing-expiry-activity"))
+    .bind(&legacy_activity_session)
+    .execute(&mut connection)
+    .await
+    .expect_err("activity inserts must supply an expiry");
+    assert!(
+        missing_expiry.to_string().contains("expires_at")
+            || missing_expiry.to_string().contains("null value"),
+        "unexpected missing-expiry error: {missing_expiry}"
+    );
 
     let repository_columns: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)

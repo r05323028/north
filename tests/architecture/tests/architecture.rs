@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use syn::visit::Visit;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -314,6 +315,449 @@ fn validation_crates_stay_outside_production_crates_tree() {
     assert!(
         violations.is_empty(),
         "repository validation crates must live outside crates/: {violations:?}"
+    );
+}
+
+/// Normalize case and ASCII whitespace so multiline or irregularly spaced SQL
+/// cannot hide a destructive statement.
+fn normalized_sql(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for character in text.chars() {
+        if character.is_ascii_whitespace() {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(character.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+/// Destructive statements in one normalized SQL text as (kind, table). A missing
+/// table means an unresolved or dynamic target.
+fn is_word_boundary(text: &str, index: usize) -> bool {
+    match text[index..].chars().next() {
+        None => true,
+        Some(character) => !character.is_ascii_alphanumeric() && character != '_',
+    }
+}
+
+fn destructive_statements(normalized: &str) -> Vec<(&'static str, Option<String>)> {
+    let mut found = Vec::new();
+    for (index, _) in normalized.match_indices("truncate") {
+        if is_word_boundary(normalized, index + "truncate".len()) {
+            found.push(("TRUNCATE", None));
+        }
+    }
+    for (index, _) in normalized.match_indices("delete from") {
+        let rest_start = index + "delete from".len();
+        if !is_word_boundary(normalized, rest_start) {
+            continue;
+        }
+        let rest = normalized[rest_start..].trim_start();
+        let table: String = rest
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect();
+        found.push(("DELETE", if table.is_empty() { None } else { Some(table) }));
+    }
+    found
+}
+
+fn literal_is_destructive(value: &str) -> bool {
+    !destructive_statements(&normalized_sql(value)).is_empty()
+}
+
+fn cfg_is_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("cfg")
+            && match &attr.meta {
+                syn::Meta::List(list) => list.tokens.to_string().contains("test"),
+                _ => false,
+            }
+    })
+}
+
+fn item_attributes(item: &syn::Item) -> &[syn::Attribute] {
+    use syn::Item;
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+/// Every string literal anywhere in a macro body, including nested macros, so
+/// dynamically built destructive SQL cannot hide behind format! or concat!.
+fn nested_token_strings(tokens: &proc_macro2::TokenStream) -> Vec<String> {
+    use proc_macro2::TokenTree;
+    let mut out = Vec::new();
+    for tree in tokens.clone() {
+        match tree {
+            TokenTree::Group(group) => out.extend(nested_token_strings(&group.stream())),
+            TokenTree::Literal(literal) => {
+                let stream: proc_macro2::TokenStream = TokenTree::Literal(literal).into();
+                if let Ok(value) = syn::parse2::<syn::LitStr>(stream) {
+                    out.push(value.value());
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// SQL-executing call names whose first argument must be a static literal when
+/// it contains destructive SQL.
+const QUERY_CALLS: [&str; 6] = [
+    "query",
+    "query_as",
+    "query_scalar",
+    "query_unchecked",
+    "query_as_unchecked",
+    "raw_sql",
+];
+
+struct DeletionVisitor<'a> {
+    relative: &'a str,
+    allowed: &'a BTreeMap<&'a str, &'a str>,
+    consumed: Vec<String>,
+    literals: Vec<String>,
+    violations: Vec<String>,
+}
+
+impl DeletionVisitor<'_> {
+    fn classify_literal(&mut self, value: &str) {
+        self.consumed.push(value.to_owned());
+        for (kind, table) in destructive_statements(&normalized_sql(value)) {
+            match (kind, table) {
+                ("TRUNCATE", _) => self
+                    .violations
+                    .push(format!("{}: TRUNCATE statement", self.relative)),
+                (_, None) => self.violations.push(format!(
+                    "{}: unresolved dynamic delete target",
+                    self.relative
+                )),
+                (_, Some(table)) => {
+                    if self.allowed.get(self.relative) != Some(&table.as_str()) {
+                        self.violations
+                            .push(format!("{}: delete from {table}", self.relative));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for DeletionVisitor<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if cfg_is_test(item_attributes(item)) {
+            return;
+        }
+        syn::visit::visit_item(self, item);
+    }
+
+    fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
+        self.literals.push(literal.value());
+        syn::visit::visit_lit_str(self, literal);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = &*call.func {
+            let query_call = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+                .is_some_and(|ident| QUERY_CALLS.contains(&ident.as_str()));
+            if query_call {
+                match call.args.first() {
+                    Some(syn::Expr::Lit(expr_lit)) => match &expr_lit.lit {
+                        syn::Lit::Str(value) => self.classify_literal(&value.value()),
+                        _ => self.violations.push(format!(
+                            "{}: persistence SQL must be a string literal",
+                            self.relative
+                        )),
+                    },
+                    Some(_) => self.violations.push(format!(
+                        "{}: dynamically constructed SQL is not allowed in persistence",
+                        self.relative
+                    )),
+                    None => self.violations.push(format!(
+                        "{}: persistence SQL call without a literal argument",
+                        self.relative
+                    )),
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_macro(&mut self, mac: &'ast syn::ExprMacro) {
+        let query_call = mac
+            .mac
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+            .is_some_and(|ident| QUERY_CALLS.contains(&ident.as_str()));
+        if query_call {
+            let arguments: Vec<proc_macro2::TokenTree> = mac
+                .mac
+                .tokens
+                .clone()
+                .into_iter()
+                .filter(|tree| {
+                    !matches!(
+                        tree,
+                        proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ','
+                    )
+                })
+                .collect();
+            let literal = match arguments.as_slice() {
+                [proc_macro2::TokenTree::Literal(literal)] => syn::parse2::<syn::LitStr>(
+                    proc_macro2::TokenTree::Literal(literal.clone()).into(),
+                )
+                .ok(),
+                _ => None,
+            };
+            match literal {
+                Some(value) => self.classify_literal(&value.value()),
+                None => self.violations.push(format!(
+                    "{}: dynamically constructed SQL is not allowed in persistence",
+                    self.relative
+                )),
+            }
+        }
+        self.literals.extend(nested_token_strings(&mac.mac.tokens));
+        syn::visit::visit_expr_macro(self, mac);
+    }
+}
+
+/// Structural check: every destructive SQL statement in one production source
+/// must be a static string literal passed directly to a known SQL-executing
+/// call, and must match the exact (source file, table) classification.
+/// Dynamically constructed destructive SQL, unclassified tables, and TRUNCATE
+/// are rejected. cfg(test) items are not production code.
+fn deletion_violations(
+    relative: &str,
+    source: &str,
+    allowed: &BTreeMap<&str, &str>,
+) -> Vec<String> {
+    let file = match syn::parse_file(source) {
+        Ok(file) => file,
+        Err(error) => return vec![format!("{relative}: unparseable source: {error}")],
+    };
+    let mut visitor = DeletionVisitor {
+        relative,
+        allowed,
+        consumed: Vec::new(),
+        literals: Vec::new(),
+        violations: Vec::new(),
+    };
+    visitor.visit_file(&file);
+    let literals = std::mem::take(&mut visitor.literals);
+    for value in literals {
+        if visitor.consumed.contains(&value) || !literal_is_destructive(&value) {
+            continue;
+        }
+        visitor.violations.push(format!(
+            "{relative}: destructive SQL outside a classified static literal"
+        ));
+    }
+    visitor.violations
+}
+
+/// The TTL retention allowlist is exactly clarification_activities. Setup-row
+/// retention and protocol-boundary outbox compaction are separately classified
+/// bounded deletions, not TTL targets. Deletion sites are matched by exact
+/// (source file, table), so a new durable-table delete, a dynamically built
+/// target, or a TRUNCATE fails here until it is deliberately classified.
+#[test]
+fn persistence_deletes_only_allowlisted_tables() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    collect_rust_sources(&root.join("crates/north-persistence/src"), &mut files);
+    let allowed: BTreeMap<&str, &str> = [
+        (
+            "crates/north-persistence/src/retention.rs",
+            "clarification_activities",
+        ),
+        (
+            "crates/north-persistence/src/daemon.rs",
+            "daemon_setup_requests",
+        ),
+        (
+            "crates/north-persistence/src/delivery.rs",
+            "server_command_outbox",
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut violations = Vec::new();
+    for file in files {
+        let relative = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = fs::read_to_string(&file).expect("read persistence source");
+        violations.extend(deletion_violations(&relative, &text, &allowed));
+    }
+    assert!(
+        violations.is_empty(),
+        "persistence deletions outside the classified allowlist: {violations:?}"
+    );
+}
+
+fn sql_source(body: &str) -> String {
+    format!("fn sample() {{ {body} }}")
+}
+
+#[test]
+fn deletion_scanner_requires_static_classified_literals() {
+    let allowed: BTreeMap<&str, &str> = [
+        ("crates/x/retention.rs", "clarification_activities"),
+        ("crates/x/daemon.rs", "daemon_setup_requests"),
+    ]
+    .into_iter()
+    .collect();
+
+    // Classified sites survive lowercase, multiline, and irregular whitespace.
+    let valid = sql_source(
+        "let _ = sqlx::query(\"delete
+   from   clarification_activities WHERE expires_at <= CURRENT_TIMESTAMP\");",
+    );
+    assert!(deletion_violations("crates/x/retention.rs", &valid, &allowed).is_empty());
+    let valid_setup = sql_source(
+        "let _ = sqlx::query(\"DELETE FROM daemon_setup_requests AS requests WHERE requests.id = expired.id\");",
+    );
+    assert!(deletion_violations("crates/x/daemon.rs", &valid_setup, &allowed).is_empty());
+    // A direct literal SELECT is static SQL and stays allowed.
+    let valid_select = sql_source("let _ = sqlx::query(\"SELECT 1\");");
+    assert!(deletion_violations("crates/x/retention.rs", &valid_select, &allowed).is_empty());
+
+    // Computed SQL arguments are rejected whether or not they look destructive.
+    let dynamic_select = sql_source(
+        "let order = \"DESC\"; let _ = sqlx::query(&format!(\"SELECT id FROM requirements ORDER BY updated_at {order}\"));",
+    );
+    assert!(
+        !deletion_violations("crates/x/retention.rs", &dynamic_select, &allowed).is_empty(),
+        "dynamically constructed SELECT must be rejected"
+    );
+    let fragmented_format = sql_source(
+        "let _ = sqlx::query(&format!(\"{} {} {}\", \"DELETE\", \"FROM\", \"requirements\"));",
+    );
+    assert!(
+        !deletion_violations("crates/x/retention.rs", &fragmented_format, &allowed).is_empty(),
+        "fragmented format! SQL must be rejected"
+    );
+    let fragmented_concat =
+        sql_source("let _ = sqlx::query(concat!(\"DELETE\", \" \", \"FROM \", \"requirements\"));");
+    assert!(
+        !deletion_violations("crates/x/retention.rs", &fragmented_concat, &allowed).is_empty(),
+        "fragmented concat! SQL must be rejected"
+    );
+    let variable = sql_source("let sql = \"DELETE FROM requirements\"; let _ = sqlx::query(sql);");
+    assert!(
+        !deletion_violations("crates/x/retention.rs", &variable, &allowed).is_empty(),
+        "variable-held SQL must be rejected"
+    );
+
+    // Unclassified durable table.
+    let wrong_table = deletion_violations(
+        "crates/x/retention.rs",
+        &sql_source("let _ = sqlx::query(\"DELETE FROM requirements\");"),
+        &allowed,
+    );
+    assert!(wrong_table
+        .iter()
+        .any(|violation| violation.contains("requirements")));
+    // Classified table from the wrong file.
+    let wrong_file = deletion_violations(
+        "crates/x/daemon.rs",
+        &sql_source("let _ = sqlx::query(\"DELETE FROM clarification_activities\");"),
+        &allowed,
+    );
+    assert!(wrong_file
+        .iter()
+        .any(|violation| violation.contains("clarification_activities")));
+    // format!-built destructive SQL.
+    let formatted = deletion_violations(
+        "crates/x/retention.rs",
+        &sql_source(
+            "let table = \"requirements\"; let _ = sqlx::query(&format!(\"DELETE FROM {table}\"));",
+        ),
+        &allowed,
+    );
+    assert!(
+        !formatted.is_empty(),
+        "format!-built deletes must be rejected"
+    );
+    // Dynamic table name inside an otherwise literal statement.
+    let dynamic = deletion_violations(
+        "crates/x/retention.rs",
+        &sql_source("let _ = sqlx::query(\"DELETE FROM {table}\");"),
+        &allowed,
+    );
+    assert!(dynamic
+        .iter()
+        .any(|violation| violation.contains("dynamic")));
+    // TRUNCATE with unusual whitespace.
+    let truncate = deletion_violations(
+        "crates/x/retention.rs",
+        &sql_source(
+            "let _ = sqlx::query(\"TRUNCATE
+   TABLE users\");",
+        ),
+        &allowed,
+    );
+    assert!(truncate
+        .iter()
+        .any(|violation| violation.contains("TRUNCATE")));
+    // cfg(test) modules are not production code.
+    let test_module = "fn sample() {}
+#[cfg(test)]
+mod tests { #[test] fn case() { let _ = sqlx::query(\"DELETE FROM requirements\"); } }";
+    assert!(deletion_violations("crates/x/retention.rs", test_module, &allowed).is_empty());
+}
+
+/// The worker path must never run an exact unbounded backlog count; the
+/// post-limit probe is a bounded LIMIT 1 existence check.
+#[test]
+fn retention_worker_uses_bounded_backlog_probe() {
+    let source = fs::read_to_string(repo_root().join("crates/north-persistence/src/retention.rs"))
+        .expect("read retention source");
+    let lowered = source.to_ascii_lowercase();
+    let production = lowered.split("#[cfg(test)]").next().unwrap_or(&lowered);
+    let code: String = production
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !code.contains("count("),
+        "retention must not run an exact backlog count in the worker path"
+    );
+    assert!(
+        code.contains("limit 1"),
+        "retention must probe the backlog with a bounded LIMIT 1 query"
     );
 }
 

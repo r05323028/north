@@ -66,15 +66,33 @@ impl Error for BuildAppError {
     }
 }
 
-/// Build authenticated HTTP routes only after migrations and lease reset succeed.
+/// Build authenticated HTTP routes with the default retention settings.
 pub async fn build_app(
     pool: north_persistence::DatabasePool,
     delivery: std::sync::Arc<dyn CodeDelivery>,
 ) -> Result<axum::Router, BuildAppError> {
+    build_app_with_retention(
+        pool,
+        delivery,
+        north_persistence::RetentionConfig::default(),
+    )
+    .await
+}
+
+/// Build authenticated HTTP routes only after migrations and lease reset succeed.
+///
+/// Retention settings apply prospectively: already-persisted activity rows keep
+/// the expiry computed when they were written, while the window drives future
+/// inserts and the cadence and batch bound drive future sweeps.
+pub async fn build_app_with_retention(
+    pool: north_persistence::DatabasePool,
+    delivery: std::sync::Arc<dyn CodeDelivery>,
+    retention: north_persistence::RetentionConfig,
+) -> Result<axum::Router, BuildAppError> {
     run_migrations(&pool)
         .await
         .map_err(BuildAppError::Migration)?;
-    let store = north_persistence::AuthStore::new(pool);
+    let store = north_persistence::AuthStore::with_retention(pool, retention);
     store
         .invalidate_daemon_connections()
         .await
