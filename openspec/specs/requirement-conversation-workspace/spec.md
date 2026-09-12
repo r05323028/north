@@ -10,30 +10,29 @@ creating a second lifecycle, execution state store, or browser transport.
 
 ### Requirement: Existing Requirement route becomes a two-part workspace
 
-The authenticated `/requirements/[id]` route SHALL remain directly addressable
-from Board, List, creation, browser navigation, and refresh. It SHALL render two
-coherent parts from canonical server reads: a primary Conversation workspace and
-a Live Requirement panel. On desktop-sized screens both parts SHALL be visible
-at once, with Conversation receiving primary interaction space. On small screens
-Conversation SHALL appear before Live Requirement in one stacked flow; the
-Requirement SHALL remain reachable without leaving the clarification route.
-The workspace SHALL not create a second detail route or a browser-side source of
-truth.
+The existing `/requirements/[id]` route SHALL remain the only Requirement/review
+surface. Its Live Requirement area may include the human-review presentation and
+actions from the human-review capability; no review sub-route, duplicate
+Requirement entity, or review-specific workspace is added. Review actions render
+inside the same canonical workspace and use server responses after mutation.
 
 #### Scenario: Deep link loads complete workspace
 
-- **WHEN** an authenticated user opens `/requirements/R` directly or refreshes it
-- **THEN** North loads the canonical detail bundle for R and renders Conversation and Live Requirement for R without requiring navigation from Board
+- **WHEN** an authenticated user opens or refreshes `/requirements/R`
+- **THEN** the canonical workspace for R renders, including review presentation
+  when R is reviewable, without a second route
 
 #### Scenario: Small screen keeps structured state reachable
 
-- **WHEN** the workspace is rendered below its desktop breakpoint
-- **THEN** Conversation remains usable first, Live Requirement remains reachable in the same route, and the composer is not hidden behind an inaccessible desktop-only pane
+- **WHEN** workspace renders below desktop breakpoint
+- **THEN** Conversation and Live Requirement/review state remain reachable in one
+  route with accessible controls
 
 #### Scenario: Clarification runtime is unavailable
 
-- **WHEN** R has no eligible daemon or its pinned daemon is offline
-- **THEN** the workspace still renders persisted conversation history and the latest canonical Requirement state, with availability shown as an operational condition rather than a missing page
+- **WHEN** R has no eligible daemon or pinned daemon is offline
+- **THEN** workspace still renders canonical Requirement/conversation and any
+  applicable review state without treating runtime absence as page absence
 
 ### Requirement: Conversation uses the existing durable model
 
@@ -91,55 +90,104 @@ readiness, or Requirement entities.
 
 ### Requirement: Canonical detail reads repair all workspace state
 
-The workspace SHALL obtain structured Requirement state, Conversation pages,
-latest/current readiness, coarse activity, latest public clarification run, and
-current-user identity from authenticated HTTP APIs. The first bundle MAY be
-parallel, but rendering SHALL use each response only for its own resource. On
-initial load, a relevant invalidation, EventSource reconnect, browser focus,
-visibility return, or explicit retry, it SHALL refetch the affected canonical
-bundle and SHALL not treat an SSE payload as state.
+The workspace SHALL load Requirement first. Only when the canonical Requirement
+status is `Ready` SHALL it request `GET /requirements/{id}/review-packet`. A
+non-Ready Requirement has no applicable packet request; the server's conflict
+for such a request is not a nullable packet contract. A Rejected Requirement
+renders Reopen from Requirement state/version alone. If a Ready packet fetch
+fails, the workspace surfaces a review-load error and disables Ready review
+actions.
 
-The shared authenticated SSE categories `requirement.changed`,
-`conversation.changed`, `readiness.changed`, `activity.changed`, and
-`session.changed` SHALL be treated as hints containing at most resource
-identity/category. A hint for another Requirement SHALL not change R. Missed,
-duplicated, delayed, reordered, malformed, or overrun streams SHALL be harmless:
-the workspace SHALL retain last-known data where possible and repair through
-HTTP. A displayed connection state SHALL reflect actual EventSource state; it
-shall not claim connected while disconnected. HTTP refetch remains the
-correctness mechanism even while SSE is connected.
-
-Because the existing conversation endpoint is offset-based and returns `next_offset`, define `prior_loaded_end_offset` as the exclusive numeric offset immediately after the last message in the largest contiguous history range the client successfully loaded from offset 0. It is not a page index or arbitrary cached-page marker. Before repair, the client SHALL retain that range's stable message IDs and whether its final page returned `next_offset: null`. A canonical repair SHALL discard cached page slices, restart at `offset=0`, and let each server-returned `next_offset` control the next bounded-page request. It SHALL continue until the rebuilt range reaches at least `prior_loaded_end_offset` and every stable ID from the prior range has been re-observed. If shifted page positions require it, repair SHALL follow `next_offset` beyond the old numeric end until those IDs appear or the server reports its end. If the prior range reached the server's end, repair SHALL follow newly returned `next_offset` pages through the current end so messages added after the prior load are not omitted. The client MUST NOT independently reissue stale historical offsets or trust their cached page slices. The final union SHALL deduplicate by stable message ID and sort by authoritative `(created_at, id)` order. Each repair generation owns its result, so an older repair cannot overwrite a newer completed repair. This is a client repair contract; it does not introduce cursor pagination or a new backend endpoint.
+Every repair is generation-aware: refresh Requirement first or coordinate both
+responses under one generation, then fetch a packet only if refreshed state is
+Ready. A non-Ready refresh invalidates/drops any previous packet. No old packet
+may be submitted against refreshed Requirement state. Review acknowledgement is
+bound to canonical identity: `(requirement_state_version, assessment_id)` for
+Ready decisions and `requirement_state_version` for Reopen. After stale review
+repair, mutations remain disabled until explicit acknowledgement of the latest
+identity. Duplicate SSE hints, focus/visibility repair, explicit refresh, and
+refetches preserve acknowledgement when identity is unchanged; an identity
+change invalidates it.
 
 #### Scenario: Initial bundle uses canonical endpoints
 
-- **WHEN** the workspace first mounts for R
-- **THEN** it requests R, R's conversation, readiness, activity, public session projection, and current-user data over authenticated HTTP and renders no placeholder Requirement fields derived from transcript text
+- **WHEN** workspace first mounts for R
+- **THEN** it loads Requirement and other canonical reads, requests Review Packet
+  only if R is Ready, and renders no inferred review truth
 
 #### Scenario: Relevant hint causes canonical repair
 
-- **WHEN** the workspace receives a valid named SSE hint for R
-- **THEN** it refetches canonical HTTP state for the workspace, and any returned Requirement/message/activity/run changes replace stale rendering without applying the hint as a local mutation
+- **WHEN** a relevant SSE hint arrives
+- **THEN** workspace refetches Requirement, conditionally refetches packet for a
+  Ready result, and ignores hint payload as state
 
 #### Scenario: Unrelated hint is ignored
 
-- **WHEN** the workspace receives a valid hint whose `requirement_id` is not R
-- **THEN** it does not alter R's rendered state or create a request targeted at R solely because of that hint
+- **WHEN** hint names another Requirement
+- **THEN** R is unchanged and no packet request is triggered for R solely by it
 
 #### Scenario: Missed and duplicate hints do not duplicate state
 
-- **WHEN** the browser misses a hint while disconnected or receives the same hint more than once
-- **THEN** reconnect/focus repair obtains current HTTP state, and no message, activity item, Requirement transition, or run is duplicated
+- **WHEN** hints are missed or repeated
+- **THEN** reconnect/focus repair conditionally reloads canonical packet state once
+  per generation without duplicate entities
 
 #### Scenario: Older bundle response cannot overwrite newer state
 
-- **WHEN** a slower request started before a newer workspace refetch completes afterward
-- **THEN** the older response is ignored for rendering and cannot restore an older Requirement, conversation, readiness, activity, or run projection
+- **WHEN** an older Requirement or packet response completes after a newer
+  generation
+- **THEN** older response is ignored and cannot restore an old packet
 
 #### Scenario: Refresh failure keeps usable stale data
 
-- **WHEN** a non-initial canonical refetch fails
-- **THEN** last-known Requirement and conversation data remain visible where available, a refresh error is shown separately, and the workspace does not silently present stale data as confirmed current
+- **WHEN** non-initial canonical refetch fails
+- **THEN** last-known safe data remains visible with an honest refresh error and
+  review actions remain disabled if current packet truth is unavailable
+
+#### Scenario: Ready-only Review Packet loading
+
+- **WHEN** Requirement is Ready
+- **THEN** workspace fetches the canonical packet and enables actions only after
+  successful packet validation
+
+#### Scenario: Non-Ready Requirements skip Review Packet
+
+- **WHEN** Requirement is Draft, Discussing, Accepted, or another non-Ready state
+- **THEN** workspace does not require or request Review Packet; no packet error is
+  shown for that state
+
+#### Scenario: Rejected Reopen does not require Review Packet
+
+- **WHEN** Requirement is Rejected
+- **THEN** workspace renders Reopen from Requirement state/version alone
+
+#### Scenario: Ready becomes non-Ready during repair
+
+- **WHEN** stale repair changes Ready to Discussing, Rejected, or another state
+- **THEN** old packet is dropped, no Ready action remains enabled, and no old
+  packet can be submitted
+
+#### Scenario: Unchanged duplicate hint preserves review acknowledgement
+
+- **GIVEN** reviewer acknowledged a canonical Ready or Rejected identity
+- **WHEN** duplicate SSE, focus/visibility repair, or explicit refresh returns
+  the same identity
+- **THEN** acknowledgement remains valid and no repeated confirmation is
+  required
+
+#### Scenario: Changed review identity requires acknowledgement
+
+- **GIVEN** reviewer acknowledged a Ready identity
+- **WHEN** refreshed canonical state changes `requirement_state_version` or
+  `assessment_id`
+- **THEN** old acknowledgement is invalidated and only the latest identity can
+  re-enable actions
+
+#### Scenario: Reopen tracks only Rejected state version
+
+- **GIVEN** reviewer acknowledged Reopen for Rejected state version V
+- **WHEN** refresh returns the same V or a changed V
+- **THEN** same V preserves acknowledgement and changed V requires a new one
 
 ### Requirement: Browser API boundary preserves existing wire contracts
 
@@ -346,69 +394,72 @@ SHALL remain history and no message command SHALL be created.
 
 ### Requirement: Clarification phase, status, completion, and cancellation remain separate
 
-The workspace SHALL consume the public run projection fields
-`run_id`, `requirement_id`, `start_message_id`, `phase`, `status`,
-`cancel_requested`, and safe timestamps. `phase` SHALL decide sequential-slot
-ownership and legal intent:
-
-- `awaiting_assignment` is an unassigned reusable run and occupies the slot;
-- `active` is an assigned non-terminal run and occupies the slot, including a
-  pinned disconnected daemon or cancellation-pending run; and
-- `terminal` releases the slot after unassigned cancellation or a durably
-  projected terminal runtime fact.
-
-`status` SHALL remain coarse display information (`starting`, `running`,
-`completed`, or `unavailable`) and SHALL not alone decide an action. In
-particular, `unavailable` in awaiting and active phases has different meaning.
-The workspace SHALL not add or require the later server-owned retry state,
-attempt count, retry budget, backoff, automatic `session.resume`, or final
-execution-failure policy.
-
-Completion SHALL not imply `Ready`; only the canonical Requirement and
-readiness read decide those values. A runtime failure SHALL be shown as an
-operational run failure and SHALL not mark the Requirement failed or mutate its
-revision/state version. An active run remains active after a cancellation command
-is acknowledged until `session.completed` or `session.failed` is projected.
-Successful assigned cancellation is represented by existing completed status
-with `cancel_requested=true`; terminal cancellation failure is represented by
-existing unavailable status with cancellation intent, not by inventing a
-`cancelled` status. Unassigned cancellation is immediately terminal with no
-command.
+The workspace SHALL consume the existing phase/status projection plus safe retry
+fields without owning retry policy. It SHALL render
+`phase=active,status=retrying` as an active slot-occupying server retry and
+`phase=terminal,status=failed` as terminal execution failure/cancellation. It
+SHALL never auto-submit `session.resume`, create a new run from a browser retry,
+or infer failure/retry from transcript/activity. Unknown-outcome terminal runs
+cannot be resumed; a later execution starts through a new logical run.
 
 #### Scenario: Completion without assessment is not Ready
 
-- **WHEN** a run completes before an accepted readiness assessment exists
-- **THEN** the workspace shows a completed run, leaves Requirement lifecycle/status and versions unchanged, and shows no synthetic current readiness
+- **WHEN** a run completes before accepted readiness assessment
+- **THEN** workspace shows completion without synthetic Ready state
 
 #### Scenario: Readiness changes independently
 
-- **WHEN** a readiness assessment is stale, rejected, or targets another revision
-- **THEN** the workspace shows the canonical current flag/outcome and does not infer readiness from run completion or an agent message
+- **WHEN** readiness is stale/rejected or targets another revision
+- **THEN** workspace uses canonical readiness and does not infer from runtime text
 
 #### Scenario: Assigned cancellation waits for terminal fact
 
-- **WHEN** cancellation receives `command_ack` but no terminal runtime event
-- **THEN** the workspace keeps the run active and slot-occupying, disables later dispatch and new start, and does not label command acknowledgement as cancellation completion
+- **WHEN** assigned cancellation is acknowledged without terminal runtime fact
+- **THEN** workspace keeps the run active, blocks later dispatch, and does not
+  label ACK as completion
 
 #### Scenario: Successful cancellation is distinct from failure
 
-- **WHEN** a requested run terminates successfully and the server projects existing `session.completed`
-- **THEN** the workspace shows cancellation completed using `cancel_requested=true` and completed status, without mapping it to failure or adding a new protocol status
+- **WHEN** cancellation projects successful `session.completed`
+- **THEN** workspace shows terminal/completed with cancellation intent
 
 #### Scenario: Cancellation preserves committed partial state
 
-- **WHEN** an assigned run is cancelled after it has persisted agent messages, activity, or a canonical Requirement/readiness update
-- **THEN** those committed facts remain visible after terminal projection; cancellation stops further work but does not roll back history or mark the Requirement failed
+- **WHEN** cancellation follows persisted messages/activity/readiness data
+- **THEN** committed facts remain visible and are not rolled back
 
 #### Scenario: Runtime failure leaves Requirement lifecycle alone
 
-- **WHEN** a run reaches terminal unavailable state without cancellation intent
-- **THEN** the workspace shows run failure/unavailability, retains any partial canonical messages and Requirement data, and does not change Requirement lifecycle, revision, or state version
+- **WHEN** execution reaches terminal/failed or active/retrying
+- **THEN** workspace leaves Requirement lifecycle, revision, readiness, and state
+  version unchanged
+
+#### Scenario: Retry state remains active
+
+- **WHEN** server policy schedules a retry after a known attempt failure
+- **THEN** the workspace shows active/retrying, keeps the sequential slot occupied,
+  and exposes no browser retry action or raw runtime reason
+
+#### Scenario: Terminal retry failure releases the slot
+
+- **WHEN** server policy exhausts attempts or rejects an unknown outcome
+- **THEN** the workspace shows terminal/failed, permits a later new run, and leaves
+  Requirement lifecycle, revision, and state version unchanged
 
 #### Scenario: Unassigned cancellation releases slot
 
-- **WHEN** an awaiting-assignment run is cancelled before any start command exists
-- **THEN** the workspace shows terminal cancellation intent, no daemon command is assumed, and a later eligible message may use start for a new run
+- **WHEN** awaiting run is cancelled before start command
+- **THEN** workspace shows terminal cancellation and permits later new run
+
+#### Scenario: Retry projection retains the sequential slot
+
+- **WHEN** server schedules a known retry
+- **THEN** workspace shows active/retrying and disables new-run start
+
+#### Scenario: Unknown outcome cannot resume terminal run
+
+- **WHEN** the latest run is terminal/failed for unknown outcome
+- **THEN** workspace offers no resume action; later execution uses a new start/run
 
 ### Requirement: Live Requirement stays canonical and concurrency-safe
 
@@ -459,70 +510,43 @@ this workspace.
 
 ### Requirement: Workspace permissions follow instance roles and server authority
 
-All authenticated users in North 0.1.0 SHALL have workspace-wide access to view
-Requirements and conversations, append requester messages, cancel an accessible
-clarification run, and begin discussion through the existing operation,
-regardless of creator identity. The workspace SHALL not infer per-Requirement
-ownership or ACLs.
-
-For structured content edits, the workspace SHALL use the existing Requirement
-mutation contract: Requester, Requirement Manager, Admin, and Owner are each
-allowed to edit non-terminal structured fields in the current North 0.1.0
-policy, subject to validation, `expected_state_version`, and server terminality
-rules. This permission changes canonical content only. It does not grant any
-role authority to calculate or accept readiness, make review decisions, perform
-reviewer-only lifecycle transitions, or mutate other server-owned state merely
-because the workspace displays edit controls.
-
-Role permissions SHALL remain:
-
-| Role | View/converse/cancel | Edit non-terminal structured content | Begin discussion | Review lifecycle |
-| --- | --- | --- | --- | --- |
-| Requester | allowed | existing Requirement mutation contract | allowed | forbidden |
-| Requirement Manager | allowed | existing Requirement mutation contract | allowed | allowed |
-| Admin | allowed | existing Requirement mutation contract | allowed | allowed |
-| Owner | allowed | existing Requirement mutation contract | allowed | allowed |
-
-Accept, Reject, Request Changes, and Reopen SHALL continue to use their existing
-server-side reviewer guard. The workspace MAY hide or disable review affordances
-from a Requester, but a forged HTTP request SHALL be rejected by the server.
-Likewise, client-side role checks SHALL never replace authentication, run
-binding, terminality, or state-version enforcement.
-
-The workspace SHALL obtain the current user's ID, email, and exact role from
-`GET /auth/me` wherever it labels the current actor or decides an affordance. It
-SHALL not render a hard-coded person, email, avatar identity, or role as a
-fallback.
+Review presentation/actions in the workspace SHALL follow the existing role matrix.
+Requester visibility remains read-only for review; Requirement Manager, Admin,
+and Owner may see actions where lifecycle permits. Client gating is UX only and
+server authorization is authoritative. Review action success refetches canonical
+workspace state; no client transition is authoritative.
 
 #### Scenario: Requester collaborates across ownership
 
-- **WHEN** an authenticated Requester opens, posts to, or edits structured content on another user's non-terminal Requirement
-- **THEN** the server applies the existing workspace collaboration and Requirement mutation contracts subject to canonical validation, and the UI does not require creator matching
+- **WHEN** an authenticated Requester views or edits within existing policy
+- **THEN** workspace access follows canonical collaboration rules without creator
+  matching
 
 #### Scenario: Reviewer role receives review affordance
 
-- **WHEN** the current user is Requirement Manager, Admin, or Owner and R is reviewable
-- **THEN** the workspace may expose the existing reviewer route/action, while the server remains responsible for reviewer authorization, readiness-generation, lifecycle, and state-version checks
+- **WHEN** Manager/Admin/Owner views a reviewable Requirement
+- **THEN** workspace may expose review actions while server guards remain
+  authoritative
 
 #### Scenario: Requester cannot review by forging UI
 
-- **WHEN** a Requester directly calls an Accept, Reject, Request Changes, or Reopen endpoint
-- **THEN** server authorization rejects the request before lifecycle or audit mutation, regardless of workspace visibility
+- **WHEN** Requester calls review mutation directly
+- **THEN** server rejects before lifecycle/audit mutation
 
 #### Scenario: Current actor is canonical
 
-- **WHEN** the current-user response identifies user U with role Q
-- **THEN** requester-facing identity and role labels use U/Q, and no hard-coded identity is shown
+- **WHEN** `/auth/me` identifies actor and role
+- **THEN** workspace labels and affordances use that response
 
 #### Scenario: Requester edit does not grant reviewer authority
 
-- **WHEN** a Requester uses the workspace structured editor and then attempts readiness calculation/acceptance, Accept, Reject, Request Changes, Reopen, or another restricted lifecycle operation
-- **THEN** the existing server guards allow only the permitted content edit and reject the reviewer or restricted operation before server-owned state changes
+- **WHEN** Requester edits content then attempts review/readiness mutation
+- **THEN** content rules and reviewer guards remain separate
 
 #### Scenario: Terminality remains server-enforced
 
-- **WHEN** any role attempts to edit an Accepted or Rejected Requirement or target an invalid run
-- **THEN** the server rejects the operation and the workspace renders that authoritative error rather than bypassing it locally
+- **WHEN** any role targets invalid lifecycle or run
+- **THEN** server rejects and workspace shows authoritative error
 
 ### Requirement: Activity, errors, privacy, and accessibility are actionable
 
