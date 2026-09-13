@@ -83,9 +83,9 @@ bounded existence probe rather than an exact backlog count, and the next cycle
 continues the drain. Exact backlog size is an observability concern and SHALL
 not be coupled to retention progress.
 
-#### Scenario: Backlog larger than one batch recovers
+#### Scenario: Backlog within cycle capacity recovers
 
-- **WHEN** a cycle starts with more expired rows than one batch bound
+- **WHEN** a cycle starts with more expired rows than one batch bound but no more than the configured cycle capacity
 - **THEN** the cycle runs several bounded passes, deletes the whole backlog, and stops when the backlog is exhausted
 
 #### Scenario: Exact cycle capacity does not report a limit
@@ -101,7 +101,7 @@ not be coupled to retention progress.
 #### Scenario: Restart preserves drain progress
 
 - **WHEN** the server restarts between cycles and a new cycle runs
-- **THEN** it continues from the persisted expiry state, deleting only eligible rows and reporting zero once the backlog is empty
+- **THEN** it continues from the persisted expiry state, deletes only eligible rows, and reports that no expired backlog remains once the backlog is empty
 
 ### Requirement: Deletion cannot change canonical product or coordination state
 

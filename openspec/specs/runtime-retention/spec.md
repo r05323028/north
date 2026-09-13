@@ -106,7 +106,7 @@ progress.
 #### Scenario: Restart preserves drain progress
 
 - **WHEN** the server restarts between cycles and a new cycle runs
-- **THEN** it continues from the persisted expiry state, deleting only eligible rows and reporting zero once the backlog is empty
+- **THEN** it continues from the persisted expiry state, deletes only eligible rows, and reports that no expired backlog remains once the backlog is empty
 
 ### Requirement: Deletion cannot change canonical product or coordination state
 
