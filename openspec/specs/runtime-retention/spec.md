@@ -77,13 +77,16 @@ non-expired rows, and SHALL not require replay or repair after a restart.
 One scheduler cycle SHALL drain expired telemetry by running bounded sweep
 passes while a pass deleted a full batch, SHALL stop when a pass deletes fewer
 rows than the batch bound, and SHALL stop at the configured maximum number of
-passes per cycle. Each pass SHALL remain an independent batch-bounded
-statement so a cycle never becomes one large transaction, and retention SHALL
-never run an unbounded loop. When the pass bound stops a cycle with expired
-rows still eligible, the cycle SHALL report that expired rows remain, using a
-bounded existence probe rather than an exact backlog count, and the next cycle
-continues the drain. Exact backlog size is an observability concern and SHALL
-not be coupled to retention progress.
+passes per cycle. The configured cycle capacity is the configured per-pass
+batch bound multiplied by the configured maximum passes per cycle.
+
+Each pass SHALL remain an independent batch-bounded statement so a cycle never
+becomes one large transaction, and retention SHALL never run an unbounded loop.
+When the pass bound stops a cycle with expired rows still eligible, the cycle
+SHALL report that expired rows remain, using a bounded existence probe rather
+than an exact backlog count, and the next cycle continues the drain. Exact
+backlog size is an observability concern and SHALL not be coupled to retention
+progress.
 
 #### Scenario: Backlog within cycle capacity recovers
 
