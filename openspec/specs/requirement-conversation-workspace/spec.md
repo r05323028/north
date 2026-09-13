@@ -574,6 +574,12 @@ and appropriate live/status semantics. Responsive layout SHALL not depend on
 hover or color alone to communicate availability, cancellation, failure, or
 readiness.
 
+Coarse activity display is best-effort observability. Activity rows may expire
+under bounded retention; conversation history, readiness evidence, the
+clarification-run projection, and review state SHALL remain unaffected, and the
+workspace SHALL render a valid empty or partial activity history without
+treating expiry as an error.
+
 #### Scenario: Raw runtime detail is not exposed
 
 - **WHEN** an upstream runtime produces tool output, hidden reasoning, a checkout path, or a provider-specific error
@@ -593,3 +599,8 @@ readiness.
 
 - **WHEN** a keyboard-only user reaches the Conversation pane
 - **THEN** the message field, submit/retry/cancel controls, status announcement, and any activity/Requirement navigation have accessible names and can be operated without pointer hover
+
+#### Scenario: Expired activity does not change canonical workspace state
+
+- **WHEN** older activity rows expire and are swept
+- **THEN** conversation, readiness/review, and session reads are unchanged and the workspace still renders

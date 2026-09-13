@@ -86,8 +86,8 @@ coordination and is explicitly NOT a retention target.
 ## Durable-table firewall
 
 1. Named operations only: the retention API is a single named sweep (plus its
-   bounded drain and a read-only backlog count) with fixed SQL; hosts never
-   hand-roll SQL (existing ownership mapping).
+   bounded drain and a bounded read-only backlog-existence probe) with fixed
+   SQL; hosts never hand-roll SQL (existing ownership mapping).
 2. Structural test: persistence Rust syntax is parsed with `syn`. Every SQL
    argument to a known SQL-executing call (`query`, `query_as`, `query_scalar`,
    `query_unchecked`, `query_as_unchecked`, `raw_sql`) must be a direct static
