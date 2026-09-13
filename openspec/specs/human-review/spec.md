@@ -1,0 +1,220 @@
+# human-review Specification
+
+## Purpose
+
+Presents existing human review contracts inside the canonical Requirement
+Conversation Workspace without creating a second review truth or route.
+
+## Requirements
+
+### Requirement: The canonical workspace is the only browser review surface
+
+The browser SHALL render human review in `/requirements/[id]`, alongside the
+existing Requirement, conversation, readiness, activity, and clarification
+workspace. It SHALL NOT add a review sub-route, alternate Requirement detail
+route, review-specific workspace, or browser-to-daemon connection.
+
+#### Scenario: Ready Requirement opens review in place
+
+- **WHEN** a user opens `/requirements/{id}` for a Ready Requirement
+- **THEN** the existing workspace renders review content and eligible actions in
+  that route, with no navigation to a second review surface
+
+#### Scenario: Rejected Requirement reopens in place
+
+- **WHEN** a reviewer opens a Rejected Requirement
+- **THEN** the same workspace offers Reopen when authorized and creates no
+  review-specific route or entity
+
+### Requirement: Review Packet response is review truth
+
+The workspace SHALL obtain review evidence, `assessment_id`, Ready-generation
+identity, and review concurrency values directly from
+`GET /requirements/{id}/review-packet`. It SHALL use the canonical Requirement
+read for current content/lifecycle and SHALL NOT reconstruct a packet from
+conversation messages, activity, transcript text, or client-owned readiness
+entities. Missing/non-current packets SHALL disable review actions rather than
+being inferred.
+
+#### Scenario: Transcript does not synthesize review evidence
+
+- **WHEN** conversation contains an assessment-looking agent message without a
+  current review packet
+- **THEN** the workspace shows no review action based on that message
+
+#### Scenario: Packet refresh replaces old truth
+
+- **WHEN** the workspace refetches a review packet
+- **THEN** the old packet cannot be submitted with the refreshed Requirement
+  state, and controls use only the refreshed response
+
+### Requirement: Review mutation identities match existing server contracts
+
+For Accept, Reject, and Request Changes, the workspace SHALL send both
+`assessment_id` from the current packet and `expected_state_version` from that
+packet/Requirement contract. Request Changes SHALL also send its validated
+feedback. For Reopen, the workspace SHALL send `expected_state_version` and
+SHALL NOT require or send `assessment_id`.
+
+The browser SHALL not optimistically change lifecycle or readiness. On success
+it SHALL refetch canonical Requirement and any applicable Review Packet state.
+
+#### Scenario: Ready decision carries assessment identity
+
+- **WHEN** an authorized reviewer accepts, rejects, or requests changes for a
+  current Ready packet
+- **THEN** the request contains that packet's `assessment_id` and exact
+  `expected_state_version`
+
+#### Scenario: Reopen has no assessment identity
+
+- **WHEN** an authorized reviewer reopens a Rejected Requirement
+- **THEN** the request contains only the current expected state version among
+  review concurrency identities
+
+#### Scenario: Success uses server projection
+
+- **WHEN** a review mutation succeeds
+- **THEN** the workspace displays the refetched server Requirement/packet state
+  and never a client-invented transition
+
+### Requirement: Review controls follow role and lifecycle permissions
+
+Requesters SHALL be able to read the existing workspace subject to existing
+access rules but SHALL see no actionable review controls. Requirement Manager,
+Admin, and Owner users MAY see and execute controls only where current
+lifecycle permits. These checks are UX gating; server authorization remains
+mandatory and authoritative.
+
+#### Scenario: Requester is read-only for review
+
+- **WHEN** a Requester views a Ready or Rejected Requirement
+- **THEN** review controls are absent or non-actionable, and a forged mutation
+  still receives server authorization failure
+
+#### Scenario: Client/server permission disagreement is safe
+
+- **WHEN** a client incorrectly shows a review control to an unauthorized user
+- **THEN** the server rejects the mutation and the workspace changes no
+  Requirement or packet state
+
+### Requirement: Stale review repair is explicit and preserves feedback
+
+When a review mutation returns HTTP 409 because Requirement content, lifecycle,
+Ready generation, assessment identity, or state version changed, the workspace
+SHALL leave the old packet unusable, apply no optimistic transition, refetch the
+canonical Requirement first or under one generation, and request Review Packet
+only if the refreshed Requirement is Ready. If it is no longer Ready, the old
+packet SHALL be dropped; Rejected Reopen remains Requirement-state-only. The
+workspace SHALL keep review mutations disabled until the reviewer performs
+an explicit accessible acknowledgement after stale repair: `Review refreshed
+packet` for a Ready decision, or `Review refreshed Requirement` for Reopen.
+Refetch/render completion alone is not inspection. The acknowledgement identity
+is `(requirement_state_version, assessment_id)` for Ready decisions and
+`requirement_state_version` for Reopen. A later SSE hint, focus/visibility
+repair, explicit refresh, or duplicate refetch SHALL preserve acknowledgement
+when that canonical identity is unchanged and SHALL invalidate it when the
+identity changes. The workspace SHALL NOT automatically retry.
+Unsent Request Changes feedback SHALL survive the refetch and stale notice.
+
+#### Scenario: Concurrent edit causes stale decision
+
+- **GIVEN** a reviewer loaded a current packet and another operation changes
+  Requirement content, lifecycle, Ready generation, or assessment
+- **WHEN** the reviewer submits the old packet and receives HTTP 409
+- **THEN** no lifecycle transition is applied in the browser, the canonical
+  Requirement is refetched and Review Packet is fetched only if the refreshed
+  Requirement is Ready; the old packet cannot be retried, and mutations stay
+  disabled until the reviewer explicitly acknowledges refreshed state
+
+#### Scenario: Request Changes draft survives stale repair
+
+- **WHEN** Request Changes feedback is unsent and its stale submission returns
+  HTTP 409
+- **THEN** the textarea retains its text while canonical data refreshes, and no
+  automatic resubmission occurs
+
+#### Scenario: Reopen stale repair uses Requirement state
+
+- **WHEN** a Reopen submission returns HTTP 409 and refreshed Requirement remains
+  Rejected
+- **THEN** the browser does not request a Review Packet, keeps Reopen disabled
+  until `Review refreshed Requirement` is acknowledged, and sends only the
+  refreshed `expected_state_version` on a later explicit retry
+
+#### Scenario: Refreshed packet is no longer reviewable
+
+- **WHEN** stale repair finds the Requirement no longer Ready or no longer
+  reviewable for that assessment
+- **THEN** Ready actions remain disabled and the reviewer sees the refreshed
+  canonical reason
+
+#### Scenario: Duplicate unchanged SSE hint preserves acknowledgement
+
+- **GIVEN** reviewer acknowledged Ready identity `(state_version, assessment_id)`
+- **WHEN** a duplicate SSE hint causes a canonical refetch with the same identity
+- **THEN** acknowledgement remains valid and actions do not require repeated
+  confirmation
+
+#### Scenario: Unchanged focus repair preserves acknowledgement
+
+- **GIVEN** reviewer acknowledged a Ready identity or Rejected state version
+- **WHEN** focus/visibility repair or explicit refetch returns the same identity
+- **THEN** acknowledgement remains valid
+
+#### Scenario: Changed Ready state version resets acknowledgement
+
+- **GIVEN** reviewer acknowledged a Ready review identity
+- **WHEN** canonical refresh returns a different `requirement_state_version`
+- **THEN** old acknowledgement is invalid and the reviewer must acknowledge the
+  latest identity before actions re-enable
+
+#### Scenario: Changed assessment identity resets acknowledgement
+
+- **GIVEN** reviewer acknowledged a Ready review identity
+- **WHEN** canonical refresh returns a different `assessment_id`
+- **THEN** old acknowledgement is invalid even if state version is unchanged
+
+#### Scenario: Reopen acknowledgement follows Rejected state version
+
+- **GIVEN** reviewer acknowledged Reopen for Rejected state version V
+- **WHEN** canonical refresh returns Rejected state version V+1
+- **THEN** Reopen acknowledgement is invalidated, while an unchanged V preserves
+  it
+
+### Requirement: Durable review audit remains server-owned
+
+Successful Accept, Reject, Request Changes, and Reopen operations SHALL retain
+the existing durable server audit write. The browser SHALL not label coarse
+conversation/activity records as review audit and SHALL not promise a
+review-history read projection that does not exist in the current server
+contract.
+
+#### Scenario: Decision audit is durable
+
+- **WHEN** a review transition commits
+- **THEN** the existing server audit transaction records the actor, transition,
+  state-version context, timestamp, feedback where supplied, and
+  `assessment_id` for Accept, Reject, and Request Changes
+
+#### Scenario: No implicit history subsystem
+
+- **WHEN** the workspace renders current review state
+- **THEN** it renders packet/Requirement truth only and does not invent a new
+  audit endpoint or history model
+
+### Requirement: Canonical refresh repairs review hints
+
+The workspace SHALL treat SSE review/readiness hints, reconnect, focus/visibility
+return, and explicit refresh as reasons to refetch canonical Requirement and
+applicable Review Packet state. It SHALL refetch Requirement first or under one
+generation, request a packet only for refreshed Ready state, and drop a packet
+when state is non-Ready. Hints SHALL not carry or become review truth; duplicate,
+late, and missed hints SHALL be safe.
+
+#### Scenario: Missed hint is repaired
+
+- **WHEN** the browser reconnects or returns to focus after a possible review
+  change
+- **THEN** it refetches canonical Requirement and conditionally Review Packet
+  state without using a daemon connection or transcript inference
