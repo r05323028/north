@@ -47,4 +47,4 @@
 
 ## 7. Owner actions (outside repo)
 
-- [ ] 7.1 Apply branch protection on main requiring the `gate` check (steps: docs/development/ci.md)
+- [x] 7.1 Branch-protection enforcement verified 2026-09-13: active repository ruleset `21581438` (`ruleset-default`, ref `~DEFAULT_BRANCH`, no bypass actors) requires status contexts `merge gate` (job id `gate`), `Rust (fmt, clippy, unit+architecture)`, and `PR title (Conventional Commit)`. Residual owner recommendation: that ruleset has `strict_required_status_checks_policy=false`, so "require branches up to date" remains a documented recommendation in docs/development/ci.md rather than enforced metadata.

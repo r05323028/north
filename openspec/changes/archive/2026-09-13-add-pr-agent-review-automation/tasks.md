@@ -19,7 +19,7 @@
 
 - [x] 4.1 Route PR-Agent through OpenCode Go MiMo-V2.5 Chat Completions and add stable per-PR session/user-agent headers.
 - [x] 4.2 Update canonical CI documentation and OpenSpec provider contract; validate model catalog and provider response.
-- [ ] 4.3 Keep target-workflow provider settings independent of stale default-branch `.pr_agent.toml` settings.
+- [x] 4.3 Keep target-workflow provider settings independent of stale default-branch `.pr_agent.toml` settings; structural guard in `tests/architecture/tests/architecture.rs` (`pr_agent_target_workflow_owns_provider_configuration`, `pr_agent_workflow_preserves_security_boundary`) pins trusted env keys, disables repository-settings lookup, rejects stale dotted keys, checks `.pr_agent.toml` pin drift, and protects the no-checkout/least-privilege/advisory boundary.
 
 ## Validation Notes
 
@@ -36,3 +36,4 @@
 - MiMo-V2.5 smoke request with stable session and North user-agent headers: HTTP 200 with usable message content.
 - Follow-up `yamllint`, `actionlint`, `git diff --check`, and `openspec validate --all --strict`: passed.
 - Follow-up pre-push validation reached integration checks but stopped because `NORTH_TEST_DATABASE_URL` was unset; native checks before that point passed.
+- Cleanup validation (2026-09-13, post-archive): `pr_agent_target_workflow_owns_provider_configuration` and `pr_agent_workflow_preserves_security_boundary` pass inside `cargo test -p north-architecture-tests` (17/17); `./scripts/validate.sh fast` passed; `openspec validate --all --strict` 27/27 and `openspec validate --archived --strict` 23/23 passed.
