@@ -1,10 +1,12 @@
+# runtime-retention Specification
+
 ## Purpose
 
 Makes forgetting safe: allowlisted ephemeral runtime telemetry expires on a
 schedule while durable product and coordination state remain structurally
 untouchable.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Retention applies only to explicitly allowlisted ephemeral data
 
@@ -75,17 +77,20 @@ non-expired rows, and SHALL not require replay or repair after a restart.
 One scheduler cycle SHALL drain expired telemetry by running bounded sweep
 passes while a pass deleted a full batch, SHALL stop when a pass deletes fewer
 rows than the batch bound, and SHALL stop at the configured maximum number of
-passes per cycle. Each pass SHALL remain an independent batch-bounded
-statement so a cycle never becomes one large transaction, and retention SHALL
-never run an unbounded loop. When the pass bound stops a cycle with expired
-rows still eligible, the cycle SHALL report that expired rows remain, using a
-bounded existence probe rather than an exact backlog count, and the next cycle
-continues the drain. Exact backlog size is an observability concern and SHALL
-not be coupled to retention progress.
+passes per cycle. The configured cycle capacity is the configured per-pass
+batch bound multiplied by the configured maximum passes per cycle.
 
-#### Scenario: Backlog larger than one batch recovers
+Each pass SHALL remain an independent batch-bounded statement so a cycle never
+becomes one large transaction, and retention SHALL never run an unbounded loop.
+When the pass bound stops a cycle with expired rows still eligible, the cycle
+SHALL report that expired rows remain, using a bounded existence probe rather
+than an exact backlog count, and the next cycle continues the drain. Exact
+backlog size is an observability concern and SHALL not be coupled to retention
+progress.
 
-- **WHEN** a cycle starts with more expired rows than one batch bound
+#### Scenario: Backlog within cycle capacity recovers
+
+- **WHEN** a cycle starts with more expired rows than one batch bound but no more than the configured cycle capacity
 - **THEN** the cycle runs several bounded passes, deletes the whole backlog, and stops when the backlog is exhausted
 
 #### Scenario: Exact cycle capacity does not report a limit
@@ -101,7 +106,7 @@ not be coupled to retention progress.
 #### Scenario: Restart preserves drain progress
 
 - **WHEN** the server restarts between cycles and a new cycle runs
-- **THEN** it continues from the persisted expiry state, deleting only eligible rows and reporting zero once the backlog is empty
+- **THEN** it continues from the persisted expiry state, deletes only eligible rows, and reports that no expired backlog remains once the backlog is empty
 
 ### Requirement: Deletion cannot change canonical product or coordination state
 

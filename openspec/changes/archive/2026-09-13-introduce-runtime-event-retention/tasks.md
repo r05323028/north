@@ -6,7 +6,7 @@
 - [x] 1.4 `RetentionConfig` with validating constructor and documented 0.1.0 defaults
 - [x] 1.5 Retention ticker wired beside the retry worker; failures logged and retried next tick
 - [x] 1.6 `build_app_with_retention` exposes validated settings; `build_app` delegates with defaults; prospective semantics documented
-- [x] 1.7 Bounded drain cycle: multiple batch-sized passes per cycle, stops on partial batch, respects max passes, reports remaining expired backlog, read-only backlog count
+- [x] 1.7 Bounded multi-pass drain cycle: runs multiple batch-sized passes per cycle, stops on a partial batch, respects the configured maximum passes, uses a bounded post-pass backlog existence probe instead of an exact unbounded count, and reports no remaining backlog when an exact-capacity cycle drains all eligible rows
 
 ## 2. Proofs
 
@@ -28,6 +28,6 @@
 
 ## 4. Validation
 
-- [ ] 4.1 `./scripts/validate.sh fast`
-- [ ] 4.2 PostgreSQL integration suites (`retention`, `retry_authority`, `migration_upgrade`) with `NORTH_TEST_DATABASE_URL`
-- [ ] 4.3 `openspec validate --all --strict`, `git diff --check`, pre-push validation
+- [x] 4.1 `./scripts/validate.sh fast` (executed 2026-09-13, passed: rust fmt/clippy/unit+arch, web lint/typecheck, openspec strict)
+- [x] 4.2 PostgreSQL integration suites (`retention`, `retry_authority`, `migration_upgrade`) with `NORTH_TEST_DATABASE_URL` (executed 2026-09-13 against isolated fresh databases: 9 + 5 + 1 tests passed)
+- [x] 4.3 `openspec validate --all --strict`, `git diff --check`, pre-push validation (executed 2026-09-13: strict validation 29/29, clean diff check, `./scripts/pre-push-validation.sh` native gate OK plus act rust job parity succeeded with `-P self-hosted=catthehacker/ubuntu:act-latest`)

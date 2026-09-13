@@ -86,8 +86,8 @@ coordination and is explicitly NOT a retention target.
 ## Durable-table firewall
 
 1. Named operations only: the retention API is a single named sweep (plus its
-   bounded drain and a read-only backlog count) with fixed SQL; hosts never
-   hand-roll SQL (existing ownership mapping).
+   bounded drain and a bounded read-only backlog-existence probe) with fixed
+   SQL; hosts never hand-roll SQL (existing ownership mapping).
 2. Structural test: persistence Rust syntax is parsed with `syn`. Every SQL
    argument to a known SQL-executing call (`query`, `query_as`, `query_scalar`,
    `query_unchecked`, `query_as_unchecked`, `raw_sql`) must be a direct static
@@ -115,10 +115,9 @@ coordination and is explicitly NOT a retention target.
 
 (none — resolved during refinement)
 
-## Merge-order note
+## Merge-order resolution
 
-The two MODIFIED capability deltas are generated against the canonical text on
-`main`. If the pending archive of `introduce-runtime-retry-and-failure-state`
-lands first, its canonical `clarification-runtime` wording replaces the
-requirement this change modifies; refresh the delta base and re-apply the
-retention additions instead of overwriting the retry semantics.
+The retry/failure-state archive landed before this change was archived. The
+retention deltas were refreshed against the resulting canonical
+`clarification-runtime` and `requirement-conversation-workspace` text before
+this archive was created, preserving both retry/failure and retention semantics.
