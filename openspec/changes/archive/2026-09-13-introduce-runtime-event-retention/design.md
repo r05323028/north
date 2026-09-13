@@ -115,10 +115,9 @@ coordination and is explicitly NOT a retention target.
 
 (none — resolved during refinement)
 
-## Merge-order note
+## Merge-order resolution
 
-The two MODIFIED capability deltas are generated against the canonical text on
-`main`. If the pending archive of `introduce-runtime-retry-and-failure-state`
-lands first, its canonical `clarification-runtime` wording replaces the
-requirement this change modifies; refresh the delta base and re-apply the
-retention additions instead of overwriting the retry semantics.
+The retry/failure-state archive landed before this change was archived. The
+retention deltas were refreshed against the resulting canonical
+`clarification-runtime` and `requirement-conversation-workspace` text before
+this archive was created, preserving both retry/failure and retention semantics.
