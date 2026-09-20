@@ -75,8 +75,9 @@ and generation-bound acknowledgement, is **Enforced** by Web Vitest and
 Playwright web-boundary coverage. Public endpoint abuse limiting is implemented
 with Rust identity/limiter unit tests and the ignored
 `public_endpoint_abuse` PostgreSQL/HTTP boundary suite; that suite requires
-`NORTH_TEST_DATABASE_URL` and remains unexecuted when the external database is
-unavailable. Execution retry is implemented and covered by Rust unit tests and
+`NORTH_TEST_DATABASE_URL` and is the PostgreSQL/HTTP boundary proof for the hardening change. The public endpoint suite proves concurrent client buckets, cooldown and
+pending-quota interaction, generic 429s, no-resource rejection, and migration
+compatibility against PostgreSQL. Execution retry is implemented and covered by Rust unit tests and
 server integration paths. PostgreSQL restart/concurrency proofs run in
 `retry_authority` and require `NORTH_TEST_DATABASE_URL`.
 

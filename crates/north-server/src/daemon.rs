@@ -25,7 +25,9 @@ use tokio::sync::mpsc;
 
 use crate::{
     auth::{AuthState, CurrentUser},
-    public_abuse::{rate_limited_response, PublicEndpoint},
+    public_abuse::{
+        rate_limited_response, PublicEndpoint, PublicEndpointCategory, PublicEndpointOutcome,
+    },
     roles::require_admin,
     transport::{self, DaemonConnection, DaemonTransportState},
 };
@@ -172,18 +174,17 @@ pub async fn request_setup(
     }
     let endpoint = PublicEndpoint::DaemonSetup;
     let identity = state.public_endpoint().identity(peer, &headers);
-    let permit = match state
+    if let Err(retry_after) = state
         .public_endpoint()
-        .reserve(endpoint, identity.primary_key.clone())
+        .try_consume(endpoint, identity.primary_key.as_str())
     {
-        Ok(permit) => permit,
-        Err(retry_after) => {
-            state
-                .public_endpoint()
-                .observe(endpoint, "rejected", "client_bucket");
-            return Err(DaemonHttpError::RateLimited { retry_after });
-        }
-    };
+        state.public_endpoint().observe(
+            endpoint,
+            PublicEndpointOutcome::Rejected,
+            PublicEndpointCategory::ClientBucket,
+        );
+        return Err(DaemonHttpError::RateLimited { retry_after });
+    }
     let request = match state
         .store()
         .create_daemon_setup_request(label, &identity.primary_key)
@@ -191,19 +192,22 @@ pub async fn request_setup(
     {
         Ok(request) => request,
         Err(PersistenceError::RateLimited) => {
-            state
-                .public_endpoint()
-                .observe(endpoint, "rejected", "pending_setup");
+            state.public_endpoint().observe(
+                endpoint,
+                PublicEndpointOutcome::Rejected,
+                PublicEndpointCategory::PendingSetup,
+            );
             return Err(DaemonHttpError::RateLimited {
                 retry_after: north_persistence::DAEMON_SETUP_TTL_SECONDS as u64,
             });
         }
         Err(error) => return Err(store_error(error)),
     };
-    permit.commit();
-    state
-        .public_endpoint()
-        .observe(endpoint, "allowed", "client_bucket");
+    state.public_endpoint().observe(
+        endpoint,
+        PublicEndpointOutcome::Allowed,
+        PublicEndpointCategory::ClientBucket,
+    );
     Ok(Json(SetupCreatedResponse {
         verification_path: format!("/daemon/setup/{}/approve", request.request_token),
         request_token: request.request_token,

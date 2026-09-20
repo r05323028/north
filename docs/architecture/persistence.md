@@ -45,7 +45,7 @@ processes, and server instances; `FOR UPDATE SKIP LOCKED` therefore lets only
 one concurrent worker claim each due row. Startup/polling discovers due rows
 from the database; reconnect/replay does not increment attempts.
 
-Public creation protection is **Partially Enforced** for only
+Public creation protection is **Enforced** for only
 `POST /auth/request-code` and `POST /daemon/setup/request`. Process-local
 endpoint buckets use the normalized effective client address, with IPv4 `/32`
 or IPv6 `/64` primary keys, capacity 5, one token per 120 seconds, and reset
@@ -55,8 +55,12 @@ durable `client_network_key`; legacy NULL rows retain claim/expiry behavior and
 are excluded from new keyed counts. Pending counts include unexpired, unclaimed
 pending or approved rows, exclude claimed/expired rows, and serialize count plus
 insert under `pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))`.
-Daemon labels never provide quota identity. Generic 429 and safe observability
-are implemented; PostgreSQL concurrency proof requires
+Daemon labels never provide quota identity. A valid request consumes its
+client token before resource-specific checks; cooldown or pending-quota rejection
+does not refund it, and malformed input consumes no token. Generic 429 and safe
+abuse-control observability are implemented; configured LogCodeDelivery output is
+a separate verification-code delivery boundary, not abuse-control telemetry.
+PostgreSQL concurrency proof runs with
 `NORTH_TEST_DATABASE_URL`.
 
 Registration rows retain hashed credentials, owner identity,

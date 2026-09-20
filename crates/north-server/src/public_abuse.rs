@@ -211,6 +211,38 @@ impl PublicEndpoint {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicEndpointOutcome {
+    Allowed,
+    Rejected,
+}
+
+impl PublicEndpointOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicEndpointCategory {
+    ClientBucket,
+    EmailCooldown,
+    PendingSetup,
+}
+
+impl PublicEndpointCategory {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientBucket => "client_bucket",
+            Self::EmailCooldown => "email_cooldown",
+            Self::PendingSetup => "pending_setup",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PublicEndpointConfig {
     pub trusted_proxy_cidrs: Vec<IpCidr>,
@@ -307,29 +339,25 @@ impl ClientRateLimiter {
         }
     }
 
-    pub fn reserve(
+    pub fn try_consume(
         &self,
         endpoint: PublicEndpoint,
         primary_key: impl Into<String>,
-    ) -> Result<RateLimitPermit, u64> {
+    ) -> Result<(), u64> {
         let key = BucketKey {
             endpoint,
             primary_key: primary_key.into(),
         };
         let now = self.clock.now();
         let mut state = self.state.lock().expect("client limiter mutex poisoned");
-        let bucket = state.buckets.entry(key.clone()).or_insert(TokenBucket {
+        let bucket = state.buckets.entry(key).or_insert(TokenBucket {
             tokens: self.capacity,
             updated_at: now,
         });
         self.refill(bucket, now);
         if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
-            Ok(RateLimitPermit {
-                limiter: self.clone(),
-                key,
-                committed: false,
-            })
+            Ok(())
         } else {
             let seconds = ((1.0 - bucket.tokens) * self.refill_interval.as_secs_f64()).ceil();
             Err((seconds as u64).max(1))
@@ -345,37 +373,6 @@ impl ClientRateLimiter {
             + elapsed.as_secs_f64() / self.refill_interval.as_secs_f64())
         .min(self.capacity);
         bucket.updated_at = now;
-    }
-
-    fn refund(&self, key: &BucketKey) {
-        let now = self.clock.now();
-        let mut state = self.state.lock().expect("client limiter mutex poisoned");
-        let bucket = state.buckets.entry(key.clone()).or_insert(TokenBucket {
-            tokens: self.capacity,
-            updated_at: now,
-        });
-        self.refill(bucket, now);
-        bucket.tokens = (bucket.tokens + 1.0).min(self.capacity);
-    }
-}
-
-pub struct RateLimitPermit {
-    limiter: ClientRateLimiter,
-    key: BucketKey,
-    committed: bool,
-}
-
-impl RateLimitPermit {
-    pub fn commit(mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for RateLimitPermit {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.limiter.refund(&self.key);
-        }
     }
 }
 
@@ -402,20 +399,25 @@ impl PublicEndpointState {
         resolve_client_identity(peer, headers, &self.config.trusted_proxy_cidrs)
     }
 
-    pub fn reserve(
+    pub fn try_consume(
         &self,
         endpoint: PublicEndpoint,
         primary_key: impl Into<String>,
-    ) -> Result<RateLimitPermit, u64> {
-        self.limiter.reserve(endpoint, primary_key)
+    ) -> Result<(), u64> {
+        self.limiter.try_consume(endpoint, primary_key)
     }
 
-    pub fn observe(&self, endpoint: PublicEndpoint, outcome: &'static str, category: &'static str) {
+    pub(crate) fn observe(
+        &self,
+        endpoint: PublicEndpoint,
+        outcome: PublicEndpointOutcome,
+        category: PublicEndpointCategory,
+    ) {
         eprintln!(
             "public_endpoint endpoint={} outcome={} category={} count=1",
             endpoint.as_str(),
-            outcome,
-            category
+            outcome.as_str(),
+            category.as_str()
         );
     }
 }
@@ -546,40 +548,36 @@ mod tests {
         let limiter = ClientRateLimiter::with_clock(5, Duration::from_secs(120), clock.clone());
         for _ in 0..5 {
             limiter
-                .reserve(PublicEndpoint::RequestCode, "192.0.2.7/32")
-                .expect("capacity")
-                .commit();
+                .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+                .expect("capacity");
         }
         assert!(matches!(
-            limiter.reserve(PublicEndpoint::RequestCode, "192.0.2.7/32"),
+            limiter.try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32"),
             Err(120)
         ));
         limiter
-            .reserve(PublicEndpoint::DaemonSetup, "192.0.2.7/32")
-            .expect("endpoint isolation")
-            .commit();
+            .try_consume(PublicEndpoint::DaemonSetup, "192.0.2.7/32")
+            .expect("endpoint isolation");
         clock.advance(Duration::from_secs(120));
         limiter
-            .reserve(PublicEndpoint::RequestCode, "192.0.2.7/32")
-            .expect("refill")
-            .commit();
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+            .expect("refill");
     }
 
     #[test]
-    fn dropped_permit_refunds_client_bucket() {
+    fn consumed_token_is_not_refunded() {
         let limiter = ClientRateLimiter::new(1, Duration::from_secs(120));
-        let permit = limiter
-            .reserve(PublicEndpoint::RequestCode, "192.0.2.7/32")
-            .expect("capacity");
-        drop(permit);
         limiter
-            .reserve(PublicEndpoint::RequestCode, "192.0.2.7/32")
-            .expect("refund")
-            .commit();
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+            .expect("capacity");
+        assert!(matches!(
+            limiter.try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32"),
+            Err(120)
+        ));
     }
 
     #[test]
-    fn concurrent_reservations_cannot_bypass_capacity() {
+    fn concurrent_consumption_cannot_bypass_capacity() {
         let limiter = ClientRateLimiter::new(5, Duration::from_secs(120));
         let successes = Arc::new(AtomicUsize::new(0));
         std::thread::scope(|scope| {
@@ -587,9 +585,10 @@ mod tests {
                 let limiter = limiter.clone();
                 let successes = successes.clone();
                 scope.spawn(move || {
-                    if let Ok(permit) = limiter.reserve(PublicEndpoint::RequestCode, "192.0.2.7/32")
+                    if limiter
+                        .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+                        .is_ok()
                     {
-                        permit.commit();
                         successes.fetch_add(1, Ordering::Relaxed);
                     }
                 });

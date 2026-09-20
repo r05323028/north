@@ -291,9 +291,9 @@ async fn public_http_429_is_generic_and_endpoint_buckets_are_isolated() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
-async fn email_cooldown_does_not_consume_client_bucket() {
+async fn email_cooldown_consumes_client_bucket() {
     let (pool, _database_test_guard) = database().await;
-    let app = auth_router(AuthState::with_log_delivery(AuthStore::new(pool)));
+    let app = auth_router(AuthState::with_log_delivery(AuthStore::new(pool.clone())));
     let email = unique_email("cooldown");
     let response = app
         .clone()
@@ -307,28 +307,30 @@ async fn email_cooldown_does_not_consume_client_bucket() {
         .expect("initial request-code response");
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 
-    let response = app
-        .clone()
-        .oneshot(request(
-            "127.0.0.2:443",
-            Method::POST,
-            "/auth/request-code",
-            &format!(r#"{{"email":"{email}"}}"#),
-        ))
-        .await
-        .expect("cooldown response");
-    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok()),
-        Some("60")
-    );
-    assert_eq!(
-        json_body(response).await,
-        serde_json::json!({"error": "rate_limited"})
-    );
+    for _ in 0..4 {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "127.0.0.2:443",
+                Method::POST,
+                "/auth/request-code",
+                &format!(r#"{{"email":"{email}"}}"#),
+            ))
+            .await
+            .expect("cooldown response");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("60")
+        );
+        assert_eq!(
+            json_body(response).await,
+            serde_json::json!({"error": "rate_limited"})
+        );
+    }
 
     let response = app
         .oneshot(request(
@@ -338,6 +340,144 @@ async fn email_cooldown_does_not_consume_client_bucket() {
             &format!(r#"{{"email":"{}"}}"#, unique_email("after-cooldown")),
         ))
         .await
-        .expect("post-cooldown request-code response");
+        .expect("client bucket response");
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("120")
+    );
+    assert_eq!(
+        json_body(response).await,
+        serde_json::json!({"error": "rate_limited"})
+    );
+
+    let issued: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM verification_codes WHERE email = $1")
+            .bind(&email)
+            .fetch_one(&pool)
+            .await
+            .expect("count issued verification codes");
+    assert_eq!(issued, 1, "cooldown rejections must create no code");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn pending_setup_quota_consumes_client_bucket() {
+    let (pool, _database_test_guard) = database().await;
+    let app = auth_router(AuthState::with_log_delivery(AuthStore::new(pool.clone())));
+    let peer = "127.0.0.3:443";
+    let label_prefix = unique("pending-client");
+
+    for index in 0..3 {
+        let response = app
+            .clone()
+            .oneshot(request(
+                peer,
+                Method::POST,
+                "/daemon/setup/request",
+                &format!(r#"{{"label":"{label_prefix}-accepted-{index}"}}"#),
+            ))
+            .await
+            .expect("accepted setup response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    for index in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(request(
+                peer,
+                Method::POST,
+                "/daemon/setup/request",
+                &format!(r#"{{"label":"{label_prefix}-quota-rejected-{index}"}}"#),
+            ))
+            .await
+            .expect("pending quota response");
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("600")
+        );
+        assert_eq!(
+            json_body(response).await,
+            serde_json::json!({"error": "rate_limited"})
+        );
+    }
+
+    let response = app
+        .oneshot(request(
+            peer,
+            Method::POST,
+            "/daemon/setup/request",
+            &format!(r#"{{"label":"{label_prefix}-client-rejected"}}"#),
+        ))
+        .await
+        .expect("client bucket response");
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+        Some("120")
+    );
+    assert_eq!(
+        json_body(response).await,
+        serde_json::json!({"error": "rate_limited"})
+    );
+
+    let created: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM daemon_setup_requests
+         WHERE label LIKE $1
+           AND client_network_key = '127.0.0.3/32'::cidr",
+    )
+    .bind(format!("{label_prefix}-%"))
+    .fetch_one(&pool)
+    .await
+    .expect("count setup rows");
+    assert_eq!(
+        created, 3,
+        "quota and client rejections create no setup row"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn malformed_request_does_not_consume_client_bucket() {
+    let (pool, _database_test_guard) = database().await;
+    let config = PublicEndpointConfig {
+        bucket_capacity: 1,
+        bucket_refill_interval: Duration::from_secs(120),
+        ..PublicEndpointConfig::default()
+    };
+    let app = auth_router(AuthState::with_public_endpoint_config(
+        AuthStore::new(pool),
+        Arc::new(LogCodeDelivery),
+        config,
+    ));
+    let peer = "127.0.0.4:443";
+    let response = app
+        .clone()
+        .oneshot(request(peer, Method::POST, "/auth/request-code", r#"{}"#))
+        .await
+        .expect("malformed request response");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .oneshot(request(
+            peer,
+            Method::POST,
+            "/auth/request-code",
+            &format!(r#"{{"email":"{}"}}"#, unique_email("after-malformed")),
+        ))
+        .await
+        .expect("valid request response");
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }

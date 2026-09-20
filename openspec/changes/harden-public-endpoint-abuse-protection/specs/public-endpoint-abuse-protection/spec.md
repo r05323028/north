@@ -72,7 +72,11 @@ reset on process restart. The endpoints SHALL retain separate durable resource
 controls and SHALL NOT claim cross-process or cross-instance limiter guarantees,
 add Redis, or use a generic platform.
 
-Request-code resource control SHALL use normalized email identity. New daemon
+Request-code resource control SHALL use normalized email identity. A syntactically
+valid request that passes its client bucket SHALL consume that token immediately;
+later email cooldown or pending-quota rejection SHALL NOT refund it. Malformed
+requests rejected before client identity/limiter evaluation SHALL consume no token.
+New daemon
 setup rows SHALL persist the durable setup quota key (the same CIDR primary
 limiter key) and enforce a bounded count of unexpired, unclaimed rows for that
 key (default maximum 3 per durable setup quota key in 0.1.0). The transaction SHALL acquire
@@ -132,13 +136,18 @@ code, setup token, daemon credential, or raw exception.
 
 ### Requirement: Public protection is observable without secrets
 
-The server SHALL record safe endpoint, allowed/rejected outcome, and coarse
-limiter category metrics or structured events. It SHALL NOT log verification
-codes, setup tokens, daemon credentials, raw forwarding headers, raw email
-addresses, full labels, or unnecessary raw resource identifiers.
+The server SHALL record abuse-control endpoint, allowed/rejected outcome, and
+coarse limiter category metrics or structured events. Abuse-control telemetry SHALL NOT contain verification codes, setup tokens,
+daemon credentials, raw forwarding headers, raw email addresses, full labels, or
+unnecessary raw resource identifiers.
+
+An explicitly configured CodeDelivery sink such as LogCodeDelivery is a
+separate verification-code delivery boundary and is not abuse-control telemetry;
+existing development/self-hosted delivery behavior remains intact.
 
 #### Scenario: Rejection telemetry is redacted
 
 - **WHEN** a public request is rejected by a limiter
-- **THEN** telemetry can distinguish endpoint and safe category but contains no
-  code, credential, token, raw email, or forwarding-header value
+- **THEN** abuse-control telemetry can distinguish endpoint and safe category
+  but contains no code, credential, token, raw email, or forwarding-header value,
+  while a separately configured delivery sink may emit its own delivery output

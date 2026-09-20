@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
 
 use crate::public_abuse::{
-    rate_limited_response, PublicEndpoint, PublicEndpointConfig, PublicEndpointState,
+    rate_limited_response, PublicEndpoint, PublicEndpointCategory, PublicEndpointConfig,
+    PublicEndpointOutcome, PublicEndpointState,
 };
 
 pub const SESSION_COOKIE_NAME: &str = "north_session";
@@ -39,6 +40,8 @@ impl fmt::Display for DeliveryError {
 
 impl std::error::Error for DeliveryError {}
 
+/// Development/self-hosted delivery sink. Its logs are delivery output, not
+/// abuse-control telemetry; the public-abuse observer never receives these values.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogCodeDelivery;
 
@@ -319,35 +322,37 @@ pub async fn request_code(
     let email = normalize_email(&payload.email).ok_or(AuthHttpError::BadRequest)?;
     let endpoint = PublicEndpoint::RequestCode;
     let identity = state.public_endpoint().identity(peer, &headers);
-    let permit = match state
+    if let Err(retry_after) = state
         .public_endpoint()
-        .reserve(endpoint, identity.primary_key)
+        .try_consume(endpoint, identity.primary_key)
     {
-        Ok(permit) => permit,
-        Err(retry_after) => {
-            state
-                .public_endpoint()
-                .observe(endpoint, "rejected", "client_bucket");
-            return Err(AuthHttpError::RateLimited { retry_after });
-        }
-    };
+        state.public_endpoint().observe(
+            endpoint,
+            PublicEndpointOutcome::Rejected,
+            PublicEndpointCategory::ClientBucket,
+        );
+        return Err(AuthHttpError::RateLimited { retry_after });
+    }
     let code = generate_code();
 
     if let Err(error) = state.store.issue_code(&email, &code).await {
         if matches!(&error, PersistenceError::RateLimited) {
-            state
-                .public_endpoint()
-                .observe(endpoint, "rejected", "email_cooldown");
+            state.public_endpoint().observe(
+                endpoint,
+                PublicEndpointOutcome::Rejected,
+                PublicEndpointCategory::EmailCooldown,
+            );
             return Err(AuthHttpError::RateLimited {
                 retry_after: CODE_REQUEST_COOLDOWN_SECONDS as u64,
             });
         }
         return Err(error.into());
     }
-    permit.commit();
-    state
-        .public_endpoint()
-        .observe(endpoint, "allowed", "client_bucket");
+    state.public_endpoint().observe(
+        endpoint,
+        PublicEndpointOutcome::Allowed,
+        PublicEndpointCategory::ClientBucket,
+    );
     state
         .delivery
         .send(&email, &code)

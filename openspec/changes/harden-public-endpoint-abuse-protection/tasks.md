@@ -21,7 +21,8 @@
 - [x] Add the smallest concurrency-safe token buckets for the two in-scope
       endpoints, with documented defaults (capacity 5, refill 1/120s).
 - [x] Make clock/token state injectable for deterministic tests.
-- [x] Document process-local scope and reset-on-restart behavior; add no Redis,
+- [x] Document process-local scope and reset-on-restart behavior; consume a
+      token immediately after client admission with no refund path; add no Redis,
       HA, provider registry, or generic limiter service.
 - [x] Prove endpoint isolation and that concurrent requests cannot bypass the
       in-process bucket.
@@ -47,7 +48,10 @@
       cleanup; rejected requests create no setup row or credential.
 - [x] Add concurrent PostgreSQL tests for quota bypass attempts, client/resource
       isolation, claimed/expired-row behavior, no resource creation on rejection,
-      and legitimate success.
+      legitimate success, and pending-quota rejection consumption of the client
+      bucket.
+- [x] Prove repeated email-cooldown rejection consumes client-bucket capacity;
+      preserve independent email cooldown and client-rate controls.
 
 ## 4. Errors and observability
 
@@ -56,8 +60,9 @@
       maximum safe retry delay when multiple controls reject.
 - [x] Keep invalid/auth/setup errors generic and responses free of codes,
       tokens, credentials, raw runtime details, and account enumeration clues.
-- [x] Add safe endpoint/category/allow-reject metrics or structured events;
-      redact raw email, labels, forwarding headers, codes, and credentials.
+- [x] Add typed safe endpoint/category/allow-reject abuse observations; the
+      observe path accepts no request secrets, and configured code delivery stays
+      a separate boundary.
 - [x] Test cooldown versus client-rate rejection as distinct controls.
 
 ## 5. Documentation and validation

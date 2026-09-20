@@ -28,8 +28,9 @@ or attacker-controlled daemon labels.
   budget, generic auth errors, and secret-free responses.
 - Return one generic HTTP 429 contract with stable `rate_limited` code and safe
   `Retry-After`; do not reveal which quota fired or enable enumeration.
-- Record safe endpoint/category/count observability without codes, credentials,
-  raw email, or unnecessary resource identifiers.
+- Record abuse-control endpoint/category/count observability without codes,
+  credentials, raw email, or unnecessary resource identifiers. A configured
+  verification-code delivery sink remains a separate delivery boundary.
 
 ## Capabilities
 

@@ -3,9 +3,12 @@
 ### Requirement: Verification code issuance
 
 The system SHALL accept an email address and issue a short-lived, single-use
-verification code for it, delivered through backend logs in 0.1.0. At most one
-active code SHALL exist per normalized email; requesting a new code supersedes
-the old. The API response MUST NOT contain the code. Each issued code SHALL
+verification code for it through the configured CodeDelivery sink in 0.1.0; the
+default LogCodeDelivery sink emits that development/self-hosted delivery output
+through backend logs. This delivery boundary is separate from abuse-control
+telemetry. At most one active code SHALL exist per normalized email; requesting
+a new code supersedes the old. The API response MUST NOT contain the code.
+Each issued code SHALL
 have a small bounded failed-verification-attempt budget. Failed attempts SHALL
 be counted transactionally for that issued code; reaching the limit SHALL
 invalidate the code. A successful verification SHALL consume the code as
@@ -30,8 +33,9 @@ response SHALL not reveal whether an email has an active code or account.
 
 - **WHEN** a client bucket rejects a request or the normalized email cooldown
   rejects a request
-- **THEN** no code is created, the response is generic 429, and exhausting one
-  control does not mutate or consume the other control's state
+- **THEN** no code is created and the response is generic 429; a client-bucket
+  rejection does not mutate email state, while a cooldown rejection consumes the
+  client token already admitted and does not reset or replace either control
 
 #### Scenario: Concurrent code requests stay bounded
 

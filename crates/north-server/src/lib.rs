@@ -31,7 +31,7 @@ pub use auth::{
 pub use conversations::{ConversationHttpError, ConversationResponse, MessageResponse};
 pub use public_abuse::{
     CidrParseError, ClientIdentity, ClientRateLimiter, Clock, IpCidr, PublicEndpoint,
-    PublicEndpointConfig, PublicEndpointState, RateLimitPermit, SystemClock,
+    PublicEndpointConfig, PublicEndpointState, SystemClock,
 };
 pub use repositories::{RepositoryHttpError, RepositoryResponse};
 pub use requirements::{RequirementHttpError, RequirementResponse};
