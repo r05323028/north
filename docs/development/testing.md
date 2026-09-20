@@ -66,19 +66,22 @@ member so `cargo test --workspace` executes it.
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
 | Unit (Web) | Implemented — Vitest via `npm test` in `apps/web` |
-| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, repository lifecycle/citation, durable coordination, runtime activity retention, and post-commit browser notification coverage; execute with `NORTH_TEST_DATABASE_URL` |
+| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, public endpoint abuse controls, repository lifecycle/citation, durable coordination, runtime activity retention, and post-commit browser notification coverage; execute with `NORTH_TEST_DATABASE_URL` |
 | E2E | Partial — Playwright web-boundary coverage includes Board/List/create/direct workspace, SSE invalidation, and human review; full server-backed assembled workflow remains pending |
 | Smoke | Not implemented — arrives with runnable server/web artifacts |
 
 Human-review browser integration, including Review Packet loading, stale repair,
 and generation-bound acknowledgement, is **Enforced** by Web Vitest and
-Playwright web-boundary coverage. Public endpoint abuse limiting remains a
-specified target; execution retry is implemented and covered by Rust unit tests
-and server integration paths. PostgreSQL restart/concurrency proofs run in
-`retry_authority` and require `NORTH_TEST_DATABASE_URL`; they are skipped only
-when that external database is unavailable.
+Playwright web-boundary coverage. Public endpoint abuse limiting is implemented
+with Rust identity/limiter unit tests and the ignored
+`public_endpoint_abuse` PostgreSQL/HTTP boundary suite; that suite requires
+`NORTH_TEST_DATABASE_URL` and is the PostgreSQL/HTTP boundary proof for the hardening change. The public endpoint suite proves concurrent client buckets, cooldown and
+pending-quota interaction, generic 429s, no-resource rejection, and migration
+compatibility against PostgreSQL. Execution retry is implemented and covered by Rust unit tests and
+server integration paths. PostgreSQL restart/concurrency proofs run in
+`retry_authority` and require `NORTH_TEST_DATABASE_URL`.
 
-PostgreSQL integration also exercises legacy readiness schema upgrades and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it. Runtime activity retention sweeps, their amnesia proof, and the migration-0017 expiry backfill run in `retention` and `migration_upgrade` under the same prerequisite.
+PostgreSQL integration also exercises public endpoint quota/HTTP-boundary controls, legacy readiness schema upgrades, and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it. Runtime activity retention sweeps, their amnesia proof, and the migration-0017 expiry backfill run in `retention` and `migration_upgrade` under the same prerequisite.
 
 ## Coverage matrix
 

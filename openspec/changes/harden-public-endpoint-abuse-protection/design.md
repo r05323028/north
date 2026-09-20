@@ -7,11 +7,17 @@ Only these unauthenticated resource-creating endpoints are in scope:
 - `POST /auth/request-code`
 - `POST /daemon/setup/request`
 
-Apply basic request parsing/normalization first. For a syntactically valid
-request, apply the client-wide limiter before the durable resource-specific
-transaction. A rejected request creates no code, setup row, credential, or
-other protected resource. Existing cleanup may run only as part of the normal
-setup path and does not make a rejected request successful.
+Apply basic request parsing/normalization first. JSON extractor failures on
+setup requests (malformed JSON, missing fields, wrong types, missing content
+type, or unsupported content type) map to North's generic `bad_request` response
+before identity or limiter evaluation. For a syntactically valid request,
+consume one client-bucket token before the durable resource-specific
+transaction. Once consumed, that token is final: a later email cooldown, pending
+setup quota, delivery, or persistence rejection MUST NOT refund it. A malformed
+request that never reaches the limiter consumes no token. A rejected request
+creates no code, setup row, credential, or other protected resource. Existing
+cleanup may run only as part of the normal setup path and does not make a
+rejected request successful.
 
 The request-code verification endpoint is not rate-limited by this capability;
 its existing failed-verification budget remains a separate control.
@@ -24,6 +30,8 @@ to a canonical IP value before comparison or keying:
 - IPv4 stays IPv4.
 - IPv6 stays IPv6.
 - IPv4-mapped IPv6 (`::ffff:192.0.2.1`) becomes IPv4 `192.0.2.1`.
+- IPv4-compatible IPv6 (`::192.0.2.1`), loopback IPv6, and all other IPv6
+  remain IPv6; only mapped addresses use the IPv4 conversion.
 - A malformed or missing address is not accepted as a trusted client claim;
   use the transport's peer failure path rather than an attacker-provided value.
 
@@ -71,9 +79,11 @@ startup; no guessed private-network trust is enabled.
 ## 4. Limiter storage and limits
 
 Use an in-process, concurrency-safe token bucket keyed by endpoint plus the
-primary limiter key. It is intentionally coarse and resets on process restart;
-this restart behavior is documented and does not claim cross-instance
-protection. Defaults are bounded and configurable:
+primary limiter key. Admission is consumption, not a transactional reservation:
+a successful bucket check spends the token immediately and there is no refund
+path. It is intentionally coarse and resets on process restart; this restart
+behavior is documented and does not claim cross-instance protection. Defaults
+are bounded and configurable:
 
 - request-code: capacity 5, refill 1 token per 120 seconds per IPv4 `/32` or
   IPv6 `/64` primary key;
@@ -81,8 +91,14 @@ protection. Defaults are bounded and configurable:
   IPv6 `/64` primary key.
 
 The implementation calculates a safe integer `Retry-After` from the bucket and
-never exposes bucket counts. One process-local mutex/map is enough; do not add a
-new cache service or abstraction layer.
+never exposes bucket counts. Each endpoint namespace has a hard maximum of 4096
+bucket entries by default. Every access performs bounded lazy cleanup: refill
+candidates and evict only buckets that are fully refilled and have been untouched
+for at least one refill interval. Active or partially filled buckets stay in the
+map. If a new key reaches the endpoint cap and no safe candidate exists, reject
+it with the generic 429 contract and a positive refill-based `Retry-After`; do
+not bypass the limiter. One process-local mutex/map is enough; do not add a
+background task, cache service, or abstraction layer.
 
 Durable resource-specific controls remain separate:
 
@@ -143,12 +159,17 @@ their existing generic contract.
 
 ## 6. Observability
 
-Emit counters/structured events with endpoint (`request_code` or `daemon_setup`),
+Emit abuse-control counters/structured events with endpoint (`request_code` or `daemon_setup`),
 allowed/rejected outcome, and coarse limiter category. Category names may be
 `client_bucket`, `email_cooldown`, or `pending_setup`; they are operator
-telemetry, not response data. Never log codes, daemon credentials, setup tokens,
+telemetry, not response data. Abuse-control telemetry MUST NOT contain verification codes, setup tokens, daemon credentials,
 raw `X-Forwarded-For`, raw email addresses, full daemon labels, or raw resource
 identifiers. If correlation is needed, use a short non-reversible request ID.
+
+An explicitly configured CodeDelivery sink such as LogCodeDelivery is a
+separate verification-code delivery boundary and may emit its configured
+development/self-hosted delivery output; that output is not abuse-control
+telemetry.
 
 ## 7. Testable behavior
 

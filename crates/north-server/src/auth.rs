@@ -1,5 +1,5 @@
 use axum::{
-    extract::{rejection::JsonRejection, Json, Request, State},
+    extract::{rejection::JsonRejection, ConnectInfo, Json, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -12,7 +12,12 @@ use north_persistence::{
 };
 use rand::{rng, Rng};
 use serde::{Deserialize, Serialize};
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
+
+use crate::public_abuse::{
+    rate_limited_response, PublicEndpoint, PublicEndpointCategory, PublicEndpointConfig,
+    PublicEndpointOutcome, PublicEndpointState,
+};
 
 pub const SESSION_COOKIE_NAME: &str = "north_session";
 pub const VERIFICATION_CODE_LENGTH: usize = 6;
@@ -35,6 +40,8 @@ impl fmt::Display for DeliveryError {
 
 impl std::error::Error for DeliveryError {}
 
+/// Development/self-hosted delivery sink. Its logs are delivery output, not
+/// abuse-control telemetry; the public-abuse observer never receives these values.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogCodeDelivery;
 
@@ -51,10 +58,27 @@ pub struct AuthState {
     delivery: Arc<dyn CodeDelivery>,
     daemon_runtime: crate::daemon::DaemonRuntime,
     events: crate::events::BrowserEventHub,
+    public_endpoint: PublicEndpointState,
 }
 
 impl AuthState {
     pub fn new(store: AuthStore, delivery: Arc<dyn CodeDelivery>) -> Self {
+        Self::with_public_endpoint_config(store, delivery, PublicEndpointConfig::default())
+    }
+
+    pub fn with_public_endpoint_config(
+        store: AuthStore,
+        delivery: Arc<dyn CodeDelivery>,
+        config: PublicEndpointConfig,
+    ) -> Self {
+        Self::with_public_endpoint_state(store, delivery, PublicEndpointState::new(config))
+    }
+
+    pub fn with_public_endpoint_state(
+        store: AuthStore,
+        delivery: Arc<dyn CodeDelivery>,
+        public_endpoint: PublicEndpointState,
+    ) -> Self {
         let events = crate::events::BrowserEventHub::new();
         Self {
             daemon_runtime: crate::daemon::DaemonRuntime::new_with_events(
@@ -64,6 +88,7 @@ impl AuthState {
             store,
             delivery,
             events,
+            public_endpoint,
         }
     }
 
@@ -81,6 +106,10 @@ impl AuthState {
 
     pub fn events(&self) -> &crate::events::BrowserEventHub {
         &self.events
+    }
+
+    pub fn public_endpoint(&self) -> &PublicEndpointState {
+        &self.public_endpoint
     }
 }
 
@@ -110,7 +139,7 @@ impl CurrentUser {
 pub enum AuthHttpError {
     BadRequest,
     InvalidCode,
-    RateLimited,
+    RateLimited { retry_after: u64 },
     Unauthorized,
     Internal,
 }
@@ -120,7 +149,7 @@ impl AuthHttpError {
         match self {
             Self::BadRequest => "invalid authentication request",
             Self::InvalidCode => "invalid or expired verification code",
-            Self::RateLimited => "verification code request rate limited",
+            Self::RateLimited { .. } => "verification code request rate limited",
             Self::Unauthorized => "authentication required",
             Self::Internal => "authentication service unavailable",
         }
@@ -131,7 +160,9 @@ impl From<PersistenceError> for AuthHttpError {
     fn from(error: PersistenceError) -> Self {
         match error {
             PersistenceError::InvalidCode => Self::InvalidCode,
-            PersistenceError::RateLimited => Self::RateLimited,
+            PersistenceError::RateLimited => Self::RateLimited {
+                retry_after: CODE_REQUEST_COOLDOWN_SECONDS as u64,
+            },
             PersistenceError::Database(_)
             | PersistenceError::InvalidRole(_)
             | PersistenceError::InvalidDaemonCredential
@@ -164,10 +195,13 @@ struct PublicMessage {
 
 impl IntoResponse for AuthHttpError {
     fn into_response(self) -> Response {
-        let status = match self {
+        if let Self::RateLimited { retry_after } = self {
+            return rate_limited_response(retry_after);
+        }
+        let status = match &self {
             Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::InvalidCode => StatusCode::UNAUTHORIZED,
-            Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -280,13 +314,45 @@ fn start_retention_worker(state: &AuthState) {
 
 pub async fn request_code(
     State(state): State<AuthState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     payload: Result<Json<RequestCodeRequest>, JsonRejection>,
 ) -> Result<Response, AuthHttpError> {
     let Json(payload) = payload.map_err(|_| AuthHttpError::BadRequest)?;
     let email = normalize_email(&payload.email).ok_or(AuthHttpError::BadRequest)?;
+    let endpoint = PublicEndpoint::RequestCode;
+    let identity = state.public_endpoint().identity(peer, &headers);
+    if let Err(retry_after) = state
+        .public_endpoint()
+        .try_consume(endpoint, identity.primary_key)
+    {
+        state.public_endpoint().observe(
+            endpoint,
+            PublicEndpointOutcome::Rejected,
+            PublicEndpointCategory::ClientBucket,
+        );
+        return Err(AuthHttpError::RateLimited { retry_after });
+    }
     let code = generate_code();
 
-    state.store.issue_code(&email, &code).await?;
+    if let Err(error) = state.store.issue_code(&email, &code).await {
+        if matches!(&error, PersistenceError::RateLimited) {
+            state.public_endpoint().observe(
+                endpoint,
+                PublicEndpointOutcome::Rejected,
+                PublicEndpointCategory::EmailCooldown,
+            );
+            return Err(AuthHttpError::RateLimited {
+                retry_after: CODE_REQUEST_COOLDOWN_SECONDS as u64,
+            });
+        }
+        return Err(error.into());
+    }
+    state.public_endpoint().observe(
+        endpoint,
+        PublicEndpointOutcome::Allowed,
+        PublicEndpointCategory::ClientBucket,
+    );
     state
         .delivery
         .send(&email, &code)
@@ -418,7 +484,7 @@ mod tests {
         for error in [
             AuthHttpError::BadRequest,
             AuthHttpError::InvalidCode,
-            AuthHttpError::RateLimited,
+            AuthHttpError::RateLimited { retry_after: 60 },
             AuthHttpError::Unauthorized,
             AuthHttpError::Internal,
         ] {

@@ -32,7 +32,7 @@ North's CI workflows are pinned to immutable action revisions, use explicit job 
 
 5. **Enable automatic review only.** Description generation and code improvement are disabled to keep output advisory and avoid automated source mutations. Review triggers mirror the workflow event types.
 
-6. **Keep reviewer guidance versioned and target-safe.** `.pr_agent.toml` remains the review configuration source for the default branch and manual use, while the target workflow repeats the provider and reviewer settings needed before a PR's file reaches that branch. Keep both copies synchronized; provider credentials remain in repository settings. Guidance tells PR-Agent to prioritize North's invariants, architecture boundaries, security, data loss, and regression coverage.
+6. **Keep reviewer guidance versioned and target-safe.** `.pr_agent.toml` is the configuration for manual/local PR-Agent runs, not an input to the `pull_request_target` workflow: that job sets `CONFIG__USE_REPO_SETTINGS_FILE=false` and pins provider/model/reviewer settings in container-compatible environment keys, so stale or PR-influenced repository settings can never reach it. Keep the manual file and the workflow pins synchronized; structural tests assert trusted workflow ownership and the security boundary. Provider credentials remain in repository settings. Guidance tells PR-Agent to prioritize North's invariants, architecture boundaries, security, data loss, and regression coverage.
 
 ## Risks / Trade-offs
 

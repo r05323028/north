@@ -5,6 +5,7 @@ use subtle::ConstantTimeEq;
 pub const DAEMON_SETUP_TTL_SECONDS: i64 = 10 * 60;
 pub const DAEMON_SETUP_RETENTION_SECONDS: i64 = 24 * 60 * 60;
 pub const DAEMON_SETUP_CLEANUP_BATCH_SIZE: i64 = 100;
+pub const DAEMON_SETUP_PENDING_LIMIT: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonSetupRequest {
@@ -99,21 +100,46 @@ impl AuthStore {
     pub async fn create_daemon_setup_request(
         &self,
         label: &str,
+        client_network_key: &str,
     ) -> Result<DaemonSetupRequest, PersistenceError> {
+        if client_network_key.trim().is_empty() {
+            return Err(PersistenceError::InvalidSetup);
+        }
         self.cleanup_expired_daemon_setup_requests().await?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(client_network_key)
+            .execute(&mut *transaction)
+            .await?;
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM daemon_setup_requests
+             WHERE client_network_key = $1::cidr
+               AND claimed_at IS NULL
+               AND expires_at > CURRENT_TIMESTAMP",
+        )
+        .bind(client_network_key)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if pending >= DAEMON_SETUP_PENDING_LIMIT {
+            return Err(PersistenceError::RateLimited);
+        }
+
         let request_token = random_hex(32);
         sqlx::query(
             "INSERT INTO daemon_setup_requests
-                (id, request_token_hash, label, expires_at)
+                (id, request_token_hash, label, expires_at, client_network_key)
              VALUES ($1, $2, $3, CURRENT_TIMESTAMP
-                 + ($4::double precision * INTERVAL '1 second'))",
+                 + ($4::double precision * INTERVAL '1 second'), $5::cidr)",
         )
         .bind(random_hex(16))
         .bind(hash_secret(request_token.as_bytes()))
         .bind(label)
         .bind(DAEMON_SETUP_TTL_SECONDS)
-        .execute(&self.pool)
+        .bind(client_network_key)
+        .execute(&mut *transaction)
         .await?;
+        transaction.commit().await?;
         Ok(DaemonSetupRequest {
             request_token,
             label: label.to_owned(),

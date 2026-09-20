@@ -17,7 +17,8 @@ SHALL normalize to IPv4 before key derivation. The server SHALL derive one
 **primary limiter key** from that address: a PostgreSQL `CIDR` value with IPv4
 `/32` or IPv6 `/64` prefix. The primary key is the typed identity for
 process-local endpoint buckets; North 0.1.0 has no broader secondary anti-rotation
-key.
+key. Only IPv4-mapped IPv6 is collapsed; IPv4-compatible IPv6 (for example,
+`::192.0.2.7`) and loopback IPv6 remain IPv6 for comparison and keying.
 
 The durable setup quota SHALL use the same `CIDR` value as its **durable setup
 quota key**, persisted in the existing nullable `client_network_key` column.
@@ -54,6 +55,12 @@ in wire order before validation.
 - **THEN** both requests use the same normalized IPv4 effective address and
   typed `/32` primary limiter key
 
+#### Scenario: Non-mapped IPv6 remains IPv6
+
+- **WHEN** a client uses `::1` or IPv4-compatible `::192.0.2.7`
+- **THEN** the effective address and primary key remain IPv6, and a trusted
+  IPv4 CIDR does not match the IPv4-compatible address
+
 #### Scenario: Malformed forwarding input fails safe
 
 - **WHEN** a trusted peer supplies a missing, empty, invalid, or all-trusted
@@ -68,11 +75,21 @@ protected by this capability. Each SHALL apply a process-local, concurrency-safe
 bucket keyed by endpoint plus the primary limiter key before durable creation.
 The 0.1.0 default for each bucket SHALL be capacity 5 with one token refilled
 per 120 seconds for each IPv4 `/32` or IPv6 `/64` primary key, and buckets SHALL
-reset on process restart. The endpoints SHALL retain separate durable resource
-controls and SHALL NOT claim cross-process or cross-instance limiter guarantees,
-add Redis, or use a generic platform.
+reset on process restart. Each endpoint's process-local bucket namespace SHALL
+have a configurable hard maximum of entries (default 4096). On access, lazy
+cleanup MAY evict only buckets that are fully refilled and have been untouched
+for at least one refill interval; active or partially filled buckets SHALL NOT
+be reset by eviction. When a new key reaches the hard maximum and no safe bucket
+can be evicted, the limiter SHALL fail closed with the generic rate-limit
+contract. The endpoints SHALL retain separate durable resource controls and
+SHALL NOT claim cross-process or cross-instance limiter guarantees, add Redis,
+or use a generic platform.
 
-Request-code resource control SHALL use normalized email identity. New daemon
+Request-code resource control SHALL use normalized email identity. A syntactically
+valid request that passes its client bucket SHALL consume that token immediately;
+later email cooldown or pending-quota rejection SHALL NOT refund it. Malformed
+requests rejected before client identity/limiter evaluation SHALL consume no token.
+New daemon
 setup rows SHALL persist the durable setup quota key (the same CIDR primary
 limiter key) and enforce a bounded count of unexpired, unclaimed rows for that
 key (default maximum 3 per durable setup quota key in 0.1.0). The transaction SHALL acquire
@@ -80,7 +97,10 @@ key (default maximum 3 per durable setup quota key in 0.1.0). The transaction SH
 serializing count-and-insert for one CIDR key; daemon label alone SHALL never be
 a quota key. Pre-existing null-key rows retain claim/expiry behavior but are not
 counted for new keyed quotas. Rate-limited or quota-rejected requests SHALL
-create no protected resource.
+create no protected resource. JSON extractor failures for setup requests
+(including malformed JSON, missing fields, wrong types, missing content type,
+or unsupported content type) SHALL return HTTP 400 with `{ "error": "bad_request" }
+before client identity/limiter evaluation and SHALL create no setup row.
 
 #### Scenario: Auth and setup buckets are isolated
 
@@ -130,15 +150,27 @@ code, setup token, daemon credential, or raw exception.
 - **THEN** existing auth/setup success behavior remains unchanged and no secret
   is included in the response
 
+#### Scenario: Setup extractor failures use North's generic error
+
+- **WHEN** setup JSON is malformed, incomplete, the wrong type, or sent without
+  a supported JSON content type
+- **THEN** the response is HTTP 400 with `{ "error": "bad_request" }`, contains
+  no framework rejection detail, consumes no client token, and creates no row
+
 ### Requirement: Public protection is observable without secrets
 
-The server SHALL record safe endpoint, allowed/rejected outcome, and coarse
-limiter category metrics or structured events. It SHALL NOT log verification
-codes, setup tokens, daemon credentials, raw forwarding headers, raw email
-addresses, full labels, or unnecessary raw resource identifiers.
+The server SHALL record abuse-control endpoint, allowed/rejected outcome, and
+coarse limiter category metrics or structured events. Abuse-control telemetry SHALL NOT contain verification codes, setup tokens,
+daemon credentials, raw forwarding headers, raw email addresses, full labels, or
+unnecessary raw resource identifiers.
+
+An explicitly configured CodeDelivery sink such as LogCodeDelivery is a
+separate verification-code delivery boundary and is not abuse-control telemetry;
+existing development/self-hosted delivery behavior remains intact.
 
 #### Scenario: Rejection telemetry is redacted
 
 - **WHEN** a public request is rejected by a limiter
-- **THEN** telemetry can distinguish endpoint and safe category but contains no
-  code, credential, token, raw email, or forwarding-header value
+- **THEN** abuse-control telemetry can distinguish endpoint and safe category
+  but contains no code, credential, token, raw email, or forwarding-header value,
+  while a separately configured delivery sink may emit its own delivery output

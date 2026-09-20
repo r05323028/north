@@ -87,7 +87,7 @@ async fn retry_fixture(pool: &PgPool, prefix: &str) -> RetryFixture {
         .await
         .expect("verify user code");
     let setup = store
-        .create_daemon_setup_request(&unique_id("retry-daemon"))
+        .create_daemon_setup_request(&unique_id("retry-daemon"), "192.0.2.5/32")
         .await
         .expect("create daemon setup request");
     store

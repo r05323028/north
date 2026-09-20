@@ -25,8 +25,9 @@ jobs:
         env:
           OPENAI_KEY: ${{ secrets.OPENCODE_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # pull_request_target reads repo settings from default branch; keep
-          # provider and reviewer settings explicit until PR config is merged.
+          # pull_request_target could fetch default-branch repository settings;
+          # CONFIG__USE_REPO_SETTINGS_FILE=false permanently disables that path,
+          # so these workflow env values are authoritative for this job.
           "CONFIG__USE_REPO_SETTINGS_FILE": "false"
           "CONFIG__MODEL": "openai/mimo-v2.5"
           "CONFIG__FALLBACK_MODELS": "[]"

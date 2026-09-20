@@ -262,7 +262,7 @@ async fn amnesia_fixture(pool: &PgPool) -> AmnesiaFixture {
         .expect("create repository");
     let setup_label = unique_id("retention-daemon");
     let setup = store
-        .create_daemon_setup_request(&setup_label)
+        .create_daemon_setup_request(&setup_label, "192.0.2.1/32")
         .await
         .expect("create daemon setup request");
     store

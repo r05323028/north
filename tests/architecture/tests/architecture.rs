@@ -1010,3 +1010,141 @@ fn requirement_board_stays_presentation_only() {
         violations.join("\n")
     );
 }
+
+/// Trusted provider configuration for the `pull_request_target` PR-Agent job.
+///
+/// The workflow must own model, provider base URL, session header, and
+/// reviewer guidance through container-compatible environment keys. The
+/// security-critical line is `CONFIG__USE_REPO_SETTINGS_FILE=false`: without
+/// it PR-Agent merges repository-controlled `.pr_agent.toml` settings fetched
+/// from the default branch into this secret-bearing job.
+#[test]
+fn pr_agent_target_workflow_owns_provider_configuration() {
+    let workflow = read_pr_agent_workflow();
+
+    for required in [
+        "\"CONFIG__USE_REPO_SETTINGS_FILE\": \"false\"",
+        "\"CONFIG__MODEL\": \"openai/mimo-v2.5\"",
+        "\"CONFIG__FALLBACK_MODELS\": \"[]\"",
+        "\"CONFIG__CUSTOM_MODEL_MAX_TOKENS\": \"32000\"",
+        "\"OPENAI__API_BASE\": \"https://opencode.ai/zen/go/v1\"",
+        "\"LITELLM__EXTRA_HEADERS\": >-",
+        "\"x-opencode-session\": \"north-pr-${{ github.event.number }}\"",
+        "\"User-Agent\": \"north-pr-agent/1.0\"",
+        "\"PR_REVIEWER__EXTRA_INSTRUCTIONS\": >-",
+        "OPENAI_KEY: ${{ secrets.OPENCODE_API_KEY }}",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "pr-agent workflow must pin trusted provider setting `{required}`"
+        );
+    }
+
+    // Container env keys use Dynaconf `__` nesting; dotted spellings are
+    // silently ignored inside the action container.
+    for forbidden in [
+        "\"config.use_repo_settings_file\"",
+        "\"config.model\"",
+        "\"config.fallback_models\"",
+        "\"config.custom_model_max_tokens\"",
+        "\"OPENAI.API_BASE\"",
+        "\"pr_reviewer.extra_instructions\"",
+        "\"LITELLM.EXTRA_HEADERS\"",
+    ] {
+        assert!(
+            !workflow.contains(forbidden),
+            "stale dotted provider key `{forbidden}` cannot reach the action container"
+        );
+    }
+
+    assert!(
+        !workflow.contains(".pr_agent.toml"),
+        "the target workflow must not reference the repository settings file"
+    );
+
+    // `.pr_agent.toml` serves manual/local PR-Agent runs; its provider
+    // defaults must not silently drift from the trusted workflow pins.
+    let repo_config =
+        fs::read_to_string(repo_root().join(".pr_agent.toml")).expect("read .pr_agent.toml");
+    for shared in [
+        "model = \"openai/mimo-v2.5\"",
+        "fallback_models = []",
+        "custom_model_max_tokens = 32000",
+        "api_base = \"https://opencode.ai/zen/go/v1\"",
+    ] {
+        assert!(
+            repo_config.contains(shared),
+            ".pr_agent.toml manual config drifted from the workflow pin `{shared}`"
+        );
+    }
+}
+
+/// Security posture of the advisory review workflow: immutable action pin, no
+/// checkout of pull-request code, bot-event filtering, least-privilege
+/// permissions, concurrency cancellation, advisory-only behavior, and no
+/// coupling into the required merge gate.
+#[test]
+fn pr_agent_workflow_preserves_security_boundary() {
+    let workflow = read_pr_agent_workflow();
+
+    assert!(workflow.contains("pull_request_target:"));
+    assert!(!workflow.contains("\n  pull_request:"));
+    assert!(workflow.contains("github.event.sender.type != 'Bot'"));
+
+    assert!(!workflow.contains("actions/checkout"));
+    assert_eq!(
+        workflow.matches("uses:").count(),
+        1,
+        "exactly one action step is expected"
+    );
+
+    let pin_prefix = "uses: the-pr-agent/pr-agent@";
+    let pin_start = workflow
+        .find(pin_prefix)
+        .expect("pr-agent action pin is present")
+        + pin_prefix.len();
+    let pin: String = workflow[pin_start..]
+        .chars()
+        .take_while(char::is_ascii_hexdigit)
+        .collect();
+    assert_eq!(
+        pin.len(),
+        40,
+        "PR-Agent must be pinned to a 40-character commit SHA, found `{pin}`"
+    );
+
+    for permission in ["contents: read", "issues: write", "pull-requests: write"] {
+        assert!(
+            workflow.contains(permission),
+            "missing least-privilege permission `{permission}`"
+        );
+    }
+    assert!(!workflow.contains("contents: write"));
+    assert!(!workflow.contains("id-token"));
+
+    assert!(workflow.contains("group: pr-agent-${{ github.event.pull_request.number }}"));
+    assert!(workflow.contains("cancel-in-progress: true"));
+
+    for advisory in [
+        "\"github_action_config.auto_review\": \"true\"",
+        "\"github_action_config.auto_describe\": \"false\"",
+        "\"github_action_config.auto_improve\": \"false\"",
+    ] {
+        assert!(
+            workflow.contains(advisory),
+            "missing advisory-only setting `{advisory}`"
+        );
+    }
+
+    let ci = fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("read ci.yml");
+    assert!(ci.contains("name: merge gate"));
+    assert!(
+        !ci.contains("pr-agent") && !ci.contains("pr_agent"),
+        "PR-Agent must stay advisory and out of the merge gate"
+    );
+}
+
+fn read_pr_agent_workflow() -> String {
+    fs::read_to_string(repo_root().join(".github/workflows/pr-agent.yml"))
+        .expect("read .github/workflows/pr-agent.yml")
+}

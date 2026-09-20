@@ -32,7 +32,8 @@ pub use conversations::{
 pub use daemon::{
     AuthenticatedDaemon, DaemonRegistration, DaemonSessionState, DaemonSetupClaim,
     DaemonSetupPreview, DaemonSetupRequest, DaemonSetupState, PinnedCommand,
-    DAEMON_SETUP_CLEANUP_BATCH_SIZE, DAEMON_SETUP_RETENTION_SECONDS, DAEMON_SETUP_TTL_SECONDS,
+    DAEMON_SETUP_CLEANUP_BATCH_SIZE, DAEMON_SETUP_PENDING_LIMIT, DAEMON_SETUP_RETENTION_SECONDS,
+    DAEMON_SETUP_TTL_SECONDS,
 };
 pub use delivery::{
     canonical_payload_digest, EventReceipt, EventReceiptOutcome, EventReceiptRequest,

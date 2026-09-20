@@ -1,5 +1,6 @@
 use axum::{
     body::{to_bytes, Body},
+    extract::ConnectInfo,
     http::{header, HeaderValue, Method, Request, StatusCode},
     response::Response,
 };
@@ -21,6 +22,7 @@ use north_server::{
 use serde::{de::DeserializeOwned, Deserialize};
 use std::{
     env,
+    net::SocketAddr,
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -101,10 +103,14 @@ fn request_with_origin(
     if let Some(origin) = origin {
         builder = builder.header("origin", origin);
     }
-    builder
+    let mut request = builder
         .header("content-type", "application/json")
         .body(body)
-        .expect("request")
+        .expect("request");
+    request.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:443".parse::<SocketAddr>().expect("peer"),
+    ));
+    request
 }
 
 fn unique_email(prefix: &str) -> String {
@@ -361,7 +367,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let expired = store
-        .create_daemon_setup_request("expired integration daemon")
+        .create_daemon_setup_request("expired integration daemon", "192.0.2.2/32")
         .await
         .expect("create expired setup request");
     sqlx::query(
@@ -1355,12 +1361,12 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
 
     let recent_label = unique_email("recent-cleanup");
     let recent = store
-        .create_daemon_setup_request(&recent_label)
+        .create_daemon_setup_request(&recent_label, "192.0.2.3/32")
         .await
         .expect("create recent setup request");
     let expired_label = unique_email("expired-cleanup");
     let expired = store
-        .create_daemon_setup_request(&expired_label)
+        .create_daemon_setup_request(&expired_label, "192.0.2.4/32")
         .await
         .expect("create expired setup request");
     sqlx::query(
@@ -1394,7 +1400,7 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
     for index in 0..=DAEMON_SETUP_CLEANUP_BATCH_SIZE {
         let label = format!("{batch_prefix}-{index}");
         store
-            .create_daemon_setup_request(&label)
+            .create_daemon_setup_request(&label, &format!("192.0.2.{}/32", index + 1))
             .await
             .expect("create batch cleanup setup request");
     }

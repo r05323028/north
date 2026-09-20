@@ -11,6 +11,7 @@ pub mod context;
 pub mod conversations;
 pub mod daemon;
 pub mod events;
+pub mod public_abuse;
 pub mod repositories;
 pub mod requirements;
 pub mod roles;
@@ -28,6 +29,10 @@ pub use auth::{
     LogCodeDelivery, RequestCodeRequest, VerifyCodeRequest, CODE_REQUEST_MIN_INTERVAL_SECONDS,
 };
 pub use conversations::{ConversationHttpError, ConversationResponse, MessageResponse};
+pub use public_abuse::{
+    CidrParseError, ClientIdentity, ClientRateLimiter, Clock, IpCidr, PublicEndpoint,
+    PublicEndpointConfig, PublicEndpointState, SystemClock,
+};
 pub use repositories::{RepositoryHttpError, RepositoryResponse};
 pub use requirements::{RequirementHttpError, RequirementResponse};
 pub use roles::{
@@ -67,6 +72,11 @@ impl Error for BuildAppError {
 }
 
 /// Build authenticated HTTP routes with the default retention settings.
+///
+/// Serve the returned router with Axum's
+/// `into_make_service_with_connect_info::<SocketAddr>()`; public creation
+/// routes require that `ConnectInfo<SocketAddr>` extension to resolve the
+/// immediate peer safely.
 pub async fn build_app(
     pool: north_persistence::DatabasePool,
     delivery: std::sync::Arc<dyn CodeDelivery>,
@@ -89,6 +99,40 @@ pub async fn build_app_with_retention(
     delivery: std::sync::Arc<dyn CodeDelivery>,
     retention: north_persistence::RetentionConfig,
 ) -> Result<axum::Router, BuildAppError> {
+    build_app_with_retention_and_public_endpoint_config(
+        pool,
+        delivery,
+        retention,
+        public_abuse::PublicEndpointConfig::default(),
+    )
+    .await
+}
+
+/// Build the HTTP routes with explicit trusted-proxy and public limiter settings.
+///
+/// The returned router must be served with Axum `ConnectInfo<SocketAddr>`
+/// support, as documented on [`build_app`].
+pub async fn build_app_with_public_endpoint_config(
+    pool: north_persistence::DatabasePool,
+    delivery: std::sync::Arc<dyn CodeDelivery>,
+    config: public_abuse::PublicEndpointConfig,
+) -> Result<axum::Router, BuildAppError> {
+    build_app_with_retention_and_public_endpoint_config(
+        pool,
+        delivery,
+        north_persistence::RetentionConfig::default(),
+        config,
+    )
+    .await
+}
+
+/// Build the HTTP routes with explicit retention and public endpoint settings.
+pub async fn build_app_with_retention_and_public_endpoint_config(
+    pool: north_persistence::DatabasePool,
+    delivery: std::sync::Arc<dyn CodeDelivery>,
+    retention: north_persistence::RetentionConfig,
+    config: public_abuse::PublicEndpointConfig,
+) -> Result<axum::Router, BuildAppError> {
     run_migrations(&pool)
         .await
         .map_err(BuildAppError::Migration)?;
@@ -97,7 +141,9 @@ pub async fn build_app_with_retention(
         .invalidate_daemon_connections()
         .await
         .map_err(BuildAppError::Startup)?;
-    Ok(auth_router(AuthState::new(store, delivery)))
+    Ok(auth_router(AuthState::with_public_endpoint_config(
+        store, delivery, config,
+    )))
 }
 
 pub use context::{

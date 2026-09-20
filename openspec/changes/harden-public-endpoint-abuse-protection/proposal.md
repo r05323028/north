@@ -15,11 +15,13 @@ or attacker-controlled daemon labels.
   unauthenticated creation endpoints.
 - Define the normalized effective client address from the socket/proxy boundary,
   including trusted `X-Forwarded-For`, IPv4/IPv6 normalization, and
-  IPv4-mapped normalization. Derive the primary limiter key as PostgreSQL `CIDR`
+  IPv4-mapped-only normalization (without collapsing IPv4-compatible IPv6).
+  Derive the primary limiter key as PostgreSQL `CIDR`
   IPv4 `/32` or IPv6 `/64`. Persist that same value as the setup quota key.
-- Add process-local coarse client token buckets plus existing/durable
-  resource-specific controls. No Redis, provider registry, HA, or generic
-  abuse platform.
+- Add bounded process-local coarse client token buckets with deterministic
+  lazy eviction and fail-closed admission at the hard entry cap, plus
+  existing/durable resource-specific controls. No Redis, provider registry, HA,
+  or generic abuse platform.
 - Key request-code resource protection by normalized email. Persist the same
   CIDR primary limiter key as daemon setup's durable quota key and enforce
   bounded unexpired-unclaimed setup quota, never by an attacker-controlled
@@ -28,8 +30,9 @@ or attacker-controlled daemon labels.
   budget, generic auth errors, and secret-free responses.
 - Return one generic HTTP 429 contract with stable `rate_limited` code and safe
   `Retry-After`; do not reveal which quota fired or enable enumeration.
-- Record safe endpoint/category/count observability without codes, credentials,
-  raw email, or unnecessary resource identifiers.
+- Record abuse-control endpoint/category/count observability without codes,
+  credentials, raw email, or unnecessary resource identifiers. A configured
+  verification-code delivery sink remains a separate delivery boundary.
 
 ## Capabilities
 

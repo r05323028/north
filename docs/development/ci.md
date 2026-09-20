@@ -40,12 +40,16 @@ only `contents: read`, `issues: write`, and `pull-requests: write`, and pins
 PR-Agent to release `v0.44.0` by commit SHA. Review `the-pr-agent/pr-agent`
 before changing that pin.
 
-Because `pull_request_target` runs the workflow from the base branch and
-PR-Agent loads repository settings from the default branch, the workflow also
-pins provider/model/reviewer settings and disables that repository-settings
-lookup. This prevents a new PR from inheriting stale model configuration before
-its `.pr_agent.toml` reaches the default branch; keep the workflow values and
-`.pr_agent.toml` synchronized.
+Because `pull_request_target` runs the workflow from the base branch, PR-Agent
+could otherwise merge repository-controlled settings from the default branch's
+`.pr_agent.toml`. The target workflow therefore pins provider/model/reviewer
+settings in container-compatible `CONFIG__*`, `OPENAI__*`, and `LITELLM__*`
+environment keys and sets `CONFIG__USE_REPO_SETTINGS_FILE=false`, which
+disables that lookup entirely. The workflow environment is the sole trusted
+provider source for this job: a stale or PR-influenced `.pr_agent.toml` is
+never an input. `.pr_agent.toml` remains the manual/local PR-Agent
+configuration and must stay consistent with the workflow pins; structural
+tests in `tests/architecture/tests/architecture.rs` enforce both properties.
 
 PR-Agent review is advisory. To roll it back, disable/remove the workflow and
 revoke `OPENCODE_API_KEY`; existing CI and `gate` remain unchanged.
@@ -66,6 +70,13 @@ while baseline coverage is established. When re-enabled, restore patch `>= 80%`
 and add `codecov/patch` to the default-branch ruleset required status checks
 after it reports successfully. Do not require global/project Codecov status yet;
 project target remains `auto`, with allowed project regression `1%`.
+
+Enforcement verified 2026-09-13 via repository ruleset `ruleset-default`
+(id `21581438`, applies to the default branch, no bypass actors): `merge gate`,
+`Rust (fmt, clippy, unit+architecture)`, and `PR title (Conventional Commit)`
+are required contexts. That ruleset currently sets
+`strict_required_status_checks_policy=false`, so "require branches up to date"
+remains an owner action rather than enforced metadata.
 
 These settings cannot be changed from inside the repository by agents; until
 they exist, treat a red `gate` as an absolute merge blocker regardless.
