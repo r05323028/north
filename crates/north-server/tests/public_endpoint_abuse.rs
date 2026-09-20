@@ -82,12 +82,21 @@ fn unique_key() -> String {
 }
 
 fn request(peer: &str, method: Method, uri: &str, body: &str) -> Request<Body> {
-    let mut request = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_owned()))
-        .expect("request");
+    request_with_content_type(peer, method, uri, body, Some("application/json"))
+}
+
+fn request_with_content_type(
+    peer: &str,
+    method: Method,
+    uri: &str,
+    body: &str,
+    content_type: Option<&str>,
+) -> Request<Body> {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, content_type);
+    }
+    let mut request = builder.body(Body::from(body.to_owned())).expect("request");
     request.extensions_mut().insert(ConnectInfo(
         peer.parse::<SocketAddr>().expect("peer socket address"),
     ));
@@ -446,6 +455,87 @@ async fn pending_setup_quota_consumes_client_bucket() {
         created, 3,
         "quota and client rejections create no setup row"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn malformed_setup_requests_are_generic_and_do_not_consume_client_bucket() {
+    let (pool, _database_test_guard) = database().await;
+    let config = PublicEndpointConfig {
+        bucket_capacity: 1,
+        bucket_refill_interval: Duration::from_secs(120),
+        ..PublicEndpointConfig::default()
+    };
+    let app = auth_router(AuthState::with_public_endpoint_config(
+        AuthStore::new(pool.clone()),
+        Arc::new(LogCodeDelivery),
+        config,
+    ));
+    let peer = "127.0.0.4:443";
+    let label_prefix = unique("extractor");
+    let malformed = vec![
+        (
+            "malformed JSON",
+            Some("application/json"),
+            "{\"label\":\"".to_owned(),
+        ),
+        ("missing label", Some("application/json"), "{}".to_owned()),
+        (
+            "wrong label type",
+            Some("application/json"),
+            r#"{"label":42}"#.to_owned(),
+        ),
+        (
+            "missing content type",
+            None,
+            format!(r#"{{"label":"{label_prefix}-missing-content-type"}}"#),
+        ),
+        (
+            "unsupported content type",
+            Some("text/plain"),
+            format!(r#"{{"label":"{label_prefix}-unsupported-content-type"}}"#),
+        ),
+    ];
+
+    for (description, content_type, body) in malformed {
+        let response = app
+            .clone()
+            .oneshot(request_with_content_type(
+                peer,
+                Method::POST,
+                "/daemon/setup/request",
+                &body,
+                content_type,
+            ))
+            .await
+            .unwrap_or_else(|_| panic!("{description} response"));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{description}");
+        assert_eq!(
+            json_body(response).await,
+            serde_json::json!({"error": "bad_request"}),
+            "{description}"
+        );
+    }
+
+    let valid_label = format!("{label_prefix}-valid");
+    let response = app
+        .oneshot(request(
+            peer,
+            Method::POST,
+            "/daemon/setup/request",
+            &format!(r#"{{"label":"{valid_label}"}}"#),
+        ))
+        .await
+        .expect("valid setup response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let created: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
+            .bind(format!("{label_prefix}-%"))
+            .fetch_one(&pool)
+            .await
+            .expect("count setup rows");
+    assert_eq!(created, 1, "malformed requests must create no setup row");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

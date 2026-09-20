@@ -6,6 +6,7 @@ use axum::{
 use serde::Serialize;
 
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+const DEFAULT_MAX_BUCKET_ENTRIES: usize = 4096;
 use std::{
     collections::HashMap,
     fmt,
@@ -88,7 +89,7 @@ impl FromStr for IpCidr {
         let original = address.parse::<IpAddr>().map_err(|_| CidrParseError)?;
         let mut prefix_len = prefix.parse::<u8>().map_err(|_| CidrParseError)?;
         let address = match original {
-            IpAddr::V6(address) => match address.to_ipv4() {
+            IpAddr::V6(address) => match mapped_ipv4(address) {
                 Some(address) => {
                     if prefix_len < 96 {
                         return Err(CidrParseError);
@@ -98,7 +99,7 @@ impl FromStr for IpCidr {
                 }
                 None => IpAddr::V6(address),
             },
-            IpAddr::V4(address) => IpAddr::V4(address),
+            address => normalize_ip(address),
         };
         Self::new(address, prefix_len)
     }
@@ -113,10 +114,18 @@ impl fmt::Display for IpCidr {
 pub fn normalize_ip(address: IpAddr) -> IpAddr {
     match address {
         IpAddr::V4(address) => IpAddr::V4(address),
-        IpAddr::V6(address) => address
-            .to_ipv4()
+        IpAddr::V6(address) => mapped_ipv4(address)
             .map(IpAddr::V4)
             .unwrap_or(IpAddr::V6(address)),
+    }
+}
+
+fn mapped_ipv4(address: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = address.segments();
+    if segments[..5] == [0; 5] && segments[5] == 0xffff {
+        address.to_ipv4()
+    } else {
+        None
     }
 }
 
@@ -248,6 +257,8 @@ pub struct PublicEndpointConfig {
     pub trusted_proxy_cidrs: Vec<IpCidr>,
     pub bucket_capacity: u32,
     pub bucket_refill_interval: Duration,
+    /// Hard cap for each endpoint's key buckets in this process-local limiter.
+    pub bucket_max_entries: usize,
 }
 
 impl Default for PublicEndpointConfig {
@@ -256,6 +267,7 @@ impl Default for PublicEndpointConfig {
             trusted_proxy_cidrs: Vec::new(),
             bucket_capacity: 5,
             bucket_refill_interval: Duration::from_secs(120),
+            bucket_max_entries: DEFAULT_MAX_BUCKET_ENTRIES,
         }
     }
 }
@@ -300,6 +312,7 @@ pub struct ClientRateLimiter {
     clock: Arc<dyn Clock>,
     capacity: f64,
     refill_interval: Duration,
+    max_entries: usize,
 }
 
 struct LimiterState {
@@ -310,6 +323,7 @@ struct LimiterState {
 struct TokenBucket {
     tokens: f64,
     updated_at: Instant,
+    last_accessed: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -324,11 +338,26 @@ impl ClientRateLimiter {
     }
 
     pub fn with_clock(capacity: u32, refill_interval: Duration, clock: Arc<dyn Clock>) -> Self {
+        Self::with_clock_and_max_entries(
+            capacity,
+            refill_interval,
+            DEFAULT_MAX_BUCKET_ENTRIES,
+            clock,
+        )
+    }
+
+    pub fn with_clock_and_max_entries(
+        capacity: u32,
+        refill_interval: Duration,
+        max_entries: usize,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         assert!(capacity > 0, "client bucket capacity must be positive");
         assert!(
             refill_interval > Duration::ZERO,
             "client bucket refill must be positive"
         );
+        assert!(max_entries > 0, "client limiter entry cap must be positive");
         Self {
             state: Arc::new(Mutex::new(LimiterState {
                 buckets: HashMap::new(),
@@ -336,6 +365,7 @@ impl ClientRateLimiter {
             clock,
             capacity: f64::from(capacity),
             refill_interval,
+            max_entries,
         }
     }
 
@@ -350,18 +380,47 @@ impl ClientRateLimiter {
         };
         let now = self.clock.now();
         let mut state = self.state.lock().expect("client limiter mutex poisoned");
-        let bucket = state.buckets.entry(key).or_insert(TokenBucket {
-            tokens: self.capacity,
-            updated_at: now,
-        });
-        self.refill(bucket, now);
-        if bucket.tokens >= 1.0 {
+        self.evict_safe_buckets(&mut state, now);
+
+        let mut bucket = match state.buckets.remove(&key) {
+            Some(mut bucket) => {
+                self.refill(&mut bucket, now);
+                bucket
+            }
+            None => {
+                let endpoint_entries = state
+                    .buckets
+                    .keys()
+                    .filter(|bucket_key| bucket_key.endpoint == endpoint)
+                    .count();
+                if endpoint_entries >= self.max_entries {
+                    return Err(self.refill_interval.as_secs().max(1));
+                }
+                TokenBucket {
+                    tokens: self.capacity,
+                    updated_at: now,
+                    last_accessed: now,
+                }
+            }
+        };
+        bucket.last_accessed = now;
+        let result = if bucket.tokens >= 1.0 {
             bucket.tokens -= 1.0;
             Ok(())
         } else {
             let seconds = ((1.0 - bucket.tokens) * self.refill_interval.as_secs_f64()).ceil();
             Err((seconds as u64).max(1))
-        }
+        };
+        state.buckets.insert(key, bucket);
+        result
+    }
+
+    fn evict_safe_buckets(&self, state: &mut LimiterState, now: Instant) {
+        state.buckets.retain(|_, bucket| {
+            self.refill(bucket, now);
+            !(bucket.tokens >= self.capacity
+                && now.saturating_duration_since(bucket.last_accessed) >= self.refill_interval)
+        });
     }
 
     fn refill(&self, bucket: &mut TokenBucket, now: Instant) {
@@ -374,6 +433,26 @@ impl ClientRateLimiter {
         .min(self.capacity);
         bucket.updated_at = now;
     }
+
+    #[cfg(test)]
+    fn bucket_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("client limiter mutex poisoned")
+            .buckets
+            .len()
+    }
+
+    #[cfg(test)]
+    fn bucket_count_for(&self, endpoint: PublicEndpoint) -> usize {
+        self.state
+            .lock()
+            .expect("client limiter mutex poisoned")
+            .buckets
+            .keys()
+            .filter(|bucket_key| bucket_key.endpoint == endpoint)
+            .count()
+    }
 }
 
 #[derive(Clone)]
@@ -384,7 +463,12 @@ pub struct PublicEndpointState {
 
 impl PublicEndpointState {
     pub fn new(config: PublicEndpointConfig) -> Self {
-        let limiter = ClientRateLimiter::new(config.bucket_capacity, config.bucket_refill_interval);
+        let limiter = ClientRateLimiter::with_clock_and_max_entries(
+            config.bucket_capacity,
+            config.bucket_refill_interval,
+            config.bucket_max_entries,
+            Arc::new(SystemClock),
+        );
         Self::with_limiter(config, limiter)
     }
 
@@ -475,6 +559,60 @@ mod tests {
     }
 
     #[test]
+    fn mapped_only_normalization_preserves_other_ipv6() {
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        let ipv4: IpAddr = "192.0.2.7".parse().unwrap();
+        assert_eq!(normalize_ip(mapped), ipv4);
+
+        let compatible: IpAddr = "::192.0.2.7".parse().unwrap();
+        assert_eq!(normalize_ip(compatible), compatible);
+        assert_eq!(IpCidr::primary_key(compatible).prefix_len(), 64);
+
+        let loopback: IpAddr = "::1".parse().unwrap();
+        assert_eq!(normalize_ip(loopback), loopback);
+        assert_eq!(
+            IpCidr::primary_key(loopback).network(),
+            "::".parse::<IpAddr>().unwrap()
+        );
+
+        let mapped_cidr = cidr("::ffff:192.0.2.7/128");
+        assert_eq!(mapped_cidr.network(), ipv4);
+        assert_eq!(mapped_cidr.prefix_len(), 32);
+
+        let compatible_cidr = cidr("::192.0.2.7/128");
+        assert_eq!(compatible_cidr.network(), compatible);
+        assert_eq!(compatible_cidr.prefix_len(), 128);
+    }
+
+    #[test]
+    fn trusted_proxy_matching_keeps_compatible_ipv6_untrusted() {
+        let trusted = vec![cidr("192.0.2.0/24")];
+
+        let mut mapped_headers = HeaderMap::new();
+        mapped_headers.insert(X_FORWARDED_FOR, HeaderValue::from_static("198.51.100.7"));
+        let mapped_identity =
+            resolve_client_identity(socket("::ffff:192.0.2.8"), &mapped_headers, &trusted);
+        assert_eq!(
+            mapped_identity.address,
+            "198.51.100.7".parse::<IpAddr>().unwrap()
+        );
+
+        let mut compatible_headers = HeaderMap::new();
+        compatible_headers.insert(X_FORWARDED_FOR, HeaderValue::from_static("::192.0.2.7"));
+        let compatible_identity =
+            resolve_client_identity(socket("192.0.2.8"), &compatible_headers, &trusted);
+        assert_eq!(
+            compatible_identity.address,
+            "::192.0.2.7".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(compatible_identity.primary_key, "::/64");
+
+        let loopback_identity = resolve_client_identity(socket("::1"), &HeaderMap::new(), &[]);
+        assert_eq!(loopback_identity.address, "::1".parse::<IpAddr>().unwrap());
+        assert_eq!(loopback_identity.primary_key, "::/64");
+    }
+
+    #[test]
     fn untrusted_forwarding_header_is_ignored() {
         let mut headers = HeaderMap::new();
         headers.insert(X_FORWARDED_FOR, HeaderValue::from_static("192.0.2.7"));
@@ -562,6 +700,118 @@ mod tests {
         limiter
             .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
             .expect("refill");
+    }
+
+    #[test]
+    fn idle_full_buckets_are_evicted_after_safe_idle_period() {
+        let clock = Arc::new(ManualClock::new());
+        let limiter = ClientRateLimiter::with_clock_and_max_entries(
+            1,
+            Duration::from_secs(120),
+            2,
+            clock.clone(),
+        );
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+            .expect("capacity");
+        clock.advance(Duration::from_secs(119));
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.8/32")
+            .expect("second client capacity");
+        assert_eq!(limiter.bucket_count(), 2);
+
+        clock.advance(Duration::from_secs(1));
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.9/32")
+            .expect("safe eviction makes room");
+        assert_eq!(limiter.bucket_count(), 2);
+        assert!(limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+            .is_err());
+    }
+
+    #[test]
+    fn active_buckets_are_not_evicted_before_refill() {
+        let clock = Arc::new(ManualClock::new());
+        let limiter = ClientRateLimiter::with_clock_and_max_entries(
+            1,
+            Duration::from_secs(120),
+            2,
+            clock.clone(),
+        );
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+            .expect("capacity");
+        clock.advance(Duration::from_secs(60));
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.8/32")
+            .expect("second client capacity");
+        assert_eq!(limiter.bucket_count(), 2);
+        assert!(matches!(
+            limiter.try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32"),
+            Err(60)
+        ));
+        assert_eq!(limiter.bucket_count(), 2);
+    }
+
+    #[test]
+    fn evicted_idle_bucket_restarts_with_full_capacity() {
+        let clock = Arc::new(ManualClock::new());
+        let limiter = ClientRateLimiter::with_clock_and_max_entries(
+            1,
+            Duration::from_secs(120),
+            2,
+            clock.clone(),
+        );
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+            .expect("capacity");
+        clock.advance(Duration::from_secs(120));
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.8/32")
+            .expect("safe eviction makes room");
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+            .expect("evicted idle client starts with full capacity");
+    }
+
+    #[test]
+    fn hard_entry_bound_fails_closed_without_safe_eviction() {
+        let clock = Arc::new(ManualClock::new());
+        let limiter =
+            ClientRateLimiter::with_clock_and_max_entries(1, Duration::from_secs(120), 3, clock);
+        for suffix in 0..3 {
+            limiter
+                .try_consume(
+                    PublicEndpoint::RequestCode,
+                    format!("192.0.2.{}/32", suffix + 1),
+                )
+                .expect("configured capacity");
+        }
+        assert_eq!(limiter.bucket_count(), 3);
+        assert!(matches!(
+            limiter.try_consume(PublicEndpoint::RequestCode, "192.0.2.99/32"),
+            Err(120)
+        ));
+        assert_eq!(limiter.bucket_count(), 3);
+    }
+
+    #[test]
+    fn endpoint_isolation_survives_per_endpoint_entry_bound() {
+        let limiter = ClientRateLimiter::with_clock_and_max_entries(
+            1,
+            Duration::from_secs(120),
+            1,
+            Arc::new(SystemClock),
+        );
+        limiter
+            .try_consume(PublicEndpoint::RequestCode, "192.0.2.7/32")
+            .expect("request-code capacity");
+        limiter
+            .try_consume(PublicEndpoint::DaemonSetup, "192.0.2.7/32")
+            .expect("daemon-setup capacity must be independent");
+        assert_eq!(limiter.bucket_count_for(PublicEndpoint::RequestCode), 1);
+        assert_eq!(limiter.bucket_count_for(PublicEndpoint::DaemonSetup), 1);
     }
 
     #[test]

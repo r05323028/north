@@ -75,3 +75,13 @@
       do not mark unexecuted layers complete.
 - [x] Run `openspec validate --all --strict` and relevant `scripts/validate.sh`
       profiles.
+
+## 6. Follow-up correctness hardening
+
+- [x] Canonicalize only IPv4-mapped IPv6 addresses; preserve IPv4-compatible and
+      other IPv6 addresses through identity, CIDR, proxy matching, and keying.
+- [x] Normalize daemon setup JSON extractor failures to North's generic bad-request
+      response before client-bucket evaluation, with boundary coverage.
+- [x] Bound process-local limiter state with deterministic safe eviction and
+      fail-closed behavior when no safe slot exists.
+- [x] Run focused regression tests and all required validation after these fixes.

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{ws::WebSocketUpgrade, ConnectInfo, Json, Path, State},
+    extract::{rejection::JsonRejection, ws::WebSocketUpgrade, ConnectInfo, Json, Path, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -166,8 +166,9 @@ pub async fn request_setup(
     State(state): State<AuthState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Json(payload): Json<SetupRequest>,
+    payload: Result<Json<SetupRequest>, JsonRejection>,
 ) -> Result<Json<SetupCreatedResponse>, DaemonHttpError> {
+    let Json(payload) = payload.map_err(|_| DaemonHttpError::BadRequest)?;
     let label = payload.label.trim();
     if label.is_empty() || label.len() > 100 {
         return Err(DaemonHttpError::BadRequest);

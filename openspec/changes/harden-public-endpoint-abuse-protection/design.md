@@ -7,8 +7,11 @@ Only these unauthenticated resource-creating endpoints are in scope:
 - `POST /auth/request-code`
 - `POST /daemon/setup/request`
 
-Apply basic request parsing/normalization first. For a syntactically valid
-request, consume one client-bucket token before the durable resource-specific
+Apply basic request parsing/normalization first. JSON extractor failures on
+setup requests (malformed JSON, missing fields, wrong types, missing content
+type, or unsupported content type) map to North's generic `bad_request` response
+before identity or limiter evaluation. For a syntactically valid request,
+consume one client-bucket token before the durable resource-specific
 transaction. Once consumed, that token is final: a later email cooldown, pending
 setup quota, delivery, or persistence rejection MUST NOT refund it. A malformed
 request that never reaches the limiter consumes no token. A rejected request
@@ -27,6 +30,8 @@ to a canonical IP value before comparison or keying:
 - IPv4 stays IPv4.
 - IPv6 stays IPv6.
 - IPv4-mapped IPv6 (`::ffff:192.0.2.1`) becomes IPv4 `192.0.2.1`.
+- IPv4-compatible IPv6 (`::192.0.2.1`), loopback IPv6, and all other IPv6
+  remain IPv6; only mapped addresses use the IPv4 conversion.
 - A malformed or missing address is not accepted as a trusted client claim;
   use the transport's peer failure path rather than an attacker-provided value.
 
@@ -86,8 +91,14 @@ are bounded and configurable:
   IPv6 `/64` primary key.
 
 The implementation calculates a safe integer `Retry-After` from the bucket and
-never exposes bucket counts. One process-local mutex/map is enough; do not add a
-new cache service or abstraction layer.
+never exposes bucket counts. Each endpoint namespace has a hard maximum of 4096
+bucket entries by default. Every access performs bounded lazy cleanup: refill
+candidates and evict only buckets that are fully refilled and have been untouched
+for at least one refill interval. Active or partially filled buckets stay in the
+map. If a new key reaches the endpoint cap and no safe candidate exists, reject
+it with the generic 429 contract and a positive refill-based `Retry-After`; do
+not bypass the limiter. One process-local mutex/map is enough; do not add a
+background task, cache service, or abstraction layer.
 
 Durable resource-specific controls remain separate:
 
