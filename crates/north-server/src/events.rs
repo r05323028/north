@@ -132,6 +132,13 @@ mod tests {
     use serde_json::json;
     use tokio::time::{timeout, Duration};
 
+    fn test_otp_key() -> north_persistence::OtpKey {
+        north_persistence::OtpKey::from_hex(
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("valid test OTP key")
+    }
+
     #[tokio::test]
     async fn publishes_identity_only_requirement_notifications() {
         let hub = BrowserEventHub::new();
@@ -178,7 +185,7 @@ mod tests {
         use tower::ServiceExt;
 
         let pool = PoolOptions::new().connect_lazy("postgres://localhost/north")?;
-        let state = crate::auth::AuthState::with_log_delivery(AuthStore::new(pool));
+        let state = crate::auth::AuthState::with_log_delivery(AuthStore::new(pool, test_otp_key()));
         let response = router()
             .with_state(state)
             .oneshot(Request::builder().uri("/events").body(Body::empty())?)
@@ -203,7 +210,7 @@ mod tests {
         use tower::ServiceExt;
 
         let pool = PoolOptions::new().connect_lazy("postgres://localhost/north")?;
-        let state = crate::auth::AuthState::with_log_delivery(AuthStore::new(pool));
+        let state = crate::auth::AuthState::with_log_delivery(AuthStore::new(pool, test_otp_key()));
         let response = crate::auth::router(state)
             .oneshot(Request::builder().uri("/events").body(Body::empty())?)
             .await?;

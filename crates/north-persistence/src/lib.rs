@@ -3,6 +3,7 @@
 //! Database rows and their domain mappings live here. Hosts call this crate's
 //! operations instead of hand-rolling SQL.
 
+use hmac::{Hmac, Mac};
 use north_domain::role::Role;
 use rand::{rng, Rng};
 use sha2::{Digest, Sha256};
@@ -62,6 +63,100 @@ pub const VERIFICATION_CODE_MAX_ATTEMPTS: i32 = 5;
 pub const CODE_REQUEST_COOLDOWN_SECONDS: i64 = 60;
 /// Sessions remain valid for thirty days unless explicitly invalidated.
 pub const SESSION_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
+
+/// Environment variable containing the server-held OTP HMAC key.
+pub const OTP_HMAC_KEY_ENV: &str = "NORTH_OTP_HMAC_KEY";
+const OTP_HMAC_KEY_HEX_LENGTH: usize = 64;
+const OTP_HMAC_MAC_LENGTH: usize = 32;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct OtpKey([u8; OTP_HMAC_MAC_LENGTH]);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtpKeyError {
+    Missing,
+    InvalidEncoding,
+    InvalidLength,
+    InvalidHex,
+}
+
+impl fmt::Display for OtpKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::Missing => "NORTH_OTP_HMAC_KEY is not set",
+            Self::InvalidEncoding => "NORTH_OTP_HMAC_KEY is not valid text",
+            Self::InvalidLength => "NORTH_OTP_HMAC_KEY must contain exactly 64 hex characters",
+            Self::InvalidHex => "NORTH_OTP_HMAC_KEY must contain only ASCII hex characters",
+        };
+        f.write_str(message)
+    }
+}
+
+impl Error for OtpKeyError {}
+
+impl OtpKey {
+    pub fn from_env() -> Result<Self, OtpKeyError> {
+        let value = std::env::var(OTP_HMAC_KEY_ENV).map_err(|error| match error {
+            std::env::VarError::NotPresent => OtpKeyError::Missing,
+            std::env::VarError::NotUnicode(_) => OtpKeyError::InvalidEncoding,
+        })?;
+        Self::from_hex(&value)
+    }
+
+    pub fn from_hex(value: &str) -> Result<Self, OtpKeyError> {
+        if value.len() != OTP_HMAC_KEY_HEX_LENGTH {
+            return Err(OtpKeyError::InvalidLength);
+        }
+
+        let mut key = [0_u8; OTP_HMAC_MAC_LENGTH];
+        for (index, [high, low]) in value
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let high = hex_value(high).ok_or(OtpKeyError::InvalidHex)?;
+            let low = hex_value(low).ok_or(OtpKeyError::InvalidHex)?;
+            key[index] = (high << 4) | low;
+        }
+        Ok(Self(key))
+    }
+
+    fn as_bytes(&self) -> &[u8; OTP_HMAC_MAC_LENGTH] {
+        &self.0
+    }
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn append_len_prefixed(output: &mut Vec<u8>, value: &[u8]) {
+    let length = u32::try_from(value.len()).expect("OTP context component too long");
+    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(value);
+}
+
+/// Compute an OTP MAC for an email already canonicalized at the auth boundary.
+fn otp_digest(key: &OtpKey, canonical_email: &str, id: i64, code: &str) -> Vec<u8> {
+    let id = u64::try_from(id).expect("verification code id must be non-negative");
+    let mut message = Vec::with_capacity(64 + canonical_email.len() + code.len());
+    message.extend_from_slice(b"north/otp/verification-code/v1\0");
+    append_len_prefixed(&mut message, canonical_email.as_bytes());
+    message.extend_from_slice(&id.to_be_bytes());
+    append_len_prefixed(&mut message, code.as_bytes());
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("OTP key length is fixed");
+    mac.update(&message);
+    mac.finalize().into_bytes().to_vec()
+}
 
 /// Compile-time embedded migrations applied by server startup.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
@@ -190,20 +285,26 @@ pub struct AuthenticatedSession {
 #[derive(Clone)]
 pub struct AuthStore {
     pool: PgPool,
+    otp_key: OtpKey,
     retention: RetentionConfig,
 }
 
 impl AuthStore {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(pool: PgPool, otp_key: OtpKey) -> Self {
         Self {
             pool,
+            otp_key,
             retention: RetentionConfig::default(),
         }
     }
 
     /// Build a store with explicit validated retention settings.
-    pub fn with_retention(pool: PgPool, retention: RetentionConfig) -> Self {
-        Self { pool, retention }
+    pub fn with_retention(pool: PgPool, otp_key: OtpKey, retention: RetentionConfig) -> Self {
+        Self {
+            pool,
+            otp_key,
+            retention,
+        }
     }
 
     /// Retention settings applied to ephemeral telemetry writes and sweeps.
@@ -216,8 +317,9 @@ impl AuthStore {
     }
 
     /// Supersede any active code and insert one hashed code in one transaction.
+    ///
+    /// `email` must already be canonicalized by the authentication boundary.
     pub async fn issue_code(&self, email: &str, code: &str) -> Result<(), PersistenceError> {
-        let code_hash = hash_secret(code.as_bytes());
         let mut transaction = self.pool.begin().await?;
 
         // Serialize requests for the same email before checking the cooldown.
@@ -252,11 +354,17 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await?;
 
+        let id: i64 = sqlx::query_scalar("SELECT nextval('verification_codes_id_seq')")
+            .fetch_one(&mut *transaction)
+            .await?;
+        let code_hash = otp_digest(&self.otp_key, email, id, code);
+
         sqlx::query(
-            "INSERT INTO verification_codes (email, code_hash, expires_at)
-             VALUES ($1, $2, CURRENT_TIMESTAMP
-                 + ($3::double precision * INTERVAL '1 second'))",
+            "INSERT INTO verification_codes (id, email, code_hash, expires_at)
+             VALUES ($1, $2, $3, CURRENT_TIMESTAMP
+                 + ($4::double precision * INTERVAL '1 second'))",
         )
+        .bind(id)
         .bind(email)
         .bind(code_hash)
         .bind(VERIFICATION_CODE_TTL_SECONDS)
@@ -273,11 +381,10 @@ impl AuthStore {
         email: &str,
         code: &str,
     ) -> Result<AuthenticatedSession, PersistenceError> {
-        let candidate_hash = hash_secret(code.as_bytes());
         let mut transaction = self.pool.begin().await?;
 
         let Some(code_row) = sqlx::query_as::<_, VerificationCodeRow>(
-            "SELECT id, code_hash, failed_attempts
+            "SELECT id, email, code_hash, failed_attempts
              FROM verification_codes
              WHERE email = $1
                AND used_at IS NULL
@@ -293,6 +400,7 @@ impl AuthStore {
             return Err(PersistenceError::InvalidCode);
         };
 
+        let candidate_hash = otp_digest(&self.otp_key, &code_row.email, code_row.id, code);
         let matches = code_row
             .code_hash
             .as_slice()
@@ -448,9 +556,10 @@ impl AuthStore {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(FromRow)]
 struct VerificationCodeRow {
     id: i64,
+    email: String,
     code_hash: Vec<u8>,
     failed_attempts: i32,
 }
@@ -555,6 +664,11 @@ mod tests {
     use super::*;
     use std::sync::OnceLock;
 
+    fn test_otp_key() -> OtpKey {
+        OtpKey::from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+            .expect("valid test OTP key")
+    }
+
     static DATABASE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
     async fn database_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
@@ -588,9 +702,183 @@ mod tests {
     }
 
     #[test]
+    fn otp_key_requires_exact_ascii_hex_length() {
+        assert!(matches!(
+            OtpKey::from_hex(""),
+            Err(OtpKeyError::InvalidLength)
+        ));
+        assert!(matches!(
+            OtpKey::from_hex("0"),
+            Err(OtpKeyError::InvalidLength)
+        ));
+        assert!(matches!(
+            OtpKey::from_hex(&"g".repeat(OTP_HMAC_KEY_HEX_LENGTH)),
+            Err(OtpKeyError::InvalidHex)
+        ));
+        assert!(OtpKey::from_hex(
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn otp_digest_matches_independent_known_answer_vector() {
+        let key = test_otp_key();
+        assert_eq!(b"north/otp/verification-code/v1\0".last(), Some(&0));
+        assert_ne!(
+            b"north/otp/verification-code/v1\\0".as_slice(),
+            b"north/otp/verification-code/v1\0".as_slice()
+        );
+        let digest = otp_digest(&key, "alice@example.com", 42, "012345");
+        assert_ne!(
+            digest,
+            otp_digest(&key, "  Alice@EXAMPLE.com\t", 42, "012345")
+        );
+        assert_eq!(
+            digest,
+            vec![
+                0x90, 0xe5, 0x4d, 0x2c, 0x2c, 0x0f, 0xfa, 0xe0, 0x98, 0xbb, 0x3b, 0x7e, 0xf7, 0x9b,
+                0xf1, 0x30, 0x94, 0x73, 0x7c, 0x4b, 0xe6, 0x8e, 0xc5, 0x40, 0x9e, 0xb1, 0x35, 0xcb,
+                0xfb, 0xd8, 0xdb, 0xf2,
+            ]
+        );
+    }
+
+    #[test]
+    fn otp_digest_binds_issuance_context_without_transforming_code() {
+        let key = test_otp_key();
+        let canonical = otp_digest(&key, "alice@example.com", 42, "012345");
+        assert_ne!(
+            canonical,
+            otp_digest(&key, "Alice@EXAMPLE.com", 42, "012345")
+        );
+        assert_ne!(
+            canonical,
+            otp_digest(&key, "  alice@example.com\t", 42, "012345")
+        );
+        assert_ne!(
+            canonical,
+            otp_digest(&key, "alice@example.com", 43, "012345")
+        );
+        assert_ne!(
+            canonical,
+            otp_digest(&key, "other@example.com", 42, "012345")
+        );
+        assert_ne!(
+            canonical,
+            otp_digest(&key, "alice@example.com", 42, "012346")
+        );
+        assert_ne!(
+            canonical,
+            otp_digest(&key, "alice@example.com", 42, " 012345")
+        );
+    }
+
+    #[test]
     fn secret_hashes_have_fixed_length() {
         assert_eq!(hash_secret(b"123456").len(), 32);
         assert_ne!(hash_secret(b"123456"), b"123456");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn issued_codes_are_raw_context_bound_macs_and_rotate_fail_closed() {
+        let Ok(database_url) = std::env::var("NORTH_TEST_DATABASE_URL") else {
+            return;
+        };
+        let _database_test_guard = database_test_lock().await;
+        let pool = PoolOptions::new()
+            .max_connections(8)
+            .connect(&database_url)
+            .await
+            .expect("connect test database");
+        run_migrations(&pool).await.expect("run migrations");
+
+        let key = test_otp_key();
+        let store = AuthStore::new(pool.clone(), key);
+        let first_email = format!("otp-first-{}@example.com", random_hex(8));
+        let second_email = format!("otp-second-{}@example.com", random_hex(8));
+        store
+            .issue_code(&first_email, "123456")
+            .await
+            .expect("issue first code");
+        store
+            .issue_code(&second_email, "123456")
+            .await
+            .expect("issue second code");
+
+        let first: (i64, Vec<u8>) =
+            sqlx::query_as("SELECT id, code_hash FROM verification_codes WHERE email = $1")
+                .bind(&first_email)
+                .fetch_one(&pool)
+                .await
+                .expect("read first digest");
+        let second: (i64, Vec<u8>) =
+            sqlx::query_as("SELECT id, code_hash FROM verification_codes WHERE email = $1")
+                .bind(&second_email)
+                .fetch_one(&pool)
+                .await
+                .expect("read second digest");
+        assert_ne!(first.0, second.0);
+        assert_eq!(first.1.len(), OTP_HMAC_MAC_LENGTH);
+        assert_eq!(second.1.len(), OTP_HMAC_MAC_LENGTH);
+        assert_ne!(first.1, second.1);
+        assert_ne!(first.1, hash_secret(b"123456"));
+
+        let rotated_key =
+            OtpKey::from_hex("101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f")
+                .expect("valid rotated test key");
+        let rotated = AuthStore::new(pool.clone(), rotated_key);
+        assert!(matches!(
+            rotated.verify_code(&first_email, "123456").await,
+            Err(PersistenceError::InvalidCode)
+        ));
+
+        let rotated_email = format!("otp-rotated-{}@example.com", random_hex(8));
+        rotated
+            .issue_code(&rotated_email, "123456")
+            .await
+            .expect("issue rotated code");
+        rotated
+            .verify_code(&rotated_email, "123456")
+            .await
+            .expect("verify rotated code");
+    }
+
+    #[tokio::test]
+    async fn legacy_active_codes_are_consumed_before_keyed_verification() {
+        let Ok(database_url) = std::env::var("NORTH_TEST_DATABASE_URL") else {
+            return;
+        };
+        let _database_test_guard = database_test_lock().await;
+        let pool = PoolOptions::new()
+            .max_connections(4)
+            .connect(&database_url)
+            .await
+            .expect("connect test database");
+        run_migrations(&pool).await.expect("run migrations");
+
+        let email = format!("otp-legacy-{}@example.com", random_hex(8));
+        sqlx::query(
+            "INSERT INTO verification_codes (email, code_hash, expires_at)
+             VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '10 minutes')",
+        )
+        .bind(&email)
+        .bind(hash_secret(b"123456"))
+        .execute(&pool)
+        .await
+        .expect("insert legacy code");
+        sqlx::query(include_str!(
+            "../../../migrations/0019_otp_hmac_hardening.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("apply legacy invalidation");
+
+        let store = AuthStore::new(pool, test_otp_key());
+        assert!(matches!(
+            store.verify_code(&email, "123456").await,
+            Err(PersistenceError::InvalidCode)
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -634,7 +922,7 @@ mod tests {
             .await
             .expect("restore singleton settings");
 
-        let store = AuthStore::new(pool.clone());
+        let store = AuthStore::new(pool.clone(), test_otp_key());
         store
             .issue_code("owner-a@example.com", "111111")
             .await
@@ -685,7 +973,7 @@ mod tests {
             .await
             .expect("connect test database");
         run_migrations(&pool).await.expect("run migrations");
-        let store = AuthStore::new(pool.clone());
+        let store = AuthStore::new(pool.clone(), test_otp_key());
         let email = format!("verification-attempts-{}@example.com", random_hex(8));
         store
             .issue_code(&email, "123456")

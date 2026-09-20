@@ -1,4 +1,4 @@
-use sqlx::{Connection, PgConnection};
+use sqlx::{postgres::PgPoolOptions, Connection, PgConnection};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unique(prefix: &str) -> String {
@@ -29,6 +29,41 @@ async fn apply_migration(connection: &mut PgConnection, name: &str, sql: &str) {
         .execute(&mut *connection)
         .await
         .unwrap_or_else(|error| panic!("apply migration {name}: {error}"));
+}
+
+async fn record_applied_migrations(connection: &mut PgConnection, through: i64) {
+    sqlx::query(
+        "CREATE TABLE _sqlx_migrations (
+             version BIGINT PRIMARY KEY,
+             description TEXT NOT NULL,
+             installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+             success BOOLEAN NOT NULL,
+             checksum BYTEA NOT NULL,
+             execution_time BIGINT NOT NULL
+         )",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("create migration history table");
+
+    for migration in north_persistence::MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version <= through)
+    {
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations
+                 (version, description, success, checksum, execution_time)
+             VALUES ($1, $2, TRUE, $3, -1)",
+        )
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(migration.checksum.as_ref())
+        .execute(&mut *connection)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("record historical migration {}: {error}", migration.version)
+        });
+    }
 }
 
 async fn insert_user(connection: &mut PgConnection, user_id: &str) {
@@ -599,6 +634,83 @@ async fn historical_main_head_upgrades_to_current_head() {
     )
     .await;
 
+    // Seed the pre-0019 BYTEA digest format before the production migrator runs.
+    let legacy_otp_email = format!("{}@example.com", unique("legacy-otp"));
+    let legacy_otp_id: i64 = sqlx::query_scalar(
+        "INSERT INTO verification_codes (email, code_hash, expires_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '10 minutes')
+         RETURNING id",
+    )
+    .bind(&legacy_otp_email)
+    .bind(vec![0_u8; 32])
+    .fetch_one(&mut connection)
+    .await
+    .expect("insert active legacy OTP");
+
+    // The historical fixture applied migration SQL directly, so seed SQLx's
+    // bookkeeping before invoking the same server upgrade path as startup.
+    record_applied_migrations(&mut connection, 18).await;
+    let historical_head: i64 =
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&mut connection)
+            .await
+            .expect("read historical migration head");
+    assert_eq!(historical_head, 18);
+
+    let migration_schema = schema.clone();
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let migration_schema = migration_schema.clone();
+            Box::pin(async move {
+                sqlx::query(&format!(
+                    r####"SET search_path TO "{migration_schema}", public"####
+                ))
+                .execute(connection)
+                .await?;
+                Ok(())
+            })
+        })
+        .connect(&database_url)
+        .await
+        .expect("connect migration upgrade pool");
+    north_server::run_migrations(&migration_pool)
+        .await
+        .expect("apply current migration head");
+
+    let otp_migration_applied: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM _sqlx_migrations
+             WHERE version = 19 AND success
+         )",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("inspect keyed migration history");
+    assert!(otp_migration_applied, "migration 0019 must be applied");
+
+    let legacy_otp_used: bool =
+        sqlx::query_scalar("SELECT used_at IS NOT NULL FROM verification_codes WHERE id = $1")
+            .bind(legacy_otp_id)
+            .fetch_one(&mut connection)
+            .await
+            .expect("inspect migrated legacy OTP");
+    assert!(
+        legacy_otp_used,
+        "migration 0019 must consume active legacy verification codes"
+    );
+    let current_head: i64 =
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&mut connection)
+            .await
+            .expect("read current migration head");
+    let expected_head = north_persistence::MIGRATOR
+        .iter()
+        .last()
+        .expect("embedded migration set is non-empty")
+        .version;
+    assert_eq!(current_head, expected_head);
+
     let setup_key_nullable: String = sqlx::query_scalar(
         "SELECT is_nullable
          FROM information_schema.columns
@@ -988,6 +1100,7 @@ async fn historical_main_head_upgrades_to_current_head() {
         "expected restrictive readiness FK, got: {requirement_delete_error}"
     );
 
+    migration_pool.close().await;
     sqlx::query(&format!(r####"DROP SCHEMA "{schema}" CASCADE"####))
         .execute(&mut connection)
         .await

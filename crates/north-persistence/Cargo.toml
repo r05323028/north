@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 north-domain = { path = "../north-domain" }
+hmac = "0.12"
 md-5 = "0.10"
 rand = "0.9"
 sha2 = "0.10"

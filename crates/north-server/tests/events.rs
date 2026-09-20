@@ -17,6 +17,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::{sync::broadcast, time::timeout};
 use tower::ServiceExt;
 
+fn test_otp_key() -> north_persistence::OtpKey {
+    north_persistence::OtpKey::from_hex(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    .expect("valid test OTP key")
+}
+
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -97,7 +104,7 @@ async fn committed_requirement_creation_publishes_one_lightweight_hint(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pool = test_pool().await?;
     let user = setup_user(&pool, "event-create-user").await?;
-    let state = AuthState::with_log_delivery(AuthStore::new(pool));
+    let state = AuthState::with_log_delivery(AuthStore::new(pool, test_otp_key()));
     let mut receiver = state.events().subscribe();
     let app = requirements_app(state, user);
     let response = request(
@@ -125,7 +132,7 @@ async fn real_requirement_edit_publishes_once_and_noop_is_silent(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pool = test_pool().await?;
     let user = setup_user(&pool, "event-edit-user").await?;
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let requirement = store
         .create_requirement("Edit requirement", "Edit coverage", &user.id)
         .await?;
@@ -162,7 +169,7 @@ async fn real_requirement_edit_publishes_once_and_noop_is_silent(
 async fn committed_lifecycle_transition_publishes_once() -> Result<(), Box<dyn std::error::Error>> {
     let pool = test_pool().await?;
     let user = setup_user(&pool, "event-lifecycle-user").await?;
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let requirement = store
         .create_requirement("Lifecycle requirement", "Transition coverage", &user.id)
         .await?;
@@ -190,7 +197,7 @@ async fn accepted_readiness_publishes_once_and_duplicate_or_rejected_events_are_
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pool = test_pool().await?;
     let user = setup_user(&pool, "event-readiness-user").await?;
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let requirement = store
         .create_requirement("Readiness requirement", "Readiness coverage", &user.id)
         .await?;

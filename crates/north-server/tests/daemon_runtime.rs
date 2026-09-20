@@ -33,6 +33,8 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream};
 use tower::ServiceExt;
 
+mod support;
+
 #[derive(Debug, Deserialize)]
 struct SetupClaimed {
     status: String,
@@ -113,6 +115,13 @@ fn request_with_origin(
     request
 }
 
+fn test_otp_key() -> north_persistence::OtpKey {
+    north_persistence::OtpKey::from_hex(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    .expect("valid test OTP key")
+}
+
 fn unique_email(prefix: &str) -> String {
     format!(
         "{prefix}-{}@example.com",
@@ -177,7 +186,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     north_server::run_migrations(&pool)
         .await
         .expect("run migrations");
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     sqlx::query(
         "INSERT INTO repositories (id, name, name_normalized, url, description)
          VALUES ('00000000-0000-4000-8000-000000000001', 'North', 'north', 'https://example.test/north.git', '')
@@ -1307,7 +1316,7 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
     north_server::run_migrations(&pool)
         .await
         .expect("run migrations");
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
 
     let email = unique_email("restart-admin");
     store
@@ -1478,6 +1487,10 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
 
     server.abort();
     drop(socket);
+    let _otp_key = support::ScopedEnvVar::set(
+        north_persistence::OTP_HMAC_KEY_ENV,
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    );
     let restarted_app = build_app(pool.clone(), Arc::new(LogCodeDelivery))
         .await
         .expect("build restarted app");
@@ -1572,7 +1585,7 @@ async fn clarification_start_reuse_cancel_and_terminal_slot_release() {
     .await
     .expect("clear daemon leases");
 
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let email = unique_email("clarification-requester");
     store
         .issue_code(&email, "444444")
@@ -1855,7 +1868,7 @@ async fn clarification_runtime_projects_existing_events_and_releases_slot() {
     .execute(&pool)
     .await
     .expect("clear daemon leases");
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let email = unique_email("clarification-runtime");
     store
         .issue_code(&email, "555555")
@@ -2441,7 +2454,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     .execute(&pool)
     .await
     .expect("clear daemon leases");
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let email = unique_email("clarification-concurrency");
     store
         .issue_code(&email, "666666")
@@ -2539,7 +2552,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let left = tokio::spawn(async move {
         left_barrier.wait().await;
         start(
-            AuthStore::new(left_pool),
+            AuthStore::new(left_pool, test_otp_key()),
             left_requirement_id,
             left_message_id,
             left_expected_state_version,
@@ -2556,7 +2569,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let right = tokio::spawn(async move {
         right_barrier.wait().await;
         start(
-            AuthStore::new(right_pool),
+            AuthStore::new(right_pool, test_otp_key()),
             right_requirement_id,
             right_message_id,
             right_expected_state_version,
@@ -2630,7 +2643,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let left = tokio::spawn(async move {
         left_barrier.wait().await;
         start(
-            AuthStore::new(left_pool),
+            AuthStore::new(left_pool, test_otp_key()),
             left_requirement_id,
             left_message_id,
             1,
@@ -2652,7 +2665,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let right = tokio::spawn(async move {
         right_barrier.wait().await;
         start(
-            AuthStore::new(right_pool),
+            AuthStore::new(right_pool, test_otp_key()),
             right_requirement_id,
             right_message_id,
             1,
@@ -2695,7 +2708,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         .await
         .expect("persist stale start message");
     let stale = start(
-        AuthStore::new(pool.clone()),
+        AuthStore::new(pool.clone(), test_otp_key()),
         stale_requirement.id.clone(),
         stale_message.id.clone(),
         99,
@@ -2747,7 +2760,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         &awaiting_message.body,
     );
     let initial = start(
-        AuthStore::new(pool.clone()),
+        AuthStore::new(pool.clone(), test_otp_key()),
         awaiting_requirement.id.clone(),
         awaiting_message.id.clone(),
         1,
@@ -2769,7 +2782,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let same = tokio::spawn(async move {
         same_barrier.wait().await;
         start(
-            AuthStore::new(same_pool),
+            AuthStore::new(same_pool, test_otp_key()),
             same_requirement_id,
             same_message_id,
             999,
@@ -2786,7 +2799,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let retry = tokio::spawn(async move {
         retry_barrier.wait().await;
         start(
-            AuthStore::new(retry_pool),
+            AuthStore::new(retry_pool, test_otp_key()),
             retry_requirement_id,
             retry_message_id,
             999,
@@ -2835,7 +2848,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let same_race = tokio::spawn(async move {
         same_race_barrier.wait().await;
         start(
-            AuthStore::new(same_race_pool),
+            AuthStore::new(same_race_pool, test_otp_key()),
             same_race_requirement_id,
             same_race_message_id,
             999,
@@ -2851,7 +2864,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let different_race = tokio::spawn(async move {
         different_race_barrier.wait().await;
         start(
-            AuthStore::new(different_race_pool),
+            AuthStore::new(different_race_pool, test_otp_key()),
             different_race_requirement_id,
             different_race_message_id,
             2,
@@ -2901,7 +2914,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         &cancellation_message.body,
     );
     let awaiting = start(
-        AuthStore::new(pool.clone()),
+        AuthStore::new(pool.clone(), test_otp_key()),
         cancellation_requirement.id.clone(),
         cancellation_message.id.clone(),
         1,
@@ -2934,7 +2947,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         .await
         .expect("persist post-cancellation message");
     let new_run = start(
-        AuthStore::new(pool.clone()),
+        AuthStore::new(pool.clone(), test_otp_key()),
         cancellation_requirement.id.clone(),
         new_message.id.clone(),
         2,
@@ -2963,7 +2976,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         .await
         .expect("persist assigned cancellation message");
     let assigned_cancel = start(
-        AuthStore::new(pool.clone()),
+        AuthStore::new(pool.clone(), test_otp_key()),
         assigned_cancel_requirement.id.clone(),
         assigned_cancel_message.id.clone(),
         1,
@@ -3054,7 +3067,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         &race_message.body,
     );
     let race_run = start(
-        AuthStore::new(pool.clone()),
+        AuthStore::new(pool.clone(), test_otp_key()),
         race_requirement.id.clone(),
         race_message.id.clone(),
         1,
@@ -3082,7 +3095,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let assignment = tokio::spawn(async move {
         assignment_barrier.wait().await;
         start(
-            AuthStore::new(assignment_pool),
+            AuthStore::new(assignment_pool, test_otp_key()),
             assignment_requirement_id,
             assignment_message_id,
             999,
@@ -3097,7 +3110,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let cancellation_run_id = race_run.run.run_id.clone();
     let cancellation = tokio::spawn(async move {
         cancellation_barrier.wait().await;
-        AuthStore::new(cancellation_pool)
+        AuthStore::new(cancellation_pool, test_otp_key())
             .cancel_clarification(
                 &cancellation_requirement_id,
                 &cancellation_run_id,
@@ -3166,7 +3179,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     north_server::run_migrations(&pool)
         .await
         .expect("run migrations");
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let email = unique_email("retry-worker");
     store
         .issue_code(&email, "777777")
@@ -3234,8 +3247,8 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     .await
     .expect("insert seed command");
 
-    let left_store = AuthStore::new(pool.clone());
-    let right_store = AuthStore::new(pool.clone());
+    let left_store = AuthStore::new(pool.clone(), test_otp_key());
+    let right_store = AuthStore::new(pool.clone(), test_otp_key());
     let (left, right) = tokio::join!(
         left_store.claim_due_retries(1, |_, _, _, _| { Ok::<_, PersistenceError>("{}".into()) }),
         right_store.claim_due_retries(1, |_, _, _, _| { Ok::<_, PersistenceError>("{}".into()) }),

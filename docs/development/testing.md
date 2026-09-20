@@ -81,7 +81,7 @@ compatibility against PostgreSQL. Execution retry is implemented and covered by 
 server integration paths. PostgreSQL restart/concurrency proofs run in
 `retry_authority` and require `NORTH_TEST_DATABASE_URL`.
 
-PostgreSQL integration also exercises public endpoint quota/HTTP-boundary controls, legacy readiness schema upgrades, and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it. Runtime activity retention sweeps, their amnesia proof, and the migration-0017 expiry backfill run in `retention` and `migration_upgrade` under the same prerequisite.
+PostgreSQL integration also exercises keyed OTP issuance/verification, legacy OTP invalidation across the historical 0018-to-0019 upgrade, key rotation rejection, public endpoint quota/HTTP-boundary controls, legacy readiness schema upgrades, and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it. Runtime activity retention sweeps, their amnesia proof, and the migration-0017 expiry backfill run in `retention` and `migration_upgrade` under the same prerequisite.
 
 ## Coverage matrix
 
@@ -96,7 +96,8 @@ future proofs.
 | atomic assessment evidence/transition/dedupe before event ACK | Integration | Implemented by readiness-assessment, including authenticated daemon ACK path |
 | daemon selection, pinned reconnect, credential revocation | Integration | daemon-runtime-connection |
 | server retry authority, durable attempt identity, restart/due discovery, duplicate failure, cancellation races, pinned-owner policy, and immediate-dispatch redelivery | Integration | introduce-runtime-retry-and-failure-state |
-| public request-code/setup normalized effective address, mapped IPv6 → IPv4 normalization, trusted-proxy spoofing, IPv4 `/32`/IPv6 `/64` primary-key derivation, durable setup quota key, generic 429, restart reset, and no-resource-on-rejection | Integration | harden-public-endpoint-abuse-protection |
+| keyed OTP issuance/verification, strict key startup, legacy invalidation, rotation rejection, raw-MAC storage, and preserved attempt/session semantics | Integration | harden-otp-at-rest |
+| public request-code/setup normalized effective address, mapped IPv6 → IPv4 normalization, trusted-proxy spoofing, IPv4 `/32`/IPv6 `/64` primary-key derivation, durable setup quota key, generic 429, restart reset, and no-resource-on-rejection | Integration | public-endpoint-abuse-protection |
 | canonical workspace review packet, exact mutation identities, stale 409 repair with generation-bound acknowledgement, unchanged duplicate SSE/focus refetch preservation, state-version/assessment-id reset, Reopen reset, feedback preservation, permissions, and durable audit boundary | E2E + Integration | introduce-human-requirement-review |
 | concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
 | soft-disable history, disabled-name recovery, and disabled-repo citation rules | Integration | configured-repositories |

@@ -18,13 +18,20 @@ fn user(id: &str, role: Role) -> CurrentUser {
     })
 }
 
+fn test_otp_key() -> north_persistence::OtpKey {
+    north_persistence::OtpKey::from_hex(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    .expect("valid test OTP key")
+}
+
 fn role_router(user: CurrentUser) -> axum::Router {
     let pool = PoolOptions::new()
         .connect_lazy("postgres://north:north@127.0.0.1:1/north")
         .expect("valid lazy pool URL");
     north_server::roles::router()
         .with_state(AuthState::with_log_delivery(
-            north_persistence::AuthStore::new(pool),
+            north_persistence::AuthStore::new(pool, test_otp_key()),
         ))
         .layer(Extension(user))
 }

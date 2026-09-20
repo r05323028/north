@@ -15,6 +15,9 @@ use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
+#[allow(dead_code)]
+mod support;
+
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -25,7 +28,10 @@ fn unique(prefix: &str) -> String {
 
 fn app(pool: north_persistence::PgPool, id: &str, role: Role) -> Router {
     requirements::router()
-        .with_state(AuthState::with_log_delivery(AuthStore::new(pool)))
+        .with_state(AuthState::with_log_delivery(AuthStore::new(
+            pool,
+            support::test_otp_key(),
+        )))
         .layer(axum::Extension(CurrentUser(
             north_persistence::UserRecord {
                 id: id.into(),
@@ -95,7 +101,7 @@ async fn conversation_pruning_preserves_structured_requirement() {
         .await
         .expect("run migrations");
     let user_id = setup_user(&pool, "conversation-user").await;
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), support::test_otp_key());
     let requirement = store
         .create_requirement("Conversation", "Structured source", &user_id)
         .await
@@ -176,7 +182,7 @@ async fn conversation_pruning_preserves_structured_requirement() {
         repositories_reviewed: Vec::new(),
     };
     let ack = process_requirement_assessed(
-        &AuthStore::new(pool.clone()),
+        &AuthStore::new(pool.clone(), support::test_otp_key()),
         &unique("conversation-assessment-event"),
         &assessment_session_id,
         1,
@@ -374,7 +380,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
             commit_sha: "abcdef0123456789abcdef0123456789abcdef01".into(),
         }],
     };
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), support::test_otp_key());
     let accepted = process_requirement_assessed(
         &store,
         &assessment_event_id,
@@ -703,7 +709,7 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
         .expect("run migrations");
     let requester_id = setup_user(&pool, "review-requester").await;
     let manager_id = setup_user_with_role(&pool, "review-manager", "RequirementManager").await;
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), support::test_otp_key());
 
     let created = request(
         app(pool.clone(), &requester_id, Role::Requester),

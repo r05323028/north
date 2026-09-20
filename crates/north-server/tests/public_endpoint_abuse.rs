@@ -43,6 +43,13 @@ async fn database() -> (
     (pool, guard)
 }
 
+fn test_otp_key() -> north_persistence::OtpKey {
+    north_persistence::OtpKey::from_hex(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    .expect("valid test OTP key")
+}
+
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -114,7 +121,7 @@ async fn json_body(response: axum::response::Response) -> Value {
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
 async fn setup_quota_is_keyed_and_concurrency_safe() {
     let (pool, _database_test_guard) = database().await;
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let key = unique_key();
     let label_prefix = unique("setup-label");
     let labels: Vec<_> = (0..8)
@@ -232,7 +239,7 @@ async fn public_http_429_is_generic_and_endpoint_buckets_are_isolated() {
         ..PublicEndpointConfig::default()
     };
     let app = auth_router(AuthState::with_public_endpoint_config(
-        AuthStore::new(pool.clone()),
+        AuthStore::new(pool.clone(), test_otp_key()),
         Arc::new(LogCodeDelivery),
         config,
     ));
@@ -248,6 +255,10 @@ async fn public_http_429_is_generic_and_endpoint_buckets_are_isolated() {
         .await
         .expect("first request-code response");
     assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        json_body(response).await,
+        serde_json::json!({"message": "verification code requested"})
+    );
 
     let rejected_email = unique_email("client-limit-rejected");
     let response = app
@@ -302,7 +313,10 @@ async fn public_http_429_is_generic_and_endpoint_buckets_are_isolated() {
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
 async fn email_cooldown_consumes_client_bucket() {
     let (pool, _database_test_guard) = database().await;
-    let app = auth_router(AuthState::with_log_delivery(AuthStore::new(pool.clone())));
+    let app = auth_router(AuthState::with_log_delivery(AuthStore::new(
+        pool.clone(),
+        test_otp_key(),
+    )));
     let email = unique_email("cooldown");
     let response = app
         .clone()
@@ -376,7 +390,10 @@ async fn email_cooldown_consumes_client_bucket() {
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
 async fn pending_setup_quota_consumes_client_bucket() {
     let (pool, _database_test_guard) = database().await;
-    let app = auth_router(AuthState::with_log_delivery(AuthStore::new(pool.clone())));
+    let app = auth_router(AuthState::with_log_delivery(AuthStore::new(
+        pool.clone(),
+        test_otp_key(),
+    )));
     let peer = "127.0.0.3:443";
     let label_prefix = unique("pending-client");
 
@@ -467,7 +484,7 @@ async fn malformed_setup_requests_are_generic_and_do_not_consume_client_bucket()
         ..PublicEndpointConfig::default()
     };
     let app = auth_router(AuthState::with_public_endpoint_config(
-        AuthStore::new(pool.clone()),
+        AuthStore::new(pool.clone(), test_otp_key()),
         Arc::new(LogCodeDelivery),
         config,
     ));
@@ -548,7 +565,7 @@ async fn malformed_request_does_not_consume_client_bucket() {
         ..PublicEndpointConfig::default()
     };
     let app = auth_router(AuthState::with_public_endpoint_config(
-        AuthStore::new(pool),
+        AuthStore::new(pool, test_otp_key()),
         Arc::new(LogCodeDelivery),
         config,
     ));

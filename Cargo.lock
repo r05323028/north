@@ -926,6 +926,7 @@ version = "0.1.0"
 name = "north-persistence"
 version = "0.1.0"
 dependencies = [
+ "hmac",
  "md-5",
  "north-domain",
  "rand 0.9.5",

@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
+#[allow(dead_code)]
+mod support;
+
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -23,7 +26,10 @@ fn unique(prefix: &str) -> String {
 
 fn app(pool: north_persistence::PgPool, id: &str, role: Role) -> Router {
     repositories::router()
-        .with_state(AuthState::with_log_delivery(AuthStore::new(pool)))
+        .with_state(AuthState::with_log_delivery(AuthStore::new(
+            pool,
+            support::test_otp_key(),
+        )))
         .layer(Extension(CurrentUser(north_persistence::UserRecord {
             id: id.into(),
             email: format!("{id}@example.com"),
@@ -180,7 +186,7 @@ async fn repository_management_preserves_identity_and_lifecycle() {
     assert_eq!(duplicate["repository_id"], repository_id);
     assert_eq!(duplicate["action"], "re_enable");
 
-    let active = AuthStore::new(pool.clone())
+    let active = AuthStore::new(pool.clone(), support::test_otp_key())
         .active_repositories()
         .await
         .expect("active catalog")
@@ -243,7 +249,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
         .execute(&pool)
         .await
         .expect("insert user");
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), support::test_otp_key());
     let repository = store
         .create_repository(
             "Citation Repository",
