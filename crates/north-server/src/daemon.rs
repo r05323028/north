@@ -1,5 +1,5 @@
 use axum::{
-    extract::{ws::WebSocketUpgrade, Json, Path, State},
+    extract::{ws::WebSocketUpgrade, ConnectInfo, Json, Path, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
@@ -17,6 +17,7 @@ use north_protocol::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -24,6 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     auth::{AuthState, CurrentUser},
+    public_abuse::{rate_limited_response, PublicEndpoint},
     roles::require_admin,
     transport::{self, DaemonConnection, DaemonTransportState},
 };
@@ -35,6 +37,7 @@ pub enum DaemonHttpError {
     NotFound,
     Gone,
     Conflict,
+    RateLimited { retry_after: u64 },
     Internal,
 }
 
@@ -46,6 +49,7 @@ impl DaemonHttpError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Gone => StatusCode::GONE,
             Self::Conflict => StatusCode::CONFLICT,
+            Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -57,6 +61,7 @@ impl DaemonHttpError {
             Self::NotFound => "not_found",
             Self::Gone => "expired",
             Self::Conflict => "conflict",
+            Self::RateLimited { .. } => "rate_limited",
             Self::Internal => "internal_error",
         }
     }
@@ -69,6 +74,9 @@ struct ErrorBody {
 
 impl IntoResponse for DaemonHttpError {
     fn into_response(self) -> Response {
+        if let Self::RateLimited { retry_after } = self {
+            return rate_limited_response(retry_after);
+        }
         (self.status(), Json(ErrorBody { error: self.code() })).into_response()
     }
 }
@@ -154,17 +162,48 @@ pub fn protected_router() -> Router<AuthState> {
 
 pub async fn request_setup(
     State(state): State<AuthState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<SetupRequest>,
 ) -> Result<Json<SetupCreatedResponse>, DaemonHttpError> {
     let label = payload.label.trim();
     if label.is_empty() || label.len() > 100 {
         return Err(DaemonHttpError::BadRequest);
     }
-    let request = state
+    let endpoint = PublicEndpoint::DaemonSetup;
+    let identity = state.public_endpoint().identity(peer, &headers);
+    let permit = match state
+        .public_endpoint()
+        .reserve(endpoint, identity.primary_key.clone())
+    {
+        Ok(permit) => permit,
+        Err(retry_after) => {
+            state
+                .public_endpoint()
+                .observe(endpoint, "rejected", "client_bucket");
+            return Err(DaemonHttpError::RateLimited { retry_after });
+        }
+    };
+    let request = match state
         .store()
-        .create_daemon_setup_request(label)
+        .create_daemon_setup_request(label, &identity.primary_key)
         .await
-        .map_err(store_error)?;
+    {
+        Ok(request) => request,
+        Err(PersistenceError::RateLimited) => {
+            state
+                .public_endpoint()
+                .observe(endpoint, "rejected", "pending_setup");
+            return Err(DaemonHttpError::RateLimited {
+                retry_after: north_persistence::DAEMON_SETUP_TTL_SECONDS as u64,
+            });
+        }
+        Err(error) => return Err(store_error(error)),
+    };
+    permit.commit();
+    state
+        .public_endpoint()
+        .observe(endpoint, "allowed", "client_bucket");
     Ok(Json(SetupCreatedResponse {
         verification_path: format!("/daemon/setup/{}/approve", request.request_token),
         request_token: request.request_token,
@@ -1173,9 +1212,11 @@ fn store_error(error: PersistenceError) -> DaemonHttpError {
         | PersistenceError::NoEligibleDaemon
         | PersistenceError::InvalidRole(_)
         | PersistenceError::InvalidCode
-        | PersistenceError::RateLimited
         | PersistenceError::ProtocolIntegrity(_)
         | PersistenceError::EventSequenceGap { .. } => DaemonHttpError::BadRequest,
+        PersistenceError::RateLimited => DaemonHttpError::RateLimited {
+            retry_after: north_persistence::DAEMON_SETUP_TTL_SECONDS as u64,
+        },
         PersistenceError::Database(_) => DaemonHttpError::Internal,
         PersistenceError::InvalidRepository(_) => DaemonHttpError::BadRequest,
         PersistenceError::RepositoryNotFound => DaemonHttpError::NotFound,

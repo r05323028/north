@@ -138,12 +138,16 @@ transport recovery.
 
 WebSocket reconnect/backoff, journal replay, ACK retry, and event replay are
 transport recovery and consume no business attempt. Public endpoint abuse
-protection is **Specified — implementation pending**. Its target uses the
-normalized effective client address, an IPv4 `/32` or IPv6 `/64` primary limiter
-CIDR key for process-local buckets, and the same CIDR value as the durable
-setup quota key. Process-local buckets reset on restart, while unexpired unclaimed
-setup rows remain durable. Setup approval/claim credentials remain outside the
-browser response.
+protection is **Partially Enforced** for `POST /auth/request-code` and
+`POST /daemon/setup/request`: the server resolves a normalized effective client
+address, derives an IPv4 `/32` or IPv6 `/64` primary CIDR key, and applies
+endpoint-isolated process-local buckets with capacity 5 and one token per 120
+seconds. Trusted `X-Forwarded-For` is opt-in by immediate-peer CIDR. Process
+buckets reset on restart; migration 0018 persists the same CIDR as each new
+setup row's durable quota key and limits three unexpired, unclaimed rows.
+All limiter/quota rejection responses are generic 429s; PostgreSQL concurrency
+proof requires `NORTH_TEST_DATABASE_URL`. Setup approval/claim credentials
+remain outside the browser response.
 
 Setup/login follows the browser-assisted CLI flow. A normal browser GET
 returns an HTML confirmation page with daemon label and state, an explicit

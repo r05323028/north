@@ -31,11 +31,13 @@
   workspace. The browser loads Review Packet truth, sends lifecycle-specific
   mutation identities, repairs stale state through canonical HTTP, and requires
   generation-bound acknowledgement without owning Requirement lifecycle.
-- Public endpoint abuse protection is **Specified — implementation pending**.
-  Its target resolves a normalized effective client address, derives an IPv4
-  `/32` or IPv6 `/64` CIDR primary limiter key, reuses that CIDR value as the
-  durable setup quota key, and returns generic 429 responses. Untrusted
-  forwarding headers remain ignored by default.
+- Public endpoint abuse protection is **Partially Enforced**. `POST
+  /auth/request-code` and `POST /daemon/setup/request` resolve a normalized
+  effective client address, derive an IPv4 `/32` or IPv6 `/64` CIDR primary
+  limiter key, and ignore forwarding headers unless the immediate peer is in
+  configured trusted proxy CIDRs. Process-local buckets and the durable setup
+  quota return generic 429 responses; PostgreSQL concurrency proof requires
+  `NORTH_TEST_DATABASE_URL`.
 - Server↔daemon command/event delivery is at-least-once. Stable ids prevent
   duplicate effects; independent per-session sequence spaces detect gaps.
 

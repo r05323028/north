@@ -9,7 +9,7 @@ server at startup.
 | Class | Examples | Rules |
 | --- | --- | --- |
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
-| Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, execution attempts, server command outbox, event dedupe/rejection records, sequence watermarks; keyed setup quota is a specified target | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
+| Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, execution attempts, server command outbox, event dedupe/rejection records, sequence watermarks, keyed setup quota | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
 Migrations 0003–0005 implement requirements and transition audit,
 one-to-one conversations/messages, and immutable revision-bound readiness
@@ -30,7 +30,10 @@ classes, snapshotted retry limits, `attempt_count`, `current_attempt_id`, and
 indexed `next_retry_at`; legacy starts are backfilled conservatively, including
 compacted starts whose payload is gone. Migration 0017 adds ephemeral activity
 retention: `clarification_activities.expires_at`, a deterministic 7-day
-backfill, NOT NULL enforcement, and an `(expires_at, id)` sweep index.
+backfill, NOT NULL enforcement, and an `(expires_at, id)` sweep index. Migration
+0018 adds nullable PostgreSQL `CIDR` `daemon_setup_requests.client_network_key`
+and a partial `(client_network_key, expires_at)` index for unclaimed setup
+rows; legacy rows remain NULL and age out normally.
 Readiness evidence rows are append-only;
 database triggers reject direct mutation of evidence, repository source identity,
 and command outbox payloads. Requirement delete is restrictive so evidence never
@@ -42,27 +45,19 @@ processes, and server instances; `FOR UPDATE SKIP LOCKED` therefore lets only
 one concurrent worker claim each due row. Startup/polling discovers due rows
 from the database; reconnect/replay does not increment attempts.
 
-**Specified — implementation pending:** public creation protection will add a
-nullable PostgreSQL `CIDR` setup `client_network_key` plus the unclaimed-key
-count index.
-Pre-existing null-key rows retain normal expiry/claim behavior and are excluded
-from new keyed quotas; every new row will receive a non-null durable setup quota
-key.
-
-The public-creation protection target is **Specified — implementation pending**:
-process-local client buckets reset on restart, while normalized-email cooldown
-and pending setup quotas remain durable. The normalized effective client address
-derives an IPv4 `/32` or IPv6 `/64` primary limiter key; IPv4-mapped IPv6
-normalizes to IPv4 first. Each new setup row persists that same CIDR value as
-its durable setup quota key in the nullable PostgreSQL `CIDR`
-`client_network_key`; only unexpired, unclaimed matching rows count.
-Count-and-insert will use
-`pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))`, reject
-before INSERT, and use a partial `(client_network_key, expires_at)` index for
-unclaimed rows alongside
-the existing expiry-cleanup index. Legacy NULL rows retain claim/expiry behavior
-but are excluded from keyed quotas, and daemon labels never provide any quota
-identity.
+Public creation protection is **Partially Enforced** for only
+`POST /auth/request-code` and `POST /daemon/setup/request`. Process-local
+endpoint buckets use the normalized effective client address, with IPv4 `/32`
+or IPv6 `/64` primary keys, capacity 5, one token per 120 seconds, and reset
+on restart. The normalized-email cooldown remains a separate request-code
+control. Migration 0018 stores the same CIDR value as each new setup row's
+durable `client_network_key`; legacy NULL rows retain claim/expiry behavior and
+are excluded from new keyed counts. Pending counts include unexpired, unclaimed
+pending or approved rows, exclude claimed/expired rows, and serialize count plus
+insert under `pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))`.
+Daemon labels never provide quota identity. Generic 429 and safe observability
+are implemented; PostgreSQL concurrency proof requires
+`NORTH_TEST_DATABASE_URL`.
 
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.

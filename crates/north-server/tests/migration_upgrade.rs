@@ -589,6 +589,39 @@ async fn historical_main_head_upgrades_to_current_head() {
         )),
     )
     .await;
+    apply_migration(
+        &mut connection,
+        "0018_public_endpoint_abuse_protection",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../migrations/0018_public_endpoint_abuse_protection.sql"
+        )),
+    )
+    .await;
+
+    let setup_key_nullable: String = sqlx::query_scalar(
+        "SELECT is_nullable
+         FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'daemon_setup_requests'
+           AND column_name = 'client_network_key'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("inspect setup client key nullability");
+    assert_eq!(setup_key_nullable, "YES");
+    let setup_key_index: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM pg_indexes
+             WHERE schemaname = current_schema()
+               AND tablename = 'daemon_setup_requests'
+               AND indexname = 'daemon_setup_requests_client_network_key_expires_at_idx'
+         )",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("inspect setup client key index");
+    assert!(setup_key_index, "the setup client key index must exist");
 
     let backfilled_expiry: bool = sqlx::query_scalar(
         "SELECT expires_at = created_at + INTERVAL '7 days'

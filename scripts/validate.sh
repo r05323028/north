@@ -56,6 +56,7 @@ database_integration() {
   cargo test -p north-server --test events -- --ignored
   cargo test -p north-server --test conversations_readiness -- --ignored
   cargo test -p north-server --test daemon_runtime -- --ignored
+  cargo test -p north-server --test public_endpoint_abuse -- --ignored
   cargo test -p north-server --test retry_authority -- --ignored
   cargo test -p north-server --test retention -- --ignored
   cargo test -p north-server --test migration_upgrade -- --ignored
