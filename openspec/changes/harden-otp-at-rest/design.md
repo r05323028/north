@@ -55,7 +55,7 @@ Length-prefixing prevents ambiguous concatenation. The fixed domain separator pr
 
 ### 3. Persistence and legacy migration
 
-Add one versioned SQL migration after the current migrations. It sets `used_at = CURRENT_TIMESTAMP` for every `verification_codes` row where `used_at IS NULL`, preserving rows for normal retention while invalidating every pre-deployment unkeyed digest. Because startup applies migrations before accepting requests, no legacy active code is admitted into the new path. No schema type change is needed; `code_hash` remains binary storage for the HMAC output.
+Add one versioned SQL migration after the current migrations. It sets `used_at = CURRENT_TIMESTAMP` only for `verification_codes` rows where `used_at IS NULL AND expires_at > CURRENT_TIMESTAMP`, preserving already-used and expired-unused rows for normal retention while invalidating active pre-deployment unkeyed digests. Expired legacy rows remain unused, but `verify_code` still rejects them because verification requires `expires_at > CURRENT_TIMESTAMP`. Because startup applies migrations before accepting requests, no legacy active code is admitted into the new path. No schema type change is needed; `code_hash` remains binary storage for the HMAC output.
 
 `issue_code` keeps its per-email advisory lock, cooldown check, active-row supersession, and transaction. It reserves the row ID, computes the HMAC, and inserts the row. `verify_code` keeps its row lock, expiry/use predicate, failed-attempt update, max-attempt invalidation, user/owner/session transaction, and generic `InvalidCode` result; only candidate digest construction changes.
 
