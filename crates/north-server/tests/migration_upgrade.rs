@@ -646,6 +646,17 @@ async fn historical_main_head_upgrades_to_current_head() {
     .fetch_one(&mut connection)
     .await
     .expect("insert active legacy OTP");
+    let expired_otp_email = format!("{}@example.com", unique("expired-legacy-otp"));
+    let expired_otp_id: i64 = sqlx::query_scalar(
+        "INSERT INTO verification_codes (email, code_hash, expires_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP - INTERVAL '10 minutes')
+         RETURNING id",
+    )
+    .bind(&expired_otp_email)
+    .bind(vec![0_u8; 32])
+    .fetch_one(&mut connection)
+    .await
+    .expect("insert expired legacy OTP");
 
     // The historical fixture applied migration SQL directly, so seed SQLx's
     // bookkeeping before invoking the same server upgrade path as startup.
@@ -698,6 +709,16 @@ async fn historical_main_head_upgrades_to_current_head() {
     assert!(
         legacy_otp_used,
         "migration 0019 must consume active legacy verification codes"
+    );
+    let expired_otp_unused: bool =
+        sqlx::query_scalar("SELECT used_at IS NULL FROM verification_codes WHERE id = $1")
+            .bind(expired_otp_id)
+            .fetch_one(&mut connection)
+            .await
+            .expect("inspect expired legacy OTP");
+    assert!(
+        expired_otp_unused,
+        "migration 0019 must preserve expired unused verification codes"
     );
     let current_head: i64 =
         sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations WHERE success")
