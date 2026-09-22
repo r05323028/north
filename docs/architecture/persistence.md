@@ -63,6 +63,14 @@ a separate verification-code delivery boundary, not abuse-control telemetry.
 PostgreSQL concurrency proof runs with
 `NORTH_TEST_DATABASE_URL`.
 
+Verification-code digests use raw 32-byte HMAC-SHA-256 values framed with
+canonical email, verification row ID, and unmodified code bytes. Server startup
+requires strict 64-hex-character `NORTH_OTP_HMAC_KEY` before serving auth
+routes; migration 0019 consumes active legacy SHA-256 codes. Key rotation
+requires coordinated rollout across instances, invalidates outstanding codes,
+and has no previous-key compatibility window. Do not mix pre-migration and
+post-migration binaries against one live database.
+
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.
 The server updates liveness only for the authenticated connection identity;

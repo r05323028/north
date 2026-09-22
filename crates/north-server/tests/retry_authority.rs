@@ -18,6 +18,8 @@ use std::{
 use tokio::{net::TcpListener, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream};
 
+mod support;
+
 static DATABASE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 async fn database_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
@@ -49,6 +51,13 @@ async fn independent_worker_pool() -> Result<PgPool, Box<dyn std::error::Error>>
         .await?)
 }
 
+fn test_otp_key() -> north_persistence::OtpKey {
+    north_persistence::OtpKey::from_hex(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    .expect("valid test OTP key")
+}
+
 fn unique_id(prefix: &str) -> String {
     format!(
         "{prefix}-{}",
@@ -76,7 +85,7 @@ async fn retry_fixture(pool: &PgPool, prefix: &str) -> RetryFixture {
     .execute(pool)
     .await
     .expect("clear daemon leases");
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let email = format!("{}@example.com", unique_id(prefix));
     store
         .issue_code(&email, "111111")
@@ -319,7 +328,7 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
     assert!(skipped.is_empty(), "locked due row must be skipped");
     lock_transaction.rollback().await.expect("release row lock");
 
-    let atomic_failure = AuthStore::new(pool.clone())
+    let atomic_failure = AuthStore::new(pool.clone(), test_otp_key())
         .claim_due_retries(1, |_daemon_id, _session_id, _command_id, _sequence| {
             Err::<String, PersistenceError>(PersistenceError::InvalidCommandPayload)
         })
@@ -360,7 +369,7 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
     assert_eq!(attempt_rows, 1);
     assert_eq!(command_rows, 1);
 
-    let restarted = AuthStore::new(pool.clone());
+    let restarted = AuthStore::new(pool.clone(), test_otp_key());
     let persisted = restarted
         .clarification_run(&fixture.requirement_id, &fixture.session_id)
         .await
@@ -381,13 +390,13 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
     assert_ne!(left_pid, right_pid);
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let left_barrier = barrier.clone();
-    let left_store = AuthStore::new(left_pool);
+    let left_store = AuthStore::new(left_pool, test_otp_key());
     let left = tokio::spawn(async move {
         left_barrier.wait().await;
         left_store.claim_due_retries(1, resume_payload).await
     });
     let right_barrier = barrier.clone();
-    let right_store = AuthStore::new(right_pool);
+    let right_store = AuthStore::new(right_pool, test_otp_key());
     let right = tokio::spawn(async move {
         right_barrier.wait().await;
         right_store.claim_due_retries(1, resume_payload).await
@@ -570,7 +579,7 @@ async fn postgres_retry_failure_is_idempotent_and_preserves_slot_and_requirement
     assert_eq!(canceled.run.status, ClarificationStatus::Failed);
     assert_eq!(canceled.run.failure_reason.as_deref(), Some("cancelled"));
     assert!(canceled.command_id.is_empty());
-    let later_work = AuthStore::new(pool.clone())
+    let later_work = AuthStore::new(pool.clone(), test_otp_key())
         .claim_due_retries(1, resume_payload)
         .await
         .expect("claim after cancellation");
@@ -642,7 +651,7 @@ async fn postgres_cancellation_race_cannot_create_later_retry_attempt() {
 
     let barrier = Arc::new(tokio::sync::Barrier::new(3));
     let cancel_barrier = barrier.clone();
-    let cancel_store = AuthStore::new(pool.clone());
+    let cancel_store = AuthStore::new(pool.clone(), test_otp_key());
     let cancel_requirement_id = fixture.requirement_id.clone();
     let cancel_session_id = fixture.session_id.clone();
     let cancel = tokio::spawn(async move {
@@ -658,7 +667,7 @@ async fn postgres_cancellation_race_cannot_create_later_retry_attempt() {
             .await
     });
     let retry_barrier = barrier.clone();
-    let retry_store = AuthStore::new(pool.clone());
+    let retry_store = AuthStore::new(pool.clone(), test_otp_key());
     let retry = tokio::spawn(async move {
         retry_barrier.wait().await;
         retry_store.claim_due_retries(1, resume_payload).await
@@ -893,7 +902,7 @@ async fn postgres_retry_dispatch_failure_redelivers_same_pinned_command() {
     .expect("project reconnect failure");
     set_daemon_offline(&pool, &fixture.daemon_id).await;
     set_retry_due(&pool, &fixture.session_id).await;
-    let work = AuthStore::new(pool.clone())
+    let work = AuthStore::new(pool.clone(), test_otp_key())
         .claim_due_retries(1, resume_payload)
         .await
         .expect("claim offline retry");
@@ -949,6 +958,10 @@ async fn postgres_retry_dispatch_failure_redelivers_same_pinned_command() {
     assert_eq!(attempt_rows, 2);
     assert_eq!(command_rows, 2);
 
+    let _otp_key = support::ScopedEnvVar::set(
+        north_persistence::OTP_HMAC_KEY_ENV,
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    );
     let app = north_server::build_app(pool.clone(), Arc::new(north_server::LogCodeDelivery))
         .await
         .expect("build restarted server");

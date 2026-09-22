@@ -313,8 +313,6 @@ state.
 
 These items are not currently enforced by North 0.1.0:
 
-- Public `/auth/request-code` and `/daemon/setup/request` abuse protection and
-  resource-aware rate limiting: follow-up `harden-public-endpoint-abuse-protection`.
 - Keyed OTP hashing with a server-side pepper: follow-up `harden-otp-at-rest`;
   current high-entropy session and daemon credential hashing remains unchanged.
 - Idempotent recovery after a committed one-shot setup claim response is lost;

@@ -26,7 +26,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 | Requirement access is workspace-wide in 0.1.0; no per-Requirement ACL | Enforced | authenticated routes and cross-requester integration test |
 | First account atomically Owner; later accounts Requester | Enforced | transactional `AuthStore::verify_code` owner claim + concurrency test |
 | Verification codes cannot be brute-forced past a bounded attempt budget | Enforced | locked transactional failed-attempt counter, five-failure consumption, PostgreSQL concurrency test |
-| Active OTP values resist database-only offline recovery | Specified | keyed OTP hashing deferred to `harden-otp-at-rest`; current SHA-256 remains documented debt |
+| Active OTP values resist database-only offline recovery | Enforced | `OtpKey` validation, framed HMAC-SHA-256 bound to canonical email/row ID/code, migration 0019 legacy invalidation, rotation rejection, and focused/integration tests |
 | Conversation is context, not source of truth | Enforced | migration 0004, requester/paginated APIs, structured-edit route, and PostgreSQL integration tests |
 | Existing-Requirement mutations require expected_state_version; revision remains content-only | Enforced | locked persistence operations, HTTP 409 handlers, and integration tests |
 | `requirement.assessed` evidence, transition, dedupe, and ACK share one commit boundary | Enforced | typed server conversion, migration 0005, event-id dedupe, post-commit ACK service, and PostgreSQL integration tests |

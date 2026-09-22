@@ -32,6 +32,13 @@ async fn database_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
         .await
 }
 
+fn test_otp_key() -> north_persistence::OtpKey {
+    north_persistence::OtpKey::from_hex(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    .expect("valid test OTP key")
+}
+
 fn unique_id(prefix: &str) -> String {
     format!(
         "{prefix}-{}",
@@ -242,7 +249,7 @@ async fn amnesia_fixture(pool: &PgPool) -> AmnesiaFixture {
     .execute(pool)
     .await
     .expect("clear daemon leases");
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let email = format!("{}@example.com", unique_id("retention-user"));
     store
         .issue_code(&email, "111111")
@@ -676,6 +683,7 @@ async fn purging_all_ephemeral_telemetry_preserves_canonical_state() {
 
     let windowed_store = AuthStore::with_retention(
         pool.clone(),
+        test_otp_key(),
         RetentionConfig::new(60, 60, 500, 20).expect("valid retained window"),
     );
     let windowed_event = unique_id("retention-windowed");
@@ -941,7 +949,7 @@ async fn sweep_honours_expiry_and_batch_bound() {
     let pool = test_pool().await;
     clear_activities(&pool).await;
     let fixture = sweep_fixture(&pool).await;
-    let store = AuthStore::with_retention(pool.clone(), valid_small_batch());
+    let store = AuthStore::with_retention(pool.clone(), test_otp_key(), valid_small_batch());
     assert_eq!(
         store
             .purge_expired_clarification_activities()
@@ -987,7 +995,7 @@ async fn sweep_includes_exact_expiry_boundary() {
     let pool = test_pool().await;
     clear_activities(&pool).await;
     let fixture = sweep_fixture(&pool).await;
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let boundary = unique_id("boundary");
     let future = unique_id("future");
     insert_activity(&pool, &fixture.session_id, &boundary, 0).await;
@@ -1013,9 +1021,9 @@ async fn sweeps_are_idempotent_concurrent_and_restart_safe() {
     for _ in 0..5 {
         insert_activity(&pool, &fixture.session_id, &unique_id("expired"), -600).await;
     }
-    let first = AuthStore::with_retention(pool.clone(), valid_small_batch());
+    let first = AuthStore::with_retention(pool.clone(), test_otp_key(), valid_small_batch());
     let second_pool = independent_pool().await;
-    let second = AuthStore::with_retention(second_pool, valid_small_batch());
+    let second = AuthStore::with_retention(second_pool, test_otp_key(), valid_small_batch());
     let (first_deleted, second_deleted) = tokio::join!(
         first.purge_expired_clarification_activities(),
         second.purge_expired_clarification_activities()
@@ -1030,7 +1038,7 @@ async fn sweeps_are_idempotent_concurrent_and_restart_safe() {
     assert_eq!(activity_ids(&pool, &fixture.session_id).await.len(), 1);
 
     let restarted_pool = independent_pool().await;
-    let restarted = AuthStore::new(restarted_pool);
+    let restarted = AuthStore::new(restarted_pool, test_otp_key());
     assert_eq!(
         restarted
             .purge_expired_clarification_activities()
@@ -1057,6 +1065,7 @@ async fn drain_recovers_backlog_beyond_one_batch() {
     let fixture = sweep_fixture(&pool).await;
     let store = AuthStore::with_retention(
         pool.clone(),
+        test_otp_key(),
         RetentionConfig::new(604_800, 60, 2, 20).expect("valid retention bounds"),
     );
     for _ in 0..12 {
@@ -1101,6 +1110,7 @@ async fn drain_recovers_backlog_larger_than_cycle_capacity() {
     let fixture = sweep_fixture(&pool).await;
     let store = AuthStore::with_retention(
         pool.clone(),
+        test_otp_key(),
         RetentionConfig::new(604_800, 60, 2, 2).expect("valid retention bounds"),
     );
     for _ in 0..6 {
@@ -1153,6 +1163,7 @@ async fn drain_exact_capacity_reports_no_remaining_backlog() {
     let fixture = sweep_fixture(&pool).await;
     let store = AuthStore::with_retention(
         pool.clone(),
+        test_otp_key(),
         RetentionConfig::new(604_800, 60, 2, 2).expect("valid retention bounds"),
     );
     for _ in 0..4 {
@@ -1185,6 +1196,7 @@ async fn drain_small_and_empty_backlogs_stop_early() {
     let fixture = sweep_fixture(&pool).await;
     let store = AuthStore::with_retention(
         pool.clone(),
+        test_otp_key(),
         RetentionConfig::new(604_800, 60, 2, 2).expect("valid retention bounds"),
     );
     for _ in 0..3 {
@@ -1225,11 +1237,13 @@ async fn drains_are_concurrent_and_restart_safe() {
     }
     let first = AuthStore::with_retention(
         pool.clone(),
+        test_otp_key(),
         RetentionConfig::new(604_800, 60, 2, 2).expect("valid retention bounds"),
     );
     let second_pool = independent_pool().await;
     let second = AuthStore::with_retention(
         second_pool,
+        test_otp_key(),
         RetentionConfig::new(604_800, 60, 2, 2).expect("valid retention bounds"),
     );
     let (first_drain, second_drain) = tokio::join!(
@@ -1246,7 +1260,7 @@ async fn drains_are_concurrent_and_restart_safe() {
     assert!(activity_ids(&pool, &fixture.session_id).await.is_empty());
 
     let restarted_pool = independent_pool().await;
-    let restarted = AuthStore::new(restarted_pool);
+    let restarted = AuthStore::new(restarted_pool, test_otp_key());
     let restart_drain = restarted
         .drain_expired_clarification_activities()
         .await

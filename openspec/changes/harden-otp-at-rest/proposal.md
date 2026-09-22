@@ -2,14 +2,15 @@
 
 ## Why
 
-Active six-digit verification codes hashed with ordinary SHA-256 remain vulnerable to offline brute force if the verification-code table leaks. High-entropy session-token and daemon-credential hashing must remain unchanged.
+Active six-digit verification codes currently use ordinary SHA-256. A database-only reader can therefore test guesses without server-held material. Session-token and daemon-credential hashing already protect high-entropy values and must not be changed by this follow-up.
 
 ## What Changes
 
-- Replace database-only OTP hashing with keyed hashing using a server-side pepper and issuance context.
-- Preserve short expiry, single use, supersession, cooldown, and bounded failed-attempt semantics.
-- Define pepper storage, rotation, migration, and failure behavior.
-- Add tests proving database contents alone cannot verify an active OTP.
+- Store verification-code digests as keyed HMAC-SHA-256 values bound to normalized email, the existing verification row ID, and an OTP-specific domain separator.
+- Load one strictly validated 256-bit server key from `NORTH_OTP_HMAC_KEY`; missing or invalid startup configuration fails closed and no unkeyed fallback exists.
+- Invalidate active legacy SHA-256 rows in a migration; never verify legacy digests or accept previous rotation keys.
+- Define explicit development/test key injection, constant-time comparison, redacted error/log behavior, and key-change invalidation semantics.
+- Preserve delivery, expiry, supersession, cooldown, bounded failed attempts, single-use sessions, and existing authentication responses.
 
 ## Capabilities
 
@@ -23,4 +24,8 @@ Active six-digit verification codes hashed with ordinary SHA-256 remain vulnerab
 
 ## Impact
 
-Future changes will affect `crates/north-persistence` verification-code hashing and migration logic, server secret configuration, authentication tests, and security documentation. Session-token and daemon-credential hashing are explicitly out of scope.
+Future implementation changes affect `crates/north-persistence` verification-code hashing and migration logic, server startup secret configuration, authentication tests, and security documentation. The existing `CodeDelivery` boundary remains; its intentional development/self-hosted delivery output is not abuse-control telemetry. Session-token, daemon-credential, setup-token, API-credential, and password-like hashing remain outside this change.
+
+## Explicit Boundaries
+
+This change applies only to the `verification_codes` issuance and verification flow. The shared high-entropy `hash_secret` behavior used for sessions and daemon credentials MUST remain unchanged. No general-purpose secret-management or KMS abstraction is introduced.

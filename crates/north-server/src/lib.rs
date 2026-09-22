@@ -49,6 +49,7 @@ pub async fn run_migrations(
 
 #[derive(Debug)]
 pub enum BuildAppError {
+    Configuration(north_persistence::OtpKeyError),
     Migration(north_persistence::MigrationError),
     Startup(north_persistence::PersistenceError),
 }
@@ -56,6 +57,7 @@ pub enum BuildAppError {
 impl fmt::Display for BuildAppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Configuration(error) => write!(f, "load OTP HMAC key: {error}"),
             Self::Migration(error) => write!(f, "run migrations: {error}"),
             Self::Startup(error) => write!(f, "initialize server state: {error}"),
         }
@@ -65,10 +67,15 @@ impl fmt::Display for BuildAppError {
 impl Error for BuildAppError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Configuration(error) => Some(error),
             Self::Migration(error) => Some(error),
             Self::Startup(error) => Some(error),
         }
     }
+}
+
+fn load_otp_key() -> Result<north_persistence::OtpKey, BuildAppError> {
+    north_persistence::OtpKey::from_env().map_err(BuildAppError::Configuration)
 }
 
 /// Build authenticated HTTP routes with the default retention settings.
@@ -133,10 +140,11 @@ pub async fn build_app_with_retention_and_public_endpoint_config(
     retention: north_persistence::RetentionConfig,
     config: public_abuse::PublicEndpointConfig,
 ) -> Result<axum::Router, BuildAppError> {
+    let otp_key = load_otp_key()?;
     run_migrations(&pool)
         .await
         .map_err(BuildAppError::Migration)?;
-    let store = north_persistence::AuthStore::with_retention(pool, retention);
+    let store = north_persistence::AuthStore::with_retention(pool, otp_key, retention);
     store
         .invalidate_daemon_connections()
         .await
@@ -154,3 +162,38 @@ pub use daemon::{
     CommandRequest, DaemonDispatchError, DaemonHttpError, DaemonResponse, DaemonRuntime,
     SetupApprovalResponse,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static OTP_ENV_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn startup_key_loading_fails_closed_without_echoing_configuration() {
+        let _guard = OTP_ENV_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("OTP environment test lock");
+        let previous = std::env::var_os(north_persistence::OTP_HMAC_KEY_ENV);
+
+        std::env::remove_var(north_persistence::OTP_HMAC_KEY_ENV);
+        let missing = load_otp_key().err().expect("missing key must fail startup");
+        assert!(matches!(missing, BuildAppError::Configuration(_)));
+        assert!(!missing.to_string().contains("000102"));
+
+        std::env::set_var(
+            north_persistence::OTP_HMAC_KEY_ENV,
+            "not-a-valid-secret-value",
+        );
+        let invalid = load_otp_key().err().expect("invalid key must fail startup");
+        assert!(matches!(invalid, BuildAppError::Configuration(_)));
+        assert!(!invalid.to_string().contains("not-a-valid-secret-value"));
+
+        match previous {
+            Some(value) => std::env::set_var(north_persistence::OTP_HMAC_KEY_ENV, value),
+            None => std::env::remove_var(north_persistence::OTP_HMAC_KEY_ENV),
+        }
+    }
+}

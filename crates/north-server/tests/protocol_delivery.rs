@@ -4,6 +4,13 @@ use north_persistence::{
 use north_protocol::{Command, CommandEnvelope, MessageSend, SCHEMA_VERSION};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn test_otp_key() -> north_persistence::OtpKey {
+    north_persistence::OtpKey::from_hex(
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    )
+    .expect("valid test OTP key")
+}
+
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -78,7 +85,7 @@ async fn durable_delivery_survives_lost_ack_gaps_and_retry() {
         .await
         .expect("insert user");
     let daemon_id = connected_daemon(&pool, &user_id).await;
-    let store = AuthStore::new(pool.clone());
+    let store = AuthStore::new(pool.clone(), test_otp_key());
     let session_id = unique("delivery-session");
 
     let failed = store

@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
 
+#[allow(dead_code)]
+mod support;
+
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -23,7 +26,10 @@ fn unique(prefix: &str) -> String {
 
 fn app(pool: north_persistence::PgPool, id: &str, role: Role) -> Router {
     requirements::router()
-        .with_state(AuthState::with_log_delivery(AuthStore::new(pool)))
+        .with_state(AuthState::with_log_delivery(AuthStore::new(
+            pool,
+            support::test_otp_key(),
+        )))
         .layer(Extension(CurrentUser(north_persistence::UserRecord {
             id: id.into(),
             email: format!("{id}@example.com"),
@@ -225,7 +231,7 @@ async fn requirement_api_enforces_state_version_and_review_contracts() {
     let session_id = bind_session(&pool, "requirement-assessment", &requirement_id).await;
     let assessment = ready_assessment(&requirement_id, 3, "current evidence");
     let ack = process_requirement_assessed(
-        &AuthStore::new(pool.clone()),
+        &AuthStore::new(pool.clone(), support::test_otp_key()),
         &unique("requirement-assessment-event"),
         &session_id,
         1,
@@ -378,7 +384,7 @@ async fn transition_edges_are_state_version_guarded_and_assessment_bound() {
     let session_a = bind_session(&pool, "lifecycle-session-a", &requirement_id).await;
     let assessment_a = ready_assessment(&requirement_id, 2, "A");
     let ack_a = process_requirement_assessed(
-        &AuthStore::new(pool.clone()),
+        &AuthStore::new(pool.clone(), support::test_otp_key()),
         &unique("lifecycle-event-a"),
         &session_a,
         1,
@@ -432,7 +438,7 @@ async fn transition_edges_are_state_version_guarded_and_assessment_bound() {
     let session_b = bind_session(&pool, "lifecycle-session-b", &requirement_id).await;
     let assessment_b = ready_assessment(&requirement_id, 2, "B");
     let ack_b = process_requirement_assessed(
-        &AuthStore::new(pool.clone()),
+        &AuthStore::new(pool.clone(), support::test_otp_key()),
         &unique("lifecycle-event-b"),
         &session_b,
         1,
