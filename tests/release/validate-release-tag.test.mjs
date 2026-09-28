@@ -26,6 +26,7 @@ const releaseFiles = [
   "scripts/verify-release-artifact.mjs",
   "scripts/verify-release-images.mjs",
   "scripts/verify-cli-archive.mjs",
+  "scripts/glibc-compatibility.mjs",
 ];
 
 function git(repository, ...args) {

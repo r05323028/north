@@ -76,12 +76,47 @@ process.exitCode = Array.isArray(assets) && assets.some((asset) => asset.name ==
 NODE
 }
 
+read_git_object() {
+    node -e '
+const object = JSON.parse(process.argv[1]).object;
+if (!object || !["commit", "tag"].includes(object.type) || typeof object.sha !== "string") process.exit(1);
+process.stdout.write(object.type + " " + object.sha);
+' "$1"
+}
+
+resolve_tag_commit() {
+    local response object type sha depth
+    response=$(gh api "repos/$repo/git/ref/tags/$release_tag") ||
+        fail "unable to resolve GitHub release tag: $release_tag"
+    for ((depth = 0; depth < 8; depth++)); do
+        object=$(read_git_object "$response") || fail "invalid GitHub release tag object"
+        type=${object%% *}
+        sha=${object#* }
+        [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail "GitHub release tag contains an invalid object SHA"
+        case "$type" in
+            commit) printf '%s\n' "$sha"; return 0 ;;
+            tag)
+                response=$(gh api "repos/$repo/git/tags/$sha") ||
+                    fail "unable to dereference annotated GitHub release tag: $release_tag"
+                ;;
+            *) fail "GitHub release tag does not resolve to a commit" ;;
+        esac
+    done
+    fail "GitHub release tag nesting exceeds supported depth"
+}
+
+verify_tag_source() {
+    local resolved_sha
+    resolved_sha=$(resolve_tag_commit)
+    [[ "$resolved_sha" == "$source_sha" ]] ||
+        fail "GitHub tag resolves to $resolved_sha, expected source SHA $source_sha"
+}
+
 check_metadata() {
     local release_file=$1
     [[ "$(release_field "$release_file" tagName)" == "$release_tag" ]] ||
         fail "GitHub Release tag does not match"
-    [[ "$(release_field "$release_file" targetCommitish)" == "$source_sha" ]] ||
-        fail "GitHub Release target does not match source SHA"
+    verify_tag_source
 }
 
 check_assets() {
@@ -102,7 +137,19 @@ check_assets() {
 
 view_release() {
     gh release view "$release_tag" --repo "$repo" \
-        --json isDraft,tagName,targetCommitish,assets
+        --json isDraft,tagName,assets
+}
+
+release_is_missing() {
+    local response status_line
+    if response=$(gh api --include "repos/$repo/releases/tags/$release_tag" 2>&1); then
+        printf 'GitHub Release API found a Release but gh release view failed\n' >&2
+        return 1
+    fi
+    status_line=$(printf '%s\n' "$response" | sed -n '1p')
+    [[ "$status_line" =~ ^HTTP/[0-9.]+[[:space:]]404([[:space:]]|$) ]] && return 0
+    printf '%s\n' "$response" >&2
+    return 1
 }
 
 check_remote_assets() {
@@ -123,10 +170,12 @@ release_file=$(mktemp)
 temp_dir=$(mktemp -d)
 trap 'rm -f "$release_file"; rm -rf "$temp_dir"' EXIT
 if ! view_release > "$release_file" 2>/dev/null; then
+    release_is_missing || fail "unable to inspect GitHub Release state"
     [[ "$mode" == draft ]] || fail "GitHub Release draft is missing"
+    verify_tag_source
     gh release create "$release_tag" --repo "$repo" --draft \
         --target "$source_sha" --title "$release_tag" --generate-notes --verify-tag
-    view_release > "$release_file"
+    view_release > "$release_file" || fail "created GitHub Release cannot be read"
 fi
 check_metadata "$release_file"
 check_assets "$release_file" false
@@ -137,6 +186,7 @@ if [[ "$mode" == draft ]]; then
     check_remote_assets "$release_file" "$temp_dir"
     for name in "${expected_assets[@]}"; do
         if ! release_has_asset "$release_file" "$name"; then
+            verify_tag_source
             gh release upload "$release_tag" "$asset_dir/$name" --repo "$repo"
             gh release download "$release_tag" --repo "$repo" \
                 --pattern "$name" --dir "$temp_dir"
@@ -156,6 +206,7 @@ fi
 check_assets "$release_file" true
 check_remote_assets "$release_file" "$temp_dir"
 if [[ "$(release_field "$release_file" isDraft)" == true ]]; then
+    verify_tag_source
     gh release edit "$release_tag" --repo "$repo" --draft=false
     view_release > "$release_file"
     check_metadata "$release_file"

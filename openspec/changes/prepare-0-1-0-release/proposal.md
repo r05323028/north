@@ -21,6 +21,11 @@ Release qualification needs one reproducible proof that these existing subsystem
 - Document the minimum supported self-hosted topology, configuration, OTP key generation, database setup, daemon setup, startup, upgrades, known 0.1.0 limitations, release verification, and a concise maintainer checklist.
 - Add `Dockerfile.server`, `apps/web/Dockerfile`, and `docker-compose.yaml` for `north-server` and `north-web` OCI images plus PostgreSQL. Main merges qualify internal OCI archives only; strict SemVer tags rebuild and qualify versioned OCI images from tag commit and are the only GHCR publication path. GitHub Release contains only CLI+daemon archives and checksums. Keep operator TLS proxy external and daemon host-managed.
 
+- Build Linux server and CLI/daemon binaries in an immutable glibc 2.31-compatible builder and verify required GLIBC symbol versions in every packaged Linux ELF; record the same baseline in manifests.
+- Require `cargo --locked` throughout release production and reject artifacts if packaging changes `HEAD` or source worktree.
+- Run Conventional Commit PR-title validation in a dedicated lightweight workflow on PR edits, preserving required-check name while avoiding full CI reruns.
+- Require at least one approving review in protected-main rules and verify release tags resolve to the expected full source SHA through GitHub's Git API.
+
 ## Capabilities
 
 ### New Capabilities

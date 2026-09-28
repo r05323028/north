@@ -1,7 +1,12 @@
 # North self-hosted deployment
 
 The release build targets Linux `x86_64-unknown-linux-gnu` with glibc 2.31
-or newer. Operators install versioned GHCR server and web images with
+or newer. Linux server and CLI/daemon builds use immutable amd64 builder
+`rust:1.97.1-bullseye@sha256:02d78ca3f928195c2a907543de778adfd728ad7e2a24fdc6aef582b7c77842e0`.
+`readelf` checks every packaged Linux ELF and rejects required GLIBC symbols
+above 2.31. Server and Linux CLI manifests record same baseline. Release Cargo
+commands use `--locked`; packaging refuses a dirty or changed source checkout
+after builds. Operators install versioned GHCR server and web images with
 `docker-compose.yaml`; workflow does not deploy North. Main merges qualify internal package/OCI archives and publish no image to
 GHCR. An authorized strict `vX.Y.Z` tag
 starts fresh package/OCI and native CLI builds plus qualification from tag SHA;

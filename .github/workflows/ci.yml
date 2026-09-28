@@ -12,19 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pr-title:
-    name: PR title (Conventional Commit)
-    if: github.event_name == 'pull_request'
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-      - name: Validate PR title
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: echo "$PR_TITLE" | ./scripts/check-commit-message.sh
-
   rust:
     name: Rust (fmt, clippy, unit+architecture)
     runs-on: self-hosted
@@ -211,7 +198,6 @@ jobs:
   gate:
     name: merge gate
     needs:
-      - pr-title
       - rust
       - rust-coverage
       - web
@@ -224,14 +210,6 @@ jobs:
     steps:
       - name: Fail unless every required job succeeded
         run: |
-          # pr-title is intentionally skipped on push events; every
-          # actual validation job must succeed on every event.
-          if [ "${{ needs.pr-title.result }}" != "success" ] &&
-             ! { [ "${{ needs.pr-title.result }}" = "skipped" ] &&
-                 [ "${{ github.event_name }}" = "push" ]; }; then
-            echo "pr-title gate result: ${{ needs.pr-title.result }}"
-            exit 1
-          fi
           for job in \
             rust web web-e2e openspec daemon-integration \
             rust-coverage web-coverage; do

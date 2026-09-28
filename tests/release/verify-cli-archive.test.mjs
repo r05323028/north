@@ -34,9 +34,12 @@ function makeFixture({ extraEntry = false, omitDaemon = false } = {}) {
     source_commit: sourceSha,
     target,
     platform,
+    glibc_baseline: "2.31",
     binaries: ["north", "north-daemon"],
   };
   writeFileSync(join(root, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+  writeFileSync(join(root, "readelf"), "#!/bin/sh\nprintf 'GLIBC_2.31\\n'\n");
+  chmodSync(join(root, "readelf"), 0o755);
   writeFileSync(join(root, "north"), `#!/bin/sh\nprintf 'north ${version}\\n'\n`);
   writeFileSync(join(root, "north-daemon"), `#!/bin/sh\nprintf 'north-daemon ${version}\\n'\n`);
   chmodSync(join(root, "north"), 0o755);
@@ -60,7 +63,7 @@ function run(fixture, args = []) {
   return spawnSync(
     process.execPath,
     [verifier, fixture.archive, sourceSha, version, target, ...args],
-    { encoding: "utf8" },
+    { encoding: "utf8", env: { ...process.env, PATH: `${fixture.root}:${process.env.PATH}` } },
   );
 }
 
@@ -102,7 +105,7 @@ test("rejects archive and metadata mismatches", () => {
     const sourceMismatch = spawnSync(
       process.execPath,
       [verifier, fixture.archive, "f".repeat(40), version, target],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: { ...process.env, PATH: `${fixture.root}:${process.env.PATH}` } },
     );
     assert.notEqual(sourceMismatch.status, 0);
   } finally {

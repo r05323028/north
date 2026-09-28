@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { verifyGlibcCompatibility } from "./glibc-compatibility.mjs";
 
 const [artifactPath, expectedSha, releaseRef] = process.argv.slice(2);
 
@@ -46,7 +47,8 @@ if (
   manifest.server_version !== version ||
   manifest.daemon_version !== version ||
   manifest.web_version !== version ||
-  manifest.target !== "x86_64-unknown-linux-gnu"
+  manifest.target !== "x86_64-unknown-linux-gnu" ||
+  manifest.glibc_baseline !== "2.31"
 ) {
   fail("manifest does not match release version, source SHA, versions, or target");
 }
@@ -100,4 +102,12 @@ if (
   JSON.stringify(expectedFiles.sort())
 ) {
   fail("artifact payload does not match checksum inventory");
+}
+
+for (const binary of ["bin/north-server", "bin/north-daemon"]) {
+  try {
+    verifyGlibcCompatibility(path.join(root, binary), manifest.glibc_baseline);
+  } catch (error) {
+    fail(error.message);
+  }
 }

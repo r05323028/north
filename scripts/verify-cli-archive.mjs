@@ -9,6 +9,7 @@ import {
   rmSync,
 } from "node:fs";
 import { basename, join } from "node:path";
+import { verifyGlibcCompatibility } from "./glibc-compatibility.mjs";
 import { tmpdir } from "node:os";
 
 function fail(message) {
@@ -71,6 +72,7 @@ async function main() {
       manifest.source_commit !== sourceSha ||
       manifest.target !== target ||
       manifest.platform !== platforms[target] ||
+      manifest.glibc_baseline !== (target === "x86_64-unknown-linux-gnu" ? "2.31" : null) ||
       JSON.stringify(manifest.binaries) !== JSON.stringify(["north", "north-daemon"])
     ) {
       fail("CLI archive metadata does not match expected source, version, and target");
@@ -87,6 +89,11 @@ async function main() {
       if ((await digest(join(directory, file))) !== checksums.get(file)) {
         fail(`CLI checksum mismatch: ${file}`);
       }
+    }
+
+    if (target === "x86_64-unknown-linux-gnu") {
+      verifyGlibcCompatibility(join(directory, "north"), "2.31");
+      verifyGlibcCompatibility(join(directory, "north-daemon"), "2.31");
     }
 
     if (executeArg === "--execute") {

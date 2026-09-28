@@ -21,6 +21,7 @@ function manifest(overrides = {}) {
     daemon_version: releaseVersion,
     web_version: releaseVersion,
     target: "x86_64-unknown-linux-gnu",
+    glibc_baseline: "2.31",
     ...overrides,
   };
 }
@@ -43,10 +44,19 @@ function writeChecksums(root) {
   );
 }
 
-function runVerifier(root, sha = sourceSha, tag = releaseTag) {
-  return spawnSync(process.execPath, [verifier, root, sha, tag], {
-    encoding: "utf8",
-  });
+function runVerifier(root, sha = sourceSha, tag = releaseTag, glibcVersion = "2.31") {
+  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "north-fake-readelf-"));
+  const readelf = path.join(fakeBin, "readelf");
+  fs.writeFileSync(readelf, `#!/bin/sh\nprintf 'GLIBC_${glibcVersion}\\n'\n`);
+  fs.chmodSync(readelf, 0o755);
+  try {
+    return spawnSync(process.execPath, [verifier, root, sha, tag], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` },
+    });
+  } finally {
+    fs.rmSync(fakeBin, { recursive: true, force: true });
+  }
 }
 
 function verify(root) {
@@ -76,6 +86,7 @@ test("release artifact verification fails closed", () => {
     );
     writeChecksums(root);
     assert.equal(verify(root).status, 0);
+    assert.match(runVerifier(root, sourceSha, releaseTag, "2.32").stderr, /exceeds declared glibc baseline 2.31/);
 
     fs.writeFileSync(path.join(root, "bin/north-server"), "changed");
     rejected(verify(root));

@@ -39,6 +39,7 @@ release_paths=(
     scripts/verify-release-artifact.mjs
     scripts/verify-release-images.mjs
     scripts/verify-cli-archive.mjs
+    scripts/glibc-compatibility.mjs
 )
 git diff --quiet "$source_sha" "$main_sha" -- "${release_paths[@]}" ||
     fail "tagged release code differs from origin/main"
@@ -56,7 +57,7 @@ workspace_version() {
     ' "${1:--}"
 }
 
-cargo_version=$(cargo metadata --no-deps --format-version 1 | node -e '
+cargo_version=$(cargo metadata --locked --no-deps --format-version 1 | node -e '
 let input = "";
 process.stdin.on("data", chunk => input += chunk);
 process.stdin.on("end", () => {

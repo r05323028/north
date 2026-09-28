@@ -38,10 +38,12 @@ This checks current refs; deleted historical tags cannot be detected.
 Run from repository root and paste exact output or CI run URL:
 
 - [ ] `OWNER ACTION` Run `./scripts/validate.sh fast` for this release candidate.
-- [ ] `OWNER ACTION` Protect `main` with PR review and required `gate`; prohibit
-  direct pushes and bypasses. This repository rule—not a GitHub Environment—
-  ensures release workflow runs only after approved merges. Protect `v*` tags
-  separately; restrict creation/update/deletion to authorized release maintainers.
+- [x] `PASS` Active `main` ruleset `21581438` requires one approving review,
+  `Rust (fmt, clippy, unit+architecture)`, `PR title (Conventional Commit)`, and
+  `merge gate`; squash-only and linear history remain enforced, with no bypass actors.
+  Status-check freshness remains an owner action (`strict_required_status_checks_policy=false`).
+- [ ] `OWNER ACTION` Protect `v*` tags separately; restrict creation, update, and
+  deletion to authorized release maintainers.
 - [ ] `OWNER ACTION` Configure test-only existing-PKI material as repository
   Actions secrets. Workflow needs no GitHub Environments and does not deploy North.
 - [ ] `OWNER ACTION` Run `./scripts/validate.sh integration` with isolated
@@ -64,18 +66,18 @@ credentials are recorded.
 - `PASS` `openspec validate --all --strict`
 - `PASS` `./scripts/validate.sh integration`
 - `PASS` `./scripts/validate.sh e2e` (8 tests)
-- `PASS` `node --test tests/release/*.test.mjs` (37 tests) — release validation, CLI archives, tag checks, digest conflicts, draft retries, workflow ordering, tag-ref concurrency, and hosted PKI cleanup passed.
+- `PASS` `node --test tests/release/*.test.mjs` (48 tests) — release validation, pinned GLIBC checks, locked Cargo/source-cleanliness guards, PR-title event routing, CLI archives, recursive Git tag identity, pre-mutation SHA checks, missing-release error classification, digest conflicts, draft retries, workflow ordering, and hosted PKI cleanup passed.
 - `PASS` Local `./scripts/release.sh qualify` on Node.js 26.7.0 with disposable PostgreSQL 16, ephemeral OTP key, and existing trusted TLS identity: six fresh-install tests, trusted-WSS runtime, and two assembled Playwright E2E tests passed. That earlier run did not cover immutable package/OCI artifacts.
 - `PASS` Local Docker Desktop `linux/amd64` emulation of exact package, CLI, and OCI artifacts from clean synthetic source SHA `39d81fa36495c201ed0517ac9b26c8789bc254c9`: secret-free preflight and `./scripts/validate.sh smoke` passed, including migration-first Compose startup, authenticated HTTP, proxy/SSE, trusted WSS, daemon runtime, both assembled Playwright tests, volume persistence, and cleanup. Manifest: version `0.1.0`, previous version `0.1.0`, `version_changed=false`; target `linux/amd64`. Internal OCI manifest digests: `north-server` `sha256:746b39310c03fed46c4e26d31b8f0e536d6e476881a1d21196e424e774062e5b`; `north-web` `sha256:51173839db642a6a5f63bfb0958732af8caccb7f86532979b66f39f7836109ff`. Archive SHA-256: server `8f4b68635ab09bae27d4925e5dcdf8bbb365d69ae68e3edd2703bc5167207042`; web `c5ae1a791c96e4fa688b1ffc74696c6eca803ab8334bc5a97e9491cec9810ba6`. Artifacts: `$HOME/.cache/north-local-emulation.SLTosd/artifacts` (197 MB). These are local artifact digests, not SemVer registry digests. Expected tag destinations use `ghcr.io/r05323028/north-server:vX.Y.Z` and `ghcr.io/r05323028/north-web:vX.Y.Z`; no SemVer refs/digests or GitHub Release assets were published. With the updated gate, this unchanged-version artifact can qualify only when the full fetched tag inventory contains no other strict SemVer ref; hosted tag inventory remains unverified. Docker Desktop host was arm64; local-only Skopeo 1.22.3 shim and temporary-home NSS CA trust were used. Hosted protected-main/tag qualification remains NOT RUN.
 - `PASS` Native macOS ARM64 CLI archive smoke from synthetic source SHA `af7d03dd355b61e94a0d87217547d9cecb1e646e`: `scripts/release.sh cli-package aarch64-apple-darwin` verified and executed both extracted binaries; archive SHA-256 `2562f60eb584b7aaa7e5c5408f58c5e2c2e3d802301d02a07e1fade1828874dc`. This source differs from Linux/amd64 artifact and does not qualify hosted tag build or macOS x86_64.
 - `PASS` macOS x86_64 CLI archive build and Rosetta smoke from synthetic clean-worktree SHA `744136b37e40392483bd07c7a5daf9b0fb52c963`: `scripts/release.sh cli-package x86_64-apple-darwin` verified archive contents/checksums and executed extracted `north` and `north-daemon`; `file` confirmed both Mach-O x86_64. Archive SHA-256 `10159f0e8b2f431e75c7612de820f1cca5f7916874d14951235f3fb4ba392d35`; artifact `$HOME/.cache/north-x86-cli-artifacts.oBPs6T`. Build ran on Apple Silicon under Rosetta, not native Intel or hosted tag workflow; synthetic SHA is not protected-main/tag evidence.
 - `PASS` package preflight probes reject dirty source and clean untagged HEAD before creating output.
 - `PASS` qualification preflight labels missing database input `OWNER-ACTION` and absent package/OCI lanes `NOT-RUN`.
-- `PASS` `actionlint .github/workflows/release.yml`
+- `PASS` `actionlint .github/workflows/ci.yml .github/workflows/pr-title.yml .github/workflows/release.yml`
 - `PASS` `docker compose --file docker-compose.yaml config --quiet` with dummy interpolation values; no images built.
 - `PASS` Earlier `./scripts/pre-push-validation.sh` before the final hosted-cleanup-only workflow/test change: disposable PostgreSQL 16, native `ci`, and Act Rust job passed.
 - `BLOCKED` Earlier 30-minute pre-push attempt (superseded): native `validate.sh ci` passed; Act Rust job timed out while fetching crates during `cargo check --workspace --all-targets`.
-- `PASS` Final `./scripts/pre-push-validation.sh` rerun with `NORTH_PRE_PUSH_TIMEOUT=3600`: disposable PostgreSQL native `ci` passed, and Act `Rust (fmt, clippy, unit+architecture)` completed `scripts/validate.sh rust: OK`; workflow job succeeded.
+- `PASS` `./scripts/pre-push-validation.sh`: disposable PostgreSQL native `ci` and Act `Rust (fmt, clippy, unit+architecture)` passed; Act completed `scripts/validate.sh rust: OK`. Release-only edits made while Act ran were covered by the 48-test release suite.
 - Migration compatibility is fresh-install-only for 0.1.0: tests reject old SQLx history and partial schemas without mutation; qualification runs packaged `north-server migrate` before startup, while normal startup verifies schema without DDL. Deployment docs prohibit automatic reset and require manual backup/disposition.
 - `PASS` Smoke fail-closed guard: `./scripts/validate.sh smoke` without an artifact exits 2 with `validate.sh: smoke requires NORTH_RELEASE_ARTIFACT_DIR.` This is not artifact qualification.
 - `PASS` Local emulated `./scripts/validate.sh smoke` against extracted package/OCI artifacts; see synthetic-SHA evidence above. Hosted main/tag qualification remains `NOT RUN`.
@@ -84,8 +86,13 @@ credentials are recorded.
 
 Qualification prerequisites:
 
-- Protect `main` with repository rules requiring PR review and the `gate` job;
-  block direct pushes and bypasses. Workflow YAML cannot enforce these settings.
+- Verify active `main` ruleset requires one approving review and the existing
+  Rust, PR-title, and `merge gate` contexts. Confirm ruleset state using the explicit
+  `gh api` readback in `docs/development/ci.md`; workflow YAML cannot enforce it.
+- Build Linux server and CLI/daemon binaries in the pinned glibc 2.31 builder;
+  verify all packaged Linux ELF GLIBC requirements are at most 2.31 and manifest
+  metadata matches. Release Cargo commands use `--locked`; package steps verify
+  source `HEAD` and cleanliness after build/assembly.
 - Configure test-only existing-PKI material as repository Actions secrets:
   `NORTH_RELEASE_TLS_CA_PEM`, `NORTH_RELEASE_TLS_CERT_PEM`, and
   `NORTH_RELEASE_TLS_KEY_PEM`. No GitHub Environments are required; never use

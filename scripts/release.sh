@@ -2,6 +2,71 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+readonly LINUX_RELEASE_BUILDER_IMAGE="rust:1.97.1-bullseye@sha256:02d78ca3f928195c2a907543de778adfd728ad7e2a24fdc6aef582b7c77842e0"
+readonly GLIBC_BASELINE=2.31
+
+release_require_clean_source() {
+    local command=$1 stage=$2 source_commit=$3 status
+    local current_commit
+    current_commit=$(git -C "$ROOT" rev-parse HEAD) || {
+        printf 'release.sh %s: unable to verify source commit after %s\n' "$command" "$stage" >&2
+        return 2
+    }
+    [[ "$current_commit" == "$source_commit" ]] || {
+        printf 'release.sh %s: HEAD changed after %s; refusing to label artifacts as commit %s\n' "$command" "$stage" "$source_commit" >&2
+        return 2
+    }
+    status=$(git -C "$ROOT" status --porcelain --untracked-files=all) || {
+        printf 'release.sh %s: unable to verify source worktree cleanliness after %s\n' "$command" "$stage" >&2
+        return 2
+    }
+    [[ -z "$status" ]] || {
+        printf 'release.sh %s: source worktree changed after %s; refusing to label mutable inputs as commit %s\n%s\n' \
+            "$command" "$stage" "$source_commit" "$status" >&2
+        return 2
+    }
+}
+
+release_cargo_build() {
+    local target=$1 binaries=$2 cargo_cache
+    shift 2
+    if [[ "$target" == x86_64-unknown-linux-gnu ]]; then
+        command -v docker >/dev/null 2>&1 || {
+            printf 'release.sh: Docker is required for pinned Linux release builds\n' >&2
+            return 2
+        }
+        cargo_cache=${CARGO_HOME:-${HOME:?}/.cargo}
+        mkdir -p "$cargo_cache"
+        docker run --rm --platform=linux/amd64 \
+            --user "$(id -u):$(id -g)" \
+            --volume "$ROOT:/workspace" \
+            --volume "$cargo_cache:/cargo" \
+            --workdir /workspace \
+            --env CARGO_HOME=/cargo \
+            --env RUSTUP_HOME=/usr/local/rustup \
+            "$LINUX_RELEASE_BUILDER_IMAGE" \
+            bash -euo pipefail -c '
+                builder_libc=$(getconf GNU_LIBC_VERSION)
+                [[ "$builder_libc" == "glibc 2.31" ]] || {
+                    printf "release Linux builder requires glibc 2.31; found %s\n" "$builder_libc" >&2
+                    exit 2
+                }
+                target=$1
+                binary_names=$2
+                shift 2
+                cargo build --locked --release --target "$target" "$@"
+                read -r -a binaries <<< "$binary_names"
+                for binary in "${binaries[@]}"; do
+                    [[ -x "target/$target/release/$binary" ]] || {
+                        printf "release Linux build did not produce %s\n" "$binary" >&2
+                        exit 2
+                    }
+                done
+            ' north-release-build "$target" "$binaries" "$@"
+    else
+        cargo build --locked --release --target "$target" "$@"
+    fi
+}
 
 usage() {
     printf 'usage: %s <package|cli-package|qualify> [version|target|artifact-dir]\n' "${0##*/}" >&2
@@ -10,10 +75,10 @@ usage() {
 release_package() {
 requested_version=${1:-${NORTH_RELEASE_VERSION:-}}
 target=${NORTH_RELEASE_TARGET:-x86_64-unknown-linux-gnu}
-glibc_baseline=${NORTH_RELEASE_GLIBC_BASELINE:-2.31}
+glibc_baseline=$GLIBC_BASELINE
 node_requirement=${NORTH_RELEASE_NODE_REQUIREMENT:-22}
 
-cargo_version=$(cargo metadata --no-deps --format-version 1 | node -e '
+cargo_version=$(cargo metadata --locked --no-deps --format-version 1 | node -e '
 let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => {
   const metadata = JSON.parse(input);
   const pkg = metadata.packages.find(({ name }) => name === "north-server");
@@ -80,8 +145,10 @@ if ! rustup target list --installed | grep -Fx "$target" >/dev/null; then
     printf 'release.sh package: Rust target is not installed: %s\n' "$target" >&2
     exit 2
 fi
-cargo build --release --target "$target" -p north-server -p north-daemon
+release_cargo_build "$target" "north-server north-daemon" -p north-server -p north-daemon
+release_require_clean_source package "Cargo build" "$source_commit"
 (cd apps/web && npm run build)
+release_require_clean_source package "web build" "$source_commit"
 
 rm -rf "$output_root"
 mkdir -p "$output_root/bin" "$output_root/web" "$output_root/docs"
@@ -133,6 +200,7 @@ printf 'release.sh package: %s\n' "$output_root"
 (cd "$output_root" && shasum -a 256 -c checksums.sha256 >/dev/null)
 node "$ROOT/scripts/verify-release-artifact.mjs" \
     "$output_root" "$source_commit" "v$version"
+release_require_clean_source package "package assembly" "$source_commit"
 }
 
 release_cli_package() {
@@ -147,7 +215,7 @@ release_cli_package() {
             exit 2
             ;;
     esac
-    cargo_version=$(cargo metadata --no-deps --format-version 1 | node -e '
+    cargo_version=$(cargo metadata --locked --no-deps --format-version 1 | node -e '
 let input = "";
 process.stdin.on("data", chunk => input += chunk);
 process.stdin.on("end", () => {
@@ -179,7 +247,8 @@ process.stdin.on("end", () => {
         exit 2
     fi
 
-    cargo build --locked --release --target "$target" -p north-daemon --bin north --bin north-daemon
+    release_cargo_build "$target" "north north-daemon" -p north-daemon --bin north --bin north-daemon
+    release_require_clean_source cli-package "Cargo build" "$source_commit"
     stage_root=$(mktemp -d)
     trap 'rm -rf "$stage_root"' EXIT
     stage="$stage_root/package"
@@ -187,9 +256,9 @@ process.stdin.on("end", () => {
     target_dir="$ROOT/target/$target/release"
     install -m 0755 "$target_dir/north" "$stage/north"
     install -m 0755 "$target_dir/north-daemon" "$stage/north-daemon"
-    node - "$stage/manifest.json" "$cargo_version" "$source_commit" "$target" <<'NODE'
+    node - "$stage/manifest.json" "$cargo_version" "$source_commit" "$target" "$GLIBC_BASELINE" <<'NODE'
 const fs = require("node:fs");
-const [path, version, sourceCommit, target] = process.argv.slice(2);
+const [path, version, sourceCommit, target, glibcBaseline] = process.argv.slice(2);
 const platform = {
   "x86_64-unknown-linux-gnu": "linux/amd64",
   "x86_64-apple-darwin": "darwin/amd64",
@@ -201,6 +270,7 @@ fs.writeFileSync(path, JSON.stringify({
   source_commit: sourceCommit,
   target,
   platform,
+  glibc_baseline: target === "x86_64-unknown-linux-gnu" ? glibcBaseline : null,
   binaries: ["north", "north-daemon"],
 }, null, 2) + "\n");
 NODE
@@ -215,6 +285,7 @@ NODE
     (cd "$archive_dir" && shasum -a 256 "$archive_name" > "$archive_name.sha256")
     node "$ROOT/scripts/verify-cli-archive.mjs" \
         "$archive" "$source_commit" "$cargo_version" "$target" --execute
+    release_require_clean_source cli-package "package assembly" "$source_commit"
     printf 'release.sh cli-package: %s\n' "$archive"
 }
 
@@ -565,7 +636,7 @@ if [[ -n "$artifact_dir" ]]; then
     [[ -x "$daemon_bin" ]] || { release_log "OWNER-ACTION missing artifact north-daemon"; exit 2; }
     [[ -f "$web_dir/server.js" ]] || { release_log "OWNER-ACTION missing artifact web/server.js"; exit 2; }
 else
-    run_bounded 900 cargo build --release -p north-server -p north-daemon
+    run_bounded 900 cargo build --locked --release -p north-server -p north-daemon
     server_bin="$ROOT/target/release/north-server"
     daemon_bin="$ROOT/target/release/north-daemon"
     web_dir="$ROOT/apps/web"
@@ -637,7 +708,7 @@ release_log "PASS packaged-migration-command"
 
 release_log "qualification evidence=fresh-install-migration"
 run_bounded 900 env NORTH_TEST_DATABASE_URL="$NORTH_TEST_DATABASE_URL" \
-    cargo test -p north-server --test fresh_install -- --ignored
+    cargo test --locked -p north-server --test fresh_install -- --ignored
 release_log "PASS fresh-install-migration parity"
 release_check_invalid_otp_startup
 
@@ -815,7 +886,7 @@ if ! run_bounded 900 env \
     NORTH_RELEASE_DAEMON_ID="$daemon_id" \
     NORTH_RELEASE_DAEMON_CREDENTIAL="$daemon_credential" \
     NORTH_RELEASE_REQUIREMENT_ID="$transport_requirement_id" \
-    cargo test -p north-transport-integration --test release_qualification -- --ignored; then
+    cargo test --locked -p north-transport-integration --test release_qualification -- --ignored; then
     release_log "OWNER-ACTION trusted-wss failed private_logs=$RELEASE_TMPDIR/logs"
     tail -30 "$proxy_log" "$transport_trigger_log" >&2 || true
     exit 1

@@ -17,8 +17,10 @@ checks, never replacements.
 | `openspec` | `openspec validate --all --strict` |
 | `gate` | succeeds only when all required jobs, including web E2E and coverage jobs, succeed |
 
-Branch protection should require exactly one check: **`gate`** — internal job
-structure may evolve without touching rulesets.
+The `main` ruleset requires exactly three checks: **`Rust (fmt, clippy, unit+architecture)`**,
+**`PR title (Conventional Commit)`**, and **`merge gate`** (workflow job ID `gate`).
+The PR-title check uses a separate lightweight workflow and reruns on `edited`;
+edited events do not rerun full CI.
 
 ## Release workflow (`.github/workflows/release.yml`)
 
@@ -96,15 +98,16 @@ tests in `tests/architecture/tests/architecture.rs` enforce both properties.
 PR-Agent review is advisory. To roll it back, disable/remove the workflow and
 revoke `OPENCODE_API_KEY`; existing CI and `gate` remain unchanged.
 
-## Required repository settings (owner applies)
+## Required repository settings
 
 GitHub branch protection / ruleset for `main`:
 
-- Require pull request before merging.
-- Require status check: **`gate`**.
+- Require pull request before merging and at least one approving review.
+- Require the existing checks: **`Rust (fmt, clippy, unit+architecture)`**,
+  **`PR title (Conventional Commit)`**, and **`merge gate`**.
 - Restrict pushes to reviewed PR merges; block direct pushes and bypass actors.
-- Require branches up to date before merging.
-- (Recommended) Allow squash merge only, so PR titles stay the canonical history.
+- Require linear history and allow squash merge only.
+- Require branches up to date before merging (not currently enforced; see live ruleset readback below).
 
 GitHub tag ruleset for SemVer releases (`v*`):
 
@@ -120,15 +123,29 @@ and add `codecov/patch` to the default-branch ruleset required status checks
 after it reports successfully. Do not require global/project Codecov status yet;
 project target remains `auto`, with allowed project regression `1%`.
 
-Enforcement verified 2026-09-13 via repository ruleset `ruleset-default`
-(id `21581438`, applies to the default branch, no bypass actors): `merge gate`,
-`Rust (fmt, clippy, unit+architecture)`, and `PR title (Conventional Commit)`
-are required contexts. That ruleset currently sets
-`strict_required_status_checks_policy=false`, so "require branches up to date"
-remains an owner action rather than enforced metadata.
+Enforcement verified 2026-09-28 via active repository ruleset `ruleset-default`
+(id `21581438`, applies to default branch, no bypass actors):
+`required_approving_review_count=1`; required contexts are `Rust (fmt, clippy,
+unit+architecture)`, `PR title (Conventional Commit)`, and `merge gate`. Deletion,
+non-fast-forward, and linear-history protections remain active; merge method is
+`squash` only.
+`strict_required_status_checks_policy=false`, so branch freshness remains an owner action.
 
-These settings cannot be changed from inside the repository by agents; until
-they exist, treat a red `gate` as an absolute merge blocker regardless.
+Recheck repository/spec consistency with:
+
+```sh
+gh api repos/r05323028/north/rulesets/21581438 --jq '{
+  approving_reviews: ([.rules[] | select(.type == "pull_request")][0].parameters.required_approving_review_count),
+  required_checks: ([.rules[] | select(.type == "required_status_checks")][0].parameters.required_status_checks | map(.context)),
+  merge_methods: ([.rules[] | select(.type == "pull_request")][0].parameters.allowed_merge_methods),
+  protection_rules: ([.rules[].type] | sort),
+  bypass_actors: .bypass_actors
+}'
+```
+
+Expected: one approval, three named checks above, squash-only, `deletion`,
+`non_fast_forward`, and `required_linear_history` protections, and no bypass actors.
+YAML cannot enforce this repository-level state.
 
 ## Local parity
 
