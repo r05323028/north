@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { ApiError } from "@/lib/api/client";
 import { getCurrentUser } from "@/lib/api/current-user";
 import type { CurrentUser } from "@/lib/api/contracts";
 type ThemeMode = "system" | "light" | "dark";
@@ -168,30 +169,16 @@ function ThemeButton() {
 }
 
 function Sidebar({
+  currentUser,
   open,
   pathname,
   onNavigate,
 }: {
+  currentUser: CurrentUser | null;
   open: boolean;
   pathname: string;
   onNavigate: () => void;
 }) {
-  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
-
-  useEffect(() => {
-    let active = true;
-    void getCurrentUser()
-      .then((user) => {
-        if (active) setCurrentUser(user);
-      })
-      .catch(() => {
-        if (active) setCurrentUser(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
   return (
     <aside
       aria-label="主導覽"
@@ -283,7 +270,28 @@ export function PageHeader({
 
 export function NorthShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const isAuthRoute = pathname === "/login" || pathname === "/signup";
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+
+  useEffect(() => {
+    if (isAuthRoute) return;
+    let active = true;
+    void getCurrentUser()
+      .then((user) => {
+        if (active) setCurrentUser(user);
+      })
+      .catch((cause: unknown) => {
+        if (!active) return;
+        setCurrentUser(null);
+        if (cause instanceof ApiError && cause.status === 401) {
+          window.location.replace(new URL("/login", window.location.href).href);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [isAuthRoute]);
 
   useEffect(() => {
     if (!sidebarOpen) return;
@@ -299,9 +307,12 @@ export function NorthShell({ children }: { children: ReactNode }) {
     };
   }, [sidebarOpen]);
 
+  if (isAuthRoute) return <>{children}</>;
+
   return (
     <div className="north-app">
       <Sidebar
+        currentUser={currentUser}
         onNavigate={() => setSidebarOpen(false)}
         open={sidebarOpen}
         pathname={pathname}

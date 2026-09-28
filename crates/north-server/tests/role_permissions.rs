@@ -15,6 +15,7 @@ fn user(id: &str, role: Role) -> CurrentUser {
         id: id.into(),
         email: format!("{id}@example.com"),
         role,
+        created_at: "2026-01-01T00:00:00+00:00".into(),
     })
 }
 

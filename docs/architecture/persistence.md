@@ -15,11 +15,32 @@ versioned Rust migrations, with PostgreSQL-specific DDL kept in those migrations
 
 | Class | Examples | Rules |
 | --- | --- | --- |
-| Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
+| Durable business | users, roles, requirements (+revisions and board positions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
 | Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, execution attempts, server command outbox, event dedupe/rejection records, sequence watermarks, keyed setup quota | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
-The compiled SeaORM baseline migration, `crates/north-persistence/src/m0001_initial_schema.rs`, creates the current schema from an empty database: requirements, conversations and readiness evidence; daemon/session and durable delivery state; repositories, retry attempts, retention metadata, setup quota keys, and keyed OTP storage. It represents the final unpublished schema directly; historical data backfills are not run on a fresh database. Pre-0.1.0 SQLx-stamped or partial North databases are unsupported and the migration command rejects them with manual-recreation guidance. North never resets them automatically. After publication, applied migrations are immutable and later versions append in Rust.
+The compiled SeaORM baseline migration, `crates/north-persistence/src/m0001_initial_schema.rs`, creates the unpublished base schema from an empty database: requirements, conversations and readiness evidence; daemon/session and durable delivery state; repositories, retry attempts, retention metadata, setup quota keys, and keyed OTP storage. The append-only `m0002_requirement_board_positions` migration adds durable board ranks and backfills existing Requirements by status, creation time, and id; on fresh installs its backfill has no pre-existing rows. Pre-0.1.0 SQLx-stamped or partial North databases are unsupported and the migration command rejects them with manual-recreation guidance. North never resets them automatically. After publication, applied migrations are immutable and later versions append in Rust.
 
+
+## Requirement board positions
+
+`requirement_board_positions` stores one durable sparse rank per Requirement.
+Migration `m0002_requirement_board_positions` creates the table and backfills
+existing rows within each status by `(created_at, id)`; new rows and successful
+status transitions append to their destination column. Board reads sort by the
+canonical status order, then rank, then deterministic creation/id fallbacks.
+Other collection sorts remain unchanged.
+
+`POST /requirements/{id}/reorder` checks `expected_state_version` and requires
+immediate same-column predecessor/successor anchors; stale, cross-column, or
+non-adjacent requests conflict. A reorder updates only rank, never the
+Requirement row, its revision/state version, or assessment evidence. Sparse
+1024-point gaps avoid rewriting a column for ordinary moves; a column is
+rebalanced only when a move exhausts its available interval.
+
+Creation, reorder, and every persistence path that can change Requirement state
+share one transaction-scoped PostgreSQL advisory lock before locking the target
+Requirement row. Rank allocation and status moves therefore serialize across
+pools/processes and commit atomically with the domain mutation.
 
 Readiness evidence rows are append-only;
 database triggers reject direct mutation of evidence, repository source identity,

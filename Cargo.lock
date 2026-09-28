@@ -1953,6 +1953,7 @@ dependencies = [
  "north-protocol",
  "rand 0.9.5",
  "sea-orm",
+ "sea-orm-migration",
  "serde",
  "serde_json",
  "tokio",

@@ -35,6 +35,10 @@ entity!(users, "users", primary #[sea_orm(column_type = "Text")] id: String => f
     created_at: TimeDateTimeWithTimeZone,
 });
 
+entity!(requirement_board_positions, "requirement_board_positions", primary #[sea_orm(column_type = "Text")] requirement_id: String => false; {
+    rank: i64,
+});
+
 entity!(verification_codes, "verification_codes", primary id: i64 => true; {
     #[sea_orm(column_type = "Text")]
     email: String,
@@ -343,6 +347,7 @@ mod tests {
     #[test]
     fn entity_schema_matches_baseline_table_and_column_names() {
         assert_entity!(super::users::Entity, "users"; "id", "email", "role", "created_at");
+        assert_entity!(super::requirement_board_positions::Entity, "requirement_board_positions"; "requirement_id", "rank");
         assert_entity!(super::verification_codes::Entity, "verification_codes"; "id", "code_hash", "failed_attempts");
         assert_entity!(super::sessions::Entity, "sessions"; "id", "user_id", "token_hash", "invalidated_at");
         assert_entity!(super::instance_settings::Entity, "instance_settings"; "id", "owner_user_id");

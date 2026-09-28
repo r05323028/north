@@ -23,6 +23,22 @@ Draft ──▶ Discussing ──▶ Ready ──▶ Accepted
 | Accepted | human decision (Requirement Manager/Admin/Owner) |
 | Rejected | human decided not to take it; reopenable |
 
+## Requirement board ordering
+
+The board groups Requirements in lifecycle order: Draft, Discussing, Ready,
+Accepted, Rejected. Within each status column, persisted presentation rank
+controls card order. New Requirements and successful status transitions append
+to their destination column; migration backfill preserves deterministic
+creation order within each existing column.
+
+Drag-and-drop is same-column only. `POST /requirements/{id}/reorder` carries
+`expected_state_version` plus immediate neighbors after removing the moved card:
+`before_id` is its predecessor and `after_id` its successor; `null` marks a
+column boundary. Stale versions, non-adjacent neighbors, or cross-column moves
+conflict. Reordering changes presentation rank only: requirement content,
+`revision`, `state_version`, and readiness evidence stay unchanged. The additive
+`sort=board` collection order does not replace existing updated-time sorting.
+
 ## Version semantics
 
 `revision` is canonical structured-content identity. It changes only when a

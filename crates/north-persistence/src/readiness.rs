@@ -308,6 +308,9 @@ impl AuthStore {
             return Err(ReadinessError::SequenceConflict);
         }
 
+        crate::requirements::lock_board_order(&mut transaction)
+            .await
+            .map_err(ReadinessError::from)?;
         let row = match lock_requirement(&mut transaction, requirement_id).await {
             Ok(row) => row,
             Err(RequirementError::NotFound) => {

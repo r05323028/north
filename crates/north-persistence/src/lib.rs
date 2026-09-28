@@ -279,6 +279,7 @@ pub struct UserRecord {
     pub id: String,
     pub email: String,
     pub role: Role,
+    pub created_at: String,
 }
 
 /// Raw session token is returned only to the HTTP adapter for its cookie.
@@ -458,7 +459,7 @@ impl AuthStore {
         .await?;
 
         let user_row = crate::query::query_as::<UserRow>(
-            "SELECT id, email, role FROM users WHERE email = $1 FOR UPDATE",
+            "SELECT id, email, role, created_at::text AS created_at FROM users WHERE email = $1 FOR UPDATE",
         )
         .bind(email)
         .fetch_one(&transaction)
@@ -505,7 +506,7 @@ impl AuthStore {
         token: &str,
     ) -> Result<Option<UserRecord>, PersistenceError> {
         let row = crate::query::query_as::<UserRow>(
-            "SELECT users.id, users.email, users.role
+            "SELECT users.id, users.email, users.role, users.created_at::text AS created_at
              FROM sessions
              INNER JOIN users ON users.id = sessions.user_id
              WHERE sessions.token_hash = $1
@@ -581,6 +582,7 @@ struct UserRow {
     id: String,
     email: String,
     role: String,
+    created_at: String,
 }
 
 fn persisted_role(role: Role) -> &'static str {
@@ -598,6 +600,7 @@ impl From<entities::users::Model> for UserRow {
             id: row.id,
             email: row.email,
             role: row.role,
+            created_at: row.created_at.to_string(),
         }
     }
 }
@@ -615,6 +618,7 @@ impl UserRow {
             id: self.id,
             email: self.email,
             role,
+            created_at: self.created_at,
         })
     }
 }
@@ -733,6 +737,7 @@ mod tests {
                     id: "id".into(),
                     email: "user@example.com".into(),
                     role: stored.into(),
+                    created_at: "2026-01-01T00:00:00+00:00".into(),
                 }
                 .into_domain()
                 .expect("known role")

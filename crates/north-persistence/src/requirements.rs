@@ -29,6 +29,7 @@ pub enum RequirementSort {
     UpdatedAscending,
     #[default]
     UpdatedDescending,
+    Board,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -148,7 +149,8 @@ impl AuthStore {
         created_by: &str,
     ) -> Result<RequirementRecord, RequirementError> {
         let requirement = Requirement::new(crate::random_hex(16), title, description, created_by);
-        let transaction = self.pool.begin().await?;
+        let mut transaction = self.pool.begin().await?;
+        lock_board_order(&mut transaction).await?;
         let row = crate::query::query_as::<RequirementRow>(
             "INSERT INTO requirements
                 (id, title, description, summary, acceptance_criteria,
@@ -184,6 +186,12 @@ impl AuthStore {
         .bind(requirement.id())
         .execute(&transaction)
         .await?;
+        append_board_position(
+            &mut transaction,
+            requirement.id(),
+            persisted_status(requirement.status()),
+        )
+        .await?;
         transaction.commit().await?;
         row.into_record()
     }
@@ -211,6 +219,7 @@ impl AuthStore {
         query: &RequirementListQuery,
     ) -> Result<Vec<RequirementRecord>, RequirementError> {
         let ascending = matches!(query.sort, RequirementSort::UpdatedAscending);
+        let board = matches!(query.sort, RequirementSort::Board);
         let status = query.status.map(persisted_status);
         let rows = crate::query::query_as::<RequirementRow>(
             "SELECT id, title, description, summary, acceptance_criteria,
@@ -218,6 +227,8 @@ impl AuthStore {
                     created_by, created_at::text AS created_at,
                     updated_at::text AS updated_at
              FROM requirements
+             LEFT JOIN requirement_board_positions AS board_position
+               ON board_position.requirement_id = requirements.id
              WHERE ($1::text IS NULL OR title ILIKE '%' || $1 || '%'
                     OR description ILIKE '%' || $1 || '%'
                     OR summary ILIKE '%' || $1 || '%'
@@ -226,17 +237,109 @@ impl AuthStore {
                     OR array_to_string(open_questions, ' ') ILIKE '%' || $1 || '%')
                AND ($2::text IS NULL OR status = $2)
                AND ($3::text IS NULL OR created_by = $3)
-             ORDER BY CASE WHEN $4 THEN updated_at END ASC,
-                      CASE WHEN NOT $4 THEN updated_at END DESC,
-                      id ASC",
+             ORDER BY CASE WHEN $5 THEN CASE requirements.status
+                           WHEN 'Draft' THEN 0
+                           WHEN 'Discussing' THEN 1
+                           WHEN 'Ready' THEN 2
+                           WHEN 'Accepted' THEN 3
+                           WHEN 'Rejected' THEN 4
+                           ELSE 5 END END ASC,
+                      CASE WHEN $5 THEN board_position.rank END ASC NULLS LAST,
+                      CASE WHEN $5 THEN requirements.created_at END ASC,
+                      CASE WHEN $5 THEN requirements.id END ASC,
+                      CASE WHEN NOT $5 AND $4 THEN requirements.updated_at END ASC,
+                      CASE WHEN NOT $5 AND NOT $4 THEN requirements.updated_at END DESC,
+                      requirements.id ASC",
         )
         .bind(query.search.as_deref())
         .bind(status)
         .bind(query.created_by.as_deref())
         .bind(ascending)
+        .bind(board)
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(RequirementRow::into_record).collect()
+    }
+
+    pub async fn reorder_requirement(
+        &self,
+        requirement_id: &str,
+        expected_state_version: u64,
+        before_id: Option<&str>,
+        after_id: Option<&str>,
+    ) -> Result<bool, RequirementError> {
+        let expected_state_version = i64::try_from(expected_state_version)
+            .map_err(|_| RequirementError::InvalidStateVersion)?;
+        let mut transaction = self.pool.begin().await?;
+        lock_board_order(&mut transaction).await?;
+        let requirement = lock_requirement(&mut transaction, requirement_id).await?;
+        if requirement.state_version != expected_state_version {
+            return Err(RequirementError::Conflict);
+        }
+        if before_id == Some(requirement_id)
+            || after_id == Some(requirement_id)
+            || (before_id.is_some() && before_id == after_id)
+        {
+            return Err(RequirementError::Conflict);
+        }
+        let status = requirement.status.clone();
+        ensure_board_column_positions(&mut transaction, &status).await?;
+        let mut positions = board_positions_in_column(&mut transaction, &status).await?;
+        let current_order: Vec<String> = positions
+            .iter()
+            .map(|position| position.requirement_id.clone())
+            .collect();
+        let remaining: Vec<String> = current_order
+            .iter()
+            .filter(|id| id.as_str() != requirement_id)
+            .cloned()
+            .collect();
+        let before_index = before_id
+            .map(|id| {
+                remaining
+                    .iter()
+                    .position(|candidate| candidate.as_str() == id)
+                    .ok_or(RequirementError::Conflict)
+            })
+            .transpose()?;
+        let after_index = after_id
+            .map(|id| {
+                remaining
+                    .iter()
+                    .position(|candidate| candidate.as_str() == id)
+                    .ok_or(RequirementError::Conflict)
+            })
+            .transpose()?;
+        let insertion_index = match (before_index, after_index) {
+            (None, None) if remaining.is_empty() => 0,
+            (None, Some(0)) => 0,
+            (Some(before), None) if before + 1 == remaining.len() => remaining.len(),
+            (Some(before), Some(after)) if before + 1 == after => after,
+            _ => return Err(RequirementError::Conflict),
+        };
+        let mut final_order = remaining;
+        final_order.insert(insertion_index, requirement_id.to_owned());
+        if final_order == current_order {
+            transaction.commit().await?;
+            return Ok(false);
+        }
+
+        let mut rank = candidate_rank_for_order(&positions, &final_order, insertion_index)?;
+        if rank.is_none() {
+            rebalance_board_column(&mut transaction, &status).await?;
+            positions = board_positions_in_column(&mut transaction, &status).await?;
+            rank = candidate_rank_for_order(&positions, &final_order, insertion_index)?;
+        }
+        let rank = rank.ok_or(RequirementError::Conflict)?;
+        crate::query::query(
+            "UPDATE requirement_board_positions SET rank = $2 WHERE requirement_id = $1",
+        )
+        .bind(requirement_id)
+        .bind(rank)
+        .execute(&transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(true)
     }
 
     pub async fn transition_requirement(
@@ -267,6 +370,7 @@ impl AuthStore {
         assessment_id: Option<&str>,
     ) -> Result<RequirementRecord, RequirementError> {
         let mut transaction = self.pool.begin().await?;
+        lock_board_order(&mut transaction).await?;
         let row = lock_requirement(&mut transaction, requirement_id).await?;
         let mut requirement = row.to_domain()?;
         if requirement.state_version() != expected_state_version {
@@ -339,6 +443,7 @@ impl AuthStore {
         edit: &RequirementEdit,
     ) -> Result<RequirementRecord, RequirementError> {
         let mut transaction = self.pool.begin().await?;
+        lock_board_order(&mut transaction).await?;
         let row = lock_requirement(&mut transaction, requirement_id).await?;
         let original = row.clone().into_record()?;
         let mut requirement = row.to_domain()?;
@@ -377,6 +482,193 @@ impl AuthStore {
         transaction.commit().await?;
         updated.into_record()
     }
+}
+
+const BOARD_RANK_GAP: i64 = 1024;
+// ponytail: one global order lock; shard by status if write throughput matters.
+const BOARD_ORDER_ADVISORY_LOCK_KEY: i64 = 0x4e4f525448424f41;
+
+#[derive(Debug, FromQueryResult)]
+struct BoardPositionRow {
+    requirement_id: String,
+    rank: i64,
+}
+
+pub(crate) async fn lock_board_order(
+    transaction: &mut DatabaseTransaction,
+) -> Result<(), RequirementError> {
+    crate::query::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(BOARD_ORDER_ADVISORY_LOCK_KEY)
+        .execute(&*transaction)
+        .await?;
+    Ok(())
+}
+
+async fn board_positions_in_column(
+    transaction: &mut DatabaseTransaction,
+    status: &str,
+) -> Result<Vec<BoardPositionRow>, RequirementError> {
+    Ok(crate::query::query_as::<BoardPositionRow>(
+        "SELECT position.requirement_id, position.rank
+         FROM requirement_board_positions AS position
+         INNER JOIN requirements ON requirements.id = position.requirement_id
+         WHERE requirements.status = $1
+         ORDER BY position.rank ASC, requirements.created_at ASC, requirements.id ASC",
+    )
+    .bind(status)
+    .fetch_all(&*transaction)
+    .await?)
+}
+
+async fn rebalance_board_column(
+    transaction: &mut DatabaseTransaction,
+    status: &str,
+) -> Result<(), RequirementError> {
+    crate::query::query(
+        "WITH ordered AS (
+             SELECT position.requirement_id,
+                    ROW_NUMBER() OVER (
+                        ORDER BY position.rank ASC, requirements.created_at ASC, requirements.id ASC
+                    ) * $2 AS new_rank
+             FROM requirement_board_positions AS position
+             INNER JOIN requirements ON requirements.id = position.requirement_id
+             WHERE requirements.status = $1
+         )
+         UPDATE requirement_board_positions AS position
+         SET rank = ordered.new_rank
+         FROM ordered
+         WHERE position.requirement_id = ordered.requirement_id",
+    )
+    .bind(status)
+    .bind(BOARD_RANK_GAP)
+    .execute(&*transaction)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_board_column_positions(
+    transaction: &mut DatabaseTransaction,
+    status: &str,
+) -> Result<(), RequirementError> {
+    let missing: i64 = crate::query::query_scalar(
+        "SELECT COUNT(*)::bigint
+         FROM requirements
+         LEFT JOIN requirement_board_positions AS position
+           ON position.requirement_id = requirements.id
+         WHERE requirements.status = $1 AND position.requirement_id IS NULL",
+    )
+    .bind(status)
+    .fetch_one(&*transaction)
+    .await?;
+    if missing == 0 {
+        return Ok(());
+    }
+
+    rebalance_board_column(transaction, status).await?;
+    crate::query::query(
+        "WITH base AS (
+             SELECT COALESCE(MAX(position.rank), 0) AS rank
+             FROM requirement_board_positions AS position
+             INNER JOIN requirements ON requirements.id = position.requirement_id
+             WHERE requirements.status = $1
+         ), missing AS (
+             SELECT requirements.id,
+                    ROW_NUMBER() OVER (ORDER BY requirements.created_at ASC, requirements.id ASC) AS ordinal
+             FROM requirements
+             LEFT JOIN requirement_board_positions AS position
+               ON position.requirement_id = requirements.id
+             WHERE requirements.status = $1 AND position.requirement_id IS NULL
+         )
+         INSERT INTO requirement_board_positions (requirement_id, rank)
+         SELECT missing.id, base.rank + missing.ordinal * $2
+         FROM missing CROSS JOIN base",
+    )
+    .bind(status)
+    .bind(BOARD_RANK_GAP)
+    .execute(&*transaction)
+    .await?;
+    Ok(())
+}
+
+async fn append_board_position(
+    transaction: &mut DatabaseTransaction,
+    requirement_id: &str,
+    status: &str,
+) -> Result<(), RequirementError> {
+    let mut max_rank: Option<i64> = crate::query::query_scalar(
+        "SELECT MAX(position.rank)
+         FROM requirement_board_positions AS position
+         INNER JOIN requirements ON requirements.id = position.requirement_id
+         WHERE requirements.status = $1 AND requirements.id <> $2",
+    )
+    .bind(status)
+    .bind(requirement_id)
+    .fetch_one(&*transaction)
+    .await?;
+    if max_rank.is_some_and(|rank| rank.checked_add(BOARD_RANK_GAP).is_none()) {
+        rebalance_board_column(transaction, status).await?;
+        max_rank = crate::query::query_scalar(
+            "SELECT MAX(position.rank)
+             FROM requirement_board_positions AS position
+             INNER JOIN requirements ON requirements.id = position.requirement_id
+             WHERE requirements.status = $1 AND requirements.id <> $2",
+        )
+        .bind(status)
+        .bind(requirement_id)
+        .fetch_one(&*transaction)
+        .await?;
+    }
+    let rank = max_rank
+        .unwrap_or(0)
+        .checked_add(BOARD_RANK_GAP)
+        .ok_or(RequirementError::Conflict)?;
+    crate::query::query(
+        "INSERT INTO requirement_board_positions (requirement_id, rank)
+         VALUES ($1, $2)
+         ON CONFLICT (requirement_id) DO UPDATE SET rank = EXCLUDED.rank",
+    )
+    .bind(requirement_id)
+    .bind(rank)
+    .execute(&*transaction)
+    .await?;
+    Ok(())
+}
+
+fn candidate_board_rank(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (None, None) => Some(BOARD_RANK_GAP),
+        (None, Some(right)) => right.checked_sub(BOARD_RANK_GAP),
+        (Some(left), None) => left.checked_add(BOARD_RANK_GAP),
+        (Some(left), Some(right)) => {
+            let gap = i128::from(right) - i128::from(left);
+            (gap > 1).then(|| (i128::from(left) + gap / 2) as i64)
+        }
+    }
+}
+
+fn candidate_rank_for_order(
+    positions: &[BoardPositionRow],
+    final_order: &[String],
+    insertion_index: usize,
+) -> Result<Option<i64>, RequirementError> {
+    let rank_for = |id: Option<&str>| -> Result<Option<i64>, RequirementError> {
+        id.map(|id| {
+            positions
+                .iter()
+                .find(|position| position.requirement_id == id)
+                .map(|position| position.rank)
+                .ok_or(RequirementError::Conflict)
+        })
+        .transpose()
+    };
+    let left_id = insertion_index
+        .checked_sub(1)
+        .map(|index| final_order[index].as_str());
+    let right_id = final_order.get(insertion_index + 1).map(String::as_str);
+    Ok(candidate_board_rank(
+        rank_for(left_id)?,
+        rank_for(right_id)?,
+    ))
 }
 
 pub(crate) async fn lock_requirement(
@@ -436,6 +728,11 @@ pub(crate) async fn update_requirement(
     requirement: &Requirement,
     expected_state_version: u64,
 ) -> Result<RequirementRow, RequirementError> {
+    let previous_status: String =
+        crate::query::query_scalar("SELECT status FROM requirements WHERE id = $1")
+            .bind(requirement.id())
+            .fetch_one(&*transaction)
+            .await?;
     let row = crate::query::query_as::<RequirementRow>(
         "UPDATE requirements
          SET title = $2,
@@ -469,8 +766,17 @@ pub(crate) async fn update_requirement(
     )
     .bind(i64::try_from(expected_state_version).map_err(|_| RequirementError::InvalidStateVersion)?)
     .fetch_optional(&*transaction)
-    .await?;
-    row.ok_or(RequirementError::Conflict)
+    .await?
+    .ok_or(RequirementError::Conflict)?;
+    if previous_status != persisted_status(requirement.status()) {
+        append_board_position(
+            transaction,
+            requirement.id(),
+            persisted_status(requirement.status()),
+        )
+        .await?;
+    }
+    Ok(row)
 }
 
 #[derive(Debug, Clone, FromQueryResult)]

@@ -61,6 +61,7 @@ async fn setup_user(
         id,
         email,
         role: Role::Requester,
+        created_at: "2026-01-01T00:00:00+00:00".into(),
     })
 }
 

@@ -44,6 +44,12 @@ unexpired code to sign in as that email. Treat logs as an authentication
 channel: restrict access and retention, protect backups, and do not forward them
 to shared or untrusted sinks or include them in support bundles.
 
+Use `/signup` to create accounts and `/login` to sign in. Both screens use the
+same verification flow: successful verification creates an account when the
+address is new; the first account becomes Owner and later accounts default to
+Requester. `/login` can also create an account. Codes follow the configured
+`CodeDelivery` sink; the default is backend logs, not inbox delivery.
+
 ## PostgreSQL and server
 
 Create an empty database and dedicated owner, then set `DATABASE_URL`. Run the

@@ -16,6 +16,7 @@ north-protocol = { path = "../north-protocol" }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
+sea-orm-migration.workspace = true
 tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tower = { version = "0.5", features = ["util"] }

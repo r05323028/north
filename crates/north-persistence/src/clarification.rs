@@ -338,6 +338,9 @@ impl AuthStore {
             return Err(ClarificationError::InvalidContext);
         }
         let mut transaction = self.pool.begin().await?;
+        crate::requirements::lock_board_order(&mut transaction)
+            .await
+            .map_err(requirement_error)?;
         crate::query::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(format!("clarification-slot:{requirement_id}"))
             .execute(&transaction)

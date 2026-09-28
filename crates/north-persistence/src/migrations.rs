@@ -4,13 +4,18 @@ use std::{error::Error, fmt};
 
 #[path = "m0001_initial_schema.rs"]
 mod m0001_initial_schema;
+#[path = "m0002_requirement_board_positions.rs"]
+mod m0002_requirement_board_positions;
 
 pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m0001_initial_schema::Migration)]
+        vec![
+            Box::new(m0001_initial_schema::Migration),
+            Box::new(m0002_requirement_board_positions::Migration),
+        ]
     }
 }
 
@@ -84,14 +89,15 @@ pub async fn verify(database: &DatabaseConnection) -> Result<(), MigrationError>
              'readiness_assessments', 'daemon_setup_requests', 'daemon_registrations',
              'execution_sessions', 'server_command_outbox', 'repositories',
              'server_command_tombstones', 'server_message_command_map',
-             'server_event_dedupe', 'clarification_activities', 'execution_attempts'
+             'server_event_dedupe', 'clarification_activities', 'execution_attempts',
+             'requirement_board_positions'
          ]::text[]) AS expected(name)
          WHERE to_regclass(expected.name) IS NOT NULL",
     )
     .fetch_one(database)
     .await
     .map_err(|_| MigrationError::DatabaseInspectionFailed)?;
-    if application_tables != 19 {
+    if application_tables != 20 {
         return Err(MigrationError::IncompleteSchema);
     }
     Ok(())
@@ -116,7 +122,8 @@ async fn preflight(database: &DatabaseConnection) -> Result<(), MigrationError> 
              'readiness_assessments', 'daemon_setup_requests', 'daemon_registrations',
              'execution_sessions', 'server_command_outbox', 'repositories',
              'server_command_tombstones', 'server_message_command_map',
-             'server_event_dedupe', 'clarification_activities', 'execution_attempts'
+             'server_event_dedupe', 'clarification_activities', 'execution_attempts',
+             'requirement_board_positions'
          ]::text[]) AS existing(name)
          WHERE to_regclass(existing.name) IS NOT NULL",
     )

@@ -154,6 +154,14 @@ pub struct TransitionRequest {
     pub feedback: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReorderRequirementRequest {
+    pub expected_state_version: u64,
+    pub before_id: Option<String>,
+    pub after_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 pub struct RequirementQuery {
     #[serde(alias = "q")]
@@ -173,6 +181,10 @@ pub fn router() -> Router<AuthState> {
         .route(
             "/requirements/{requirement_id}",
             get(get_requirement).patch(edit_requirement),
+        )
+        .route(
+            "/requirements/{requirement_id}/reorder",
+            post(reorder_requirement),
         )
         .route(
             "/requirements/{requirement_id}/begin-discussion",
@@ -216,6 +228,7 @@ pub async fn list_requirements(
             RequirementSort::UpdatedDescending
         }
         Some("updated_asc") | Some("updated_at_asc") => RequirementSort::UpdatedAscending,
+        Some("board") => RequirementSort::Board,
         Some(_) => return Err(RequirementHttpError::BadRequest),
     };
     let records = state
@@ -242,6 +255,27 @@ pub async fn get_requirement(
         .map_err(RequirementHttpError::from)?
         .ok_or(RequirementHttpError::NotFound)?;
     Ok(Json(requirement.into()))
+}
+
+pub async fn reorder_requirement(
+    State(state): State<AuthState>,
+    Path(requirement_id): Path<String>,
+    Json(payload): Json<ReorderRequirementRequest>,
+) -> Result<StatusCode, RequirementHttpError> {
+    let changed = state
+        .store()
+        .reorder_requirement(
+            &requirement_id,
+            payload.expected_state_version,
+            payload.before_id.as_deref(),
+            payload.after_id.as_deref(),
+        )
+        .await
+        .map_err(RequirementHttpError::from)?;
+    if changed {
+        state.events().requirement_changed(requirement_id);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn edit_requirement(

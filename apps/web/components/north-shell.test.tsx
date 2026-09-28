@@ -67,6 +67,17 @@ describe("NorthShell", () => {
       expect(html).toContain("成員");
     }
 
+    for (const value of ["/login", "/signup"]) {
+      pathname.value = value;
+      const html = renderToStaticMarkup(
+        <NorthShell>
+          <p>auth content</p>
+        </NorthShell>,
+      );
+      expect(html).toContain("auth content");
+      expect(html).not.toContain("主導覽");
+    }
+
     const header = renderToStaticMarkup(
       <PageHeader
         actions={<button type="button">Action</button>}

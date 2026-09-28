@@ -473,6 +473,42 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .expect("already claimed approval response");
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
+    let json_created = store
+        .create_daemon_setup_request("first-party frontend daemon", "192.0.2.3/32")
+        .await
+        .expect("create JSON frontend setup request");
+    let mut json_approval = request_with_origin(
+        Method::POST,
+        &format!("/daemon/setup/{}/approve", json_created.request_token),
+        Some(&admin.token),
+        Body::empty(),
+        Some("http://north.test"),
+    );
+    json_approval
+        .headers_mut()
+        .insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+    let response = app
+        .clone()
+        .oneshot(json_approval)
+        .await
+        .expect("JSON approval response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert!(response.headers().get(header::CONTENT_TYPE).is_none());
+    assert!(response_text(response).await.is_empty());
+    let response = app
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            &format!("/daemon/setup/{}", json_created.request_token),
+            None,
+            Body::empty(),
+        ))
+        .await
+        .expect("JSON setup claim response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json_claimed: SetupClaimed = response_json(response).await;
+    assert_ne!(json_claimed.credential, json_created.request_token);
+
     let response = app
         .clone()
         .oneshot(request(
@@ -484,10 +520,20 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .await
         .expect("daemon list response");
     assert_eq!(response.status(), StatusCode::OK);
-    let daemons: Vec<DaemonResponse> = response_json(response).await;
+    let daemon_list: serde_json::Value = response_json(response).await;
+    let daemons: Vec<DaemonResponse> =
+        serde_json::from_value(daemon_list.clone()).expect("decode daemon list");
     assert!(daemons
         .iter()
         .any(|daemon| daemon.daemon_id == claimed.daemon_id));
+    assert!(daemons
+        .iter()
+        .any(|daemon| daemon.daemon_id == json_claimed.daemon_id));
+    assert!(daemon_list
+        .as_array()
+        .expect("daemon list array")
+        .iter()
+        .all(|daemon| daemon.get("credential").is_none()));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind server");
     let address = listener.local_addr().expect("server address");

@@ -336,10 +336,29 @@ async fn compiled_migration_matches_former_postgres_catalog() {
         .expect("apply compiled SeaORM baseline");
 
     let legacy_catalog = schema_catalog(&legacy_database, &legacy_schema).await;
-    let seaorm_catalog = schema_catalog(&seaorm_database, &seaorm_schema).await;
+    let mut seaorm_catalog = schema_catalog(&seaorm_database, &seaorm_schema).await;
+    let board_columns: Vec<_> = seaorm_catalog
+        .columns
+        .iter()
+        .filter(|column| column.table_name == "requirement_board_positions")
+        .map(|column| column.column_name.as_str())
+        .collect();
+    assert_eq!(board_columns, vec!["rank", "requirement_id"]);
+    seaorm_catalog
+        .columns
+        .retain(|column| column.table_name != "requirement_board_positions");
+    seaorm_catalog
+        .constraints
+        .retain(|constraint| constraint.table_name != "requirement_board_positions");
+    seaorm_catalog
+        .indexes
+        .retain(|index| index.table_name != "requirement_board_positions");
+    seaorm_catalog
+        .triggers
+        .retain(|trigger| trigger.table_name != "requirement_board_positions");
     assert_eq!(
         seaorm_catalog, legacy_catalog,
-        "compiled schema differs from former baseline"
+        "m0001 schema differs from former baseline"
     );
 
     let legacy_id: i64 = support::query_scalar(
@@ -412,7 +431,7 @@ async fn fresh_install_repeat_up_and_readiness_preserve_data() {
             .iter()
             .map(|row| row.version.as_str())
             .collect::<Vec<_>>(),
-        ["m0001_initial_schema"]
+        ["m0001_initial_schema", "m0002_requirement_board_positions"]
     );
 
     for table in [
@@ -435,6 +454,7 @@ async fn fresh_install_repeat_up_and_readiness_preserve_data() {
         "repositories",
         "execution_attempts",
         "clarification_activities",
+        "requirement_board_positions",
     ] {
         let exists: bool = support::query_scalar("SELECT to_regclass($1) IS NOT NULL")
             .bind(table)
@@ -554,8 +574,47 @@ async fn partial_north_schema_is_rejected_without_mutation() {
             .expect("check preflight did not create migration table");
     assert_eq!(email, "kept@example.com");
     assert!(!seaorm_ledger);
-
     drop_isolated_schema(&schema, &admin, database).await;
+
+    let (board_schema, board_admin, board_database) = isolated_schema(&database_url).await;
+    support::query(
+        "CREATE TABLE requirement_board_positions (
+            requirement_id TEXT PRIMARY KEY,
+            rank BIGINT NOT NULL
+        )",
+    )
+    .execute(&board_database)
+    .await
+    .expect("create board-only partial schema");
+    support::query(
+        "INSERT INTO requirement_board_positions (requirement_id, rank) VALUES ('kept', 1024)",
+    )
+    .execute(&board_database)
+    .await
+    .expect("insert board-only sentinel");
+    let error = north_persistence::run_migrations(&board_database)
+        .await
+        .expect_err("reject board-only North schema");
+    assert_eq!(error, MigrationError::ExistingSchemaWithoutSeaOrmHistory);
+    let rank: i64 = support::query_scalar(
+        "SELECT rank FROM requirement_board_positions WHERE requirement_id = 'kept'",
+    )
+    .fetch_one(&board_database)
+    .await
+    .expect("read board-only sentinel");
+    let users_table: bool = support::query_scalar("SELECT to_regclass('users') IS NOT NULL")
+        .fetch_one(&board_database)
+        .await
+        .expect("check preflight created no North tables");
+    let migration_table: bool =
+        support::query_scalar("SELECT to_regclass('seaql_migrations') IS NOT NULL")
+            .fetch_one(&board_database)
+            .await
+            .expect("check board-only preflight created no ledger");
+    assert_eq!(rank, 1024);
+    assert!(!users_table);
+    assert!(!migration_table);
+    drop_isolated_schema(&board_schema, &board_admin, board_database).await;
 }
 
 #[tokio::test]
@@ -705,6 +764,94 @@ async fn server_startup_rejects_pending_schema_without_ddl_or_listener() {
     assert!(!stderr.to_ascii_lowercase().contains("password"));
     assert!(!migration_table);
     assert_eq!(table_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn m0001_requirements_survive_board_position_upgrade() {
+    use sea_orm_migration::MigratorTrait;
+
+    let _guard = database_test_lock().await;
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for migration upgrade tests");
+    let (schema, admin, database) = isolated_schema(&database_url).await;
+
+    north_persistence::migrations::Migrator::up(&database, Some(1))
+        .await
+        .expect("apply m0001 baseline only");
+    support::query("INSERT INTO users (id, email, role) VALUES ('migration-user', 'migration@example.com', 'Requester')")
+        .execute(&database)
+        .await
+        .expect("seed m0001 user");
+    for (id, title, created_at) in [
+        (
+            "migration-later",
+            "Later requirement",
+            "2026-01-02T00:00:00Z",
+        ),
+        (
+            "migration-earlier",
+            "Earlier requirement",
+            "2026-01-01T00:00:00Z",
+        ),
+    ] {
+        support::query(
+            "INSERT INTO requirements
+                (id, title, description, summary, acceptance_criteria,
+                 assumptions, open_questions, status, revision, state_version,
+                 created_by, created_at)
+             VALUES ($1, $2, 'description', 'summary', $3, $3, $3,
+                     'Draft', 1, 1, 'migration-user', $4::timestamptz)",
+        )
+        .bind(id)
+        .bind(title)
+        .bind(Vec::<String>::new())
+        .bind(created_at)
+        .execute(&database)
+        .await
+        .expect("seed existing m0001 requirement");
+    }
+
+    north_persistence::run_migrations(&database)
+        .await
+        .expect("upgrade existing m0001 database");
+    let preserved: i64 = support::query_scalar(
+        "SELECT COUNT(*)::bigint FROM requirements
+         WHERE id IN ('migration-later', 'migration-earlier')",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("count preserved requirements");
+    assert_eq!(preserved, 2);
+    let earlier_rank: i64 = support::query_scalar(
+        "SELECT rank FROM requirement_board_positions
+         WHERE requirement_id = 'migration-earlier'",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("read earlier rank");
+    let later_rank: i64 = support::query_scalar(
+        "SELECT rank FROM requirement_board_positions
+         WHERE requirement_id = 'migration-later'",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("read later rank");
+    assert_eq!(earlier_rank, 1024);
+    assert_eq!(later_rank, 2048);
+    let foreign_keys: i64 = support::query_scalar(
+        "SELECT COUNT(*)::bigint FROM pg_constraint
+         WHERE conrelid = 'requirement_board_positions'::regclass AND contype = 'f'",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("inspect board position foreign key");
+    assert_eq!(foreign_keys, 1);
+    north_persistence::verify_migrations(&database)
+        .await
+        .expect("verify upgraded schema");
+
+    drop_isolated_schema(&schema, &admin, database).await;
 }
 
 #[test]

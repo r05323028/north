@@ -510,6 +510,7 @@ mod tests {
             user: UserRecord {
                 id: "user-1".into(),
                 email: "user@example.com".into(),
+                created_at: "2026-01-01T00:00:00+00:00".into(),
                 role: north_domain::role::Role::Requester,
             },
             token: "deadbeef".into(),

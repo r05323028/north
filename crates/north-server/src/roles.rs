@@ -64,6 +64,7 @@ pub struct UserResponse {
     pub id: String,
     pub email: String,
     pub role: String,
+    pub created_at: String,
 }
 
 impl From<UserRecord> for UserResponse {
@@ -72,6 +73,7 @@ impl From<UserRecord> for UserResponse {
             id: user.id,
             email: user.email,
             role: role_name(user.role).into(),
+            created_at: user.created_at,
         }
     }
 }
@@ -204,6 +206,7 @@ mod tests {
             id: "user-1".into(),
             email: "user@example.com".into(),
             role,
+            created_at: "2026-01-01T00:00:00+00:00".into(),
         })
     }
 
