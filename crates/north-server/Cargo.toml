@@ -13,13 +13,13 @@ rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 north-protocol = { path = "../north-protocol" }
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "net", "process", "rt-multi-thread", "time"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tower = { version = "0.5", features = ["util"] }
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls"] }
+sea-orm.workspace = true
 
 [lints]
 workspace = true

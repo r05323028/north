@@ -1,0 +1,20 @@
+FROM debian:bookworm-slim
+
+ARG VERSION
+ARG SOURCE_COMMIT
+ARG SOURCE_URL
+LABEL org.opencontainers.image.title="North server" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.revision="$SOURCE_COMMIT" \
+      org.opencontainers.image.source="$SOURCE_URL"
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --chown=65534:65534 --chmod=0555 bin/north-server /usr/local/bin/north-server
+
+ENV NORTH_BIND_ADDR=0.0.0.0:8080
+EXPOSE 8080
+USER 65534:65534
+ENTRYPOINT ["/usr/local/bin/north-server"]

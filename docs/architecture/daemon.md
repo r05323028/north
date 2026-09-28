@@ -62,12 +62,10 @@ specified downstream contract.
 - The current authentication flow accepts one user-owned daemon registration,
   associates it with its configured identity and capabilities, updates
   heartbeat-based application liveness, and supports owner/admin revocation.
-- Migrations 0007–0009 store setup requests, registrations, requirement-bound
-  execution sessions, the server command outbox, and bounded verification-attempt
-  state. Migration 0013 adds the configured repository catalog; migration 0014
-  adds outbox payload fingerprints, command/event watermarks, and server event
-  identity/outcome records. Migration 0015 adds clarification-run context,
-  cancellation/runtime outcome fields, and coarse activity records.
+- The 0.1.0 initial-schema baseline creates daemon setup and registrations,
+  requirement-bound execution sessions, the server command outbox, bounded
+  verification-attempt state, repository catalog, durable delivery watermarks
+  and event identities, and clarification-run/activity records.
   Plaintext credentials remain on daemon hosts; the server stores hashes only.
   Setup rows older than the retention window are removed opportunistically in
   bounded indexed batches.
@@ -112,7 +110,7 @@ one complete command envelope, and persists that exact payload atomically with
 `execution_sessions.daemon_id`. `DaemonRuntime::persist_and_dispatch_command`
 then dispatches the persisted envelope through its pinned owner. Reconnect
 reconciles only sessions pinned
-to that identity; North 0.1.0 does not perform automatic live migration. Business retry policy remains server-owned. The durable retry worker polls due rows with database row locks, creates one pinned `session.resume` attempt atomically with its outbox row and counter, and leaves delivery to reconnect/replay. Revoked owners are never replaced automatically.
+to that identity; automatic live migration is not supported. Business retry policy remains server-owned. The durable retry worker polls due rows with database row locks, creates one pinned `session.resume` attempt atomically with its outbox row and counter, and leaves delivery to reconnect/replay. Revoked owners are never replaced automatically.
 
 The current registration model defines daemon registrations as instance-scoped
 identities with credentials owned by the account recorded in `created_by`.
@@ -143,7 +141,7 @@ protection is **Enforced** for `POST /auth/request-code` and
 address, derives an IPv4 `/32` or IPv6 `/64` primary CIDR key, and applies
 endpoint-isolated process-local buckets with capacity 5 and one token per 120
 seconds. Trusted `X-Forwarded-For` is opt-in by immediate-peer CIDR. Process
-buckets reset on restart; migration 0018 persists the same CIDR as each new
+buckets reset on restart; the baseline persists the same CIDR as each new
 setup row's durable quota key and limits three unexpired, unclaimed rows.
 All limiter/quota rejection responses are generic 429s; PostgreSQL concurrency
 proof runs with `NORTH_TEST_DATABASE_URL`. Setup approval/claim credentials remain outside the browser response. A

@@ -4,7 +4,7 @@ use axum::{
     Extension, Router,
 };
 use north_domain::role::Role;
-use north_persistence::{AuthStore, PoolOptions};
+use north_persistence::AuthStore;
 use north_protocol::{EventAckStatus, ReadinessVerdictWire, RequirementAssessed};
 use north_server::{
     assessment::process_requirement_assessed, requirements, AuthState, CurrentUser,
@@ -15,6 +15,7 @@ use tower::ServiceExt;
 
 #[allow(dead_code)]
 mod support;
+use support::TestDatabaseOptions;
 
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
@@ -24,7 +25,7 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-fn app(pool: north_persistence::PgPool, id: &str, role: Role) -> Router {
+fn app(pool: north_persistence::DatabaseConnection, id: &str, role: Role) -> Router {
     requirements::router()
         .with_state(AuthState::with_log_delivery(AuthStore::new(
             pool,
@@ -59,9 +60,13 @@ async fn json_body(response: axum::response::Response) -> Value {
     .expect("json")
 }
 
-async fn setup_user(pool: &north_persistence::PgPool, prefix: &str, role: &str) -> String {
+async fn setup_user(
+    pool: &north_persistence::DatabaseConnection,
+    prefix: &str,
+    role: &str,
+) -> String {
     let id = unique(prefix);
-    sqlx::query("INSERT INTO users (id, email, role) VALUES ($1, $2, $3)")
+    support::query("INSERT INTO users (id, email, role) VALUES ($1, $2, $3)")
         .bind(&id)
         .bind(format!("{id}@example.com"))
         .bind(role)
@@ -87,12 +92,12 @@ fn ready_assessment(
 }
 
 async fn bind_session(
-    pool: &north_persistence::PgPool,
+    pool: &north_persistence::DatabaseConnection,
     prefix: &str,
     requirement_id: &str,
 ) -> String {
     let session_id = unique(prefix);
-    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+    support::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
         .bind(&session_id)
         .bind(requirement_id)
         .execute(pool)
@@ -106,7 +111,7 @@ async fn bind_session(
 async fn requirement_api_enforces_state_version_and_review_contracts() {
     let database_url = std::env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for requirement integration tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -292,19 +297,19 @@ async fn requirement_api_enforces_state_version_and_review_contracts() {
     .await;
     assert_eq!(terminal.status(), StatusCode::BAD_REQUEST);
     let audit_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transition_audit WHERE requirement_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM transition_audit WHERE requirement_id = $1")
             .bind(&requirement_id)
             .fetch_one(&pool)
             .await
             .expect("audit count");
     assert_eq!(audit_count, 3);
 
-    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
+    support::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
         .bind(&session_id)
         .execute(&pool)
         .await
         .expect("cleanup event tombstones");
-    sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
+    support::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(&session_id)
         .execute(&pool)
         .await
@@ -316,7 +321,7 @@ async fn requirement_api_enforces_state_version_and_review_contracts() {
 async fn transition_edges_are_state_version_guarded_and_assessment_bound() {
     let database_url = std::env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for requirement integration tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -490,7 +495,7 @@ async fn transition_edges_are_state_version_guarded_and_assessment_bound() {
         i64,
         bool,
     );
-    let audits: Vec<AuditRow> = sqlx::query_as(
+    let audits: Vec<AuditRow> = support::query_tuple(
         "SELECT actor_id, transition, from_status, to_status, feedback,
                 assessment_id, state_version, created_at IS NOT NULL
          FROM transition_audit WHERE requirement_id = $1 ORDER BY id ASC",
@@ -525,13 +530,13 @@ async fn transition_edges_are_state_version_guarded_and_assessment_bound() {
     assert_eq!(audits[5].5.as_deref(), Some(assessment_b_id.as_str()));
     assert_eq!(audits[5].6, 8);
 
-    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id IN ($1, $2)")
+    support::query("DELETE FROM server_event_dedupe WHERE session_id IN ($1, $2)")
         .bind(&session_a)
         .bind(&session_b)
         .execute(&pool)
         .await
         .expect("cleanup event tombstones");
-    sqlx::query("DELETE FROM execution_sessions WHERE id IN ($1, $2)")
+    support::query("DELETE FROM execution_sessions WHERE id IN ($1, $2)")
         .bind(&session_a)
         .bind(&session_b)
         .execute(&pool)

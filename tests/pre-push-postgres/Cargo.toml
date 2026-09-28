@@ -1,0 +1,12 @@
+[package]
+name = "north-pre-push-postgres"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+signal-hook = { version = "0.3.18", default-features = false }
+testcontainers-modules = { version = "0.15.0", features = ["blocking", "postgres"] }
+
+[lints]
+workspace = true

@@ -8,7 +8,12 @@ members = [
     "crates/north-daemon",
     "tests/architecture",
     "tests/transport",
+    "tests/pre-push-postgres",
 ]
+
+[workspace.dependencies]
+sea-orm = { version = "2.0.3", default-features = false, features = ["macros", "runtime-tokio-rustls", "sqlx-postgres", "with-time", "with-ipnetwork", "with-json"] }
+sea-orm-migration = { version = "2.0.3", default-features = false, features = ["runtime-tokio-rustls", "sqlx-postgres", "with-time", "with-ipnetwork", "with-json"] }
 
 [workspace.package]
 version = "0.1.0"

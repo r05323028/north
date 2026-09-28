@@ -1,15 +1,16 @@
 use futures_util::{SinkExt, StreamExt};
+use north_persistence::DatabaseConnection;
 use north_persistence::{
     canonical_payload_digest, AuthStore, ClarificationError, ClarificationEvent,
     ClarificationPhase, ClarificationStartInput, ClarificationStatus, DaemonSetupClaim,
-    PersistenceError, PoolOptions,
+    PersistenceError,
 };
 use north_protocol::{
     encode_daemon_frame, Command, CommandEnvelope, DaemonFrame, Event, EventEnvelope, ServerFrame,
     SessionFailed, SessionResume, SCHEMA_VERSION,
 };
+use sea_orm::TransactionTrait;
 use serde_json::json;
-use sqlx::PgPool;
 use std::{
     env,
     sync::{Arc, OnceLock},
@@ -18,7 +19,9 @@ use std::{
 use tokio::{net::TcpListener, time::timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream};
 
+#[allow(dead_code)]
 mod support;
+use support::TestDatabaseOptions;
 
 static DATABASE_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -29,10 +32,10 @@ async fn database_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
         .await
 }
 
-async fn test_pool() -> PgPool {
+async fn test_pool() -> DatabaseConnection {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for retry integration tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(16)
         .connect(&database_url)
         .await
@@ -43,9 +46,9 @@ async fn test_pool() -> PgPool {
     pool
 }
 
-async fn independent_worker_pool() -> Result<PgPool, Box<dyn std::error::Error>> {
+async fn independent_worker_pool() -> Result<DatabaseConnection, Box<dyn std::error::Error>> {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")?;
-    Ok(PoolOptions::new()
+    Ok(TestDatabaseOptions::new()
         .max_connections(1)
         .connect(&database_url)
         .await?)
@@ -77,8 +80,8 @@ struct RetryFixture {
     start_command_id: String,
 }
 
-async fn retry_fixture(pool: &PgPool, prefix: &str) -> RetryFixture {
-    sqlx::query(
+async fn retry_fixture(pool: &DatabaseConnection, prefix: &str) -> RetryFixture {
+    support::query(
         "UPDATE daemon_registrations
          SET connected_at = NULL, connection_id = NULL, last_seen_at = NULL",
     )
@@ -165,8 +168,8 @@ async fn retry_fixture(pool: &PgPool, prefix: &str) -> RetryFixture {
     }
 }
 
-async fn acknowledge_start(pool: &PgPool, fixture: &RetryFixture) {
-    let updated = sqlx::query(
+async fn acknowledge_start(pool: &DatabaseConnection, fixture: &RetryFixture) {
+    let updated = support::query(
         "UPDATE server_command_outbox
          SET acknowledged_at = CURRENT_TIMESTAMP
          WHERE command_id = $1",
@@ -176,7 +179,7 @@ async fn acknowledge_start(pool: &PgPool, fixture: &RetryFixture) {
     .await
     .expect("acknowledge start command");
     assert_eq!(updated.rows_affected(), 1);
-    sqlx::query(
+    support::query(
         "UPDATE execution_sessions
          SET command_ack_through_seq = 1
          WHERE id = $1",
@@ -187,8 +190,8 @@ async fn acknowledge_start(pool: &PgPool, fixture: &RetryFixture) {
     .expect("advance command watermark");
 }
 
-async fn set_daemon_offline(pool: &PgPool, daemon_id: &str) {
-    sqlx::query(
+async fn set_daemon_offline(pool: &DatabaseConnection, daemon_id: &str) {
+    support::query(
         "UPDATE daemon_registrations
          SET connected_at = NULL, connection_id = NULL, last_seen_at = NULL
          WHERE daemon_id = $1",
@@ -199,8 +202,8 @@ async fn set_daemon_offline(pool: &PgPool, daemon_id: &str) {
     .expect("disconnect daemon");
 }
 
-async fn set_retry_due(pool: &PgPool, session_id: &str) {
-    sqlx::query(
+async fn set_retry_due(pool: &DatabaseConnection, session_id: &str) {
+    support::query(
         "UPDATE execution_sessions
          SET next_retry_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
          WHERE id = $1",
@@ -314,10 +317,10 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
     set_daemon_offline(&pool, &fixture.daemon_id).await;
     set_retry_due(&pool, &fixture.session_id).await;
 
-    let mut lock_transaction = pool.begin().await.expect("begin row lock");
-    sqlx::query("SELECT id FROM execution_sessions WHERE id = $1 FOR UPDATE")
+    let lock_transaction = pool.begin().await.expect("begin row lock");
+    support::query("SELECT id FROM execution_sessions WHERE id = $1 FOR UPDATE")
         .bind(&fixture.session_id)
-        .execute(&mut *lock_transaction)
+        .execute(&lock_transaction)
         .await
         .expect("hold retry row lock");
     let skipped = fixture
@@ -342,7 +345,7 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
         i64,
         Option<String>,
         Option<String>,
-    ) = sqlx::query_as(
+    ) = support::query_tuple(
         "SELECT state, attempt_count, current_attempt_id, next_retry_at::text
              FROM execution_sessions WHERE id = $1",
     )
@@ -355,13 +358,13 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
     assert!(current_attempt_id.is_none());
     assert!(next_retry_at.is_some());
     let attempt_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&fixture.session_id)
             .fetch_one(&pool)
             .await
             .expect("count attempts after rollback");
     let command_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
             .bind(&fixture.session_id)
             .fetch_one(&pool)
             .await
@@ -381,10 +384,10 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
 
     let left_pool = independent_worker_pool().await?;
     let right_pool = independent_worker_pool().await?;
-    let left_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let left_pid: i32 = support::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&left_pool)
         .await?;
-    let right_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let right_pid: i32 = support::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&right_pool)
         .await?;
     assert_ne!(left_pid, right_pid);
@@ -419,7 +422,7 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
         i64,
         Option<String>,
         Option<String>,
-    ) = sqlx::query_as(
+    ) = support::query_tuple(
         "SELECT state, attempt_count, current_attempt_id, next_retry_at::text
              FROM execution_sessions WHERE id = $1",
     )
@@ -431,7 +434,7 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
     assert_eq!(attempt_count, 2);
     assert!(current_attempt_id.is_some());
     assert!(next_retry_at.is_none());
-    let (attempt_id, attempt_command_id): (String, String) = sqlx::query_as(
+    let (attempt_id, attempt_command_id): (String, String) = support::query_tuple(
         "SELECT id, command_id FROM execution_attempts
          WHERE session_id = $1 AND attempt_number = 2",
     )
@@ -442,13 +445,13 @@ async fn postgres_retry_claim_is_skip_locked_atomic_and_restart_safe(
     assert_eq!(Some(attempt_id), current_attempt_id);
     assert_eq!(attempt_command_id, resume.command_id);
     let attempt_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&fixture.session_id)
             .fetch_one(&pool)
             .await
             .expect("count committed attempts");
     let command_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
             .bind(&fixture.session_id)
             .fetch_one(&pool)
             .await
@@ -511,7 +514,7 @@ async fn postgres_retry_failure_is_idempotent_and_preserves_slot_and_requirement
         readiness_before
     );
     let (attempt_outcome, attempt_class, failure_event_id): (String, String, String) =
-        sqlx::query_as(
+        support::query_tuple(
             "SELECT outcome, failure_class, failure_event_id
              FROM execution_attempts WHERE session_id = $1 AND attempt_number = 1",
         )
@@ -585,7 +588,7 @@ async fn postgres_retry_failure_is_idempotent_and_preserves_slot_and_requirement
         .expect("claim after cancellation");
     assert!(later_work.is_empty());
     let attempts_after_cancel: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&fixture.session_id)
             .fetch_one(&pool)
             .await
@@ -683,7 +686,7 @@ async fn postgres_cancellation_race_cannot_create_later_retry_attempt() {
         .clarification_run(&fixture.requirement_id, &fixture.session_id)
         .await
         .expect("read cancellation race result");
-    let resume_attempts: i64 = sqlx::query_scalar(
+    let resume_attempts: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM execution_attempts
          WHERE session_id = $1 AND command_kind = 'session.resume'",
     )
@@ -722,7 +725,7 @@ async fn postgres_retry_exhaustion_and_unknown_outcomes_are_terminal_once() {
     let pool = test_pool().await;
     let exhausted = retry_fixture(&pool, "retry-exhaustion").await;
     acknowledge_start(&pool, &exhausted).await;
-    sqlx::query("UPDATE execution_sessions SET max_attempts = 1 WHERE id = $1")
+    support::query("UPDATE execution_sessions SET max_attempts = 1 WHERE id = $1")
         .bind(&exhausted.session_id)
         .execute(&pool)
         .await
@@ -759,25 +762,26 @@ async fn postgres_retry_exhaustion_and_unknown_outcomes_are_terminal_once() {
     .await
     .expect("project duplicate exhausted failure");
     assert!(duplicate.duplicate);
-    let (state, attempt_count, next_retry_at): (String, i64, Option<String>) = sqlx::query_as(
-        "SELECT state, attempt_count, next_retry_at::text
+    let (state, attempt_count, next_retry_at): (String, i64, Option<String>) =
+        support::query_tuple(
+            "SELECT state, attempt_count, next_retry_at::text
          FROM execution_sessions WHERE id = $1",
-    )
-    .bind(&exhausted.session_id)
-    .fetch_one(&pool)
-    .await
-    .expect("read exhausted state");
+        )
+        .bind(&exhausted.session_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read exhausted state");
     assert_eq!(state, "Failed");
     assert_eq!(attempt_count, 1);
     assert!(next_retry_at.is_none());
     let exhausted_events: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM server_event_dedupe WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM server_event_dedupe WHERE session_id = $1")
             .bind(&exhausted.session_id)
             .fetch_one(&pool)
             .await
             .expect("count exhausted events");
     let exhausted_attempts: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&exhausted.session_id)
             .fetch_one(&pool)
             .await
@@ -876,7 +880,7 @@ async fn postgres_retry_exhaustion_and_unknown_outcomes_are_terminal_once() {
         .expect("claim after unknown outcome")
         .is_empty());
     let unknown_attempts: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&unknown.session_id)
             .fetch_one(&pool)
             .await
@@ -923,17 +927,18 @@ async fn postgres_retry_dispatch_failure_redelivers_same_pinned_command() {
         .await
         .expect("claim after dispatch failure");
     assert!(next_poll.is_empty());
-    let (state, attempt_count, current_attempt_id): (String, i64, Option<String>) = sqlx::query_as(
-        "SELECT state, attempt_count, current_attempt_id
+    let (state, attempt_count, current_attempt_id): (String, i64, Option<String>) =
+        support::query_tuple(
+            "SELECT state, attempt_count, current_attempt_id
              FROM execution_sessions WHERE id = $1",
-    )
-    .bind(&fixture.session_id)
-    .fetch_one(&pool)
-    .await
-    .expect("read committed retry after dispatch failure");
+        )
+        .bind(&fixture.session_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read committed retry after dispatch failure");
     assert_eq!(state, "Running");
     assert_eq!(attempt_count, 2);
-    let (attempt_id, attempt_command_id): (String, String) = sqlx::query_as(
+    let (attempt_id, attempt_command_id): (String, String) = support::query_tuple(
         "SELECT id, command_id FROM execution_attempts
          WHERE session_id = $1 AND attempt_number = 2",
     )
@@ -944,13 +949,13 @@ async fn postgres_retry_dispatch_failure_redelivers_same_pinned_command() {
     assert_eq!(current_attempt_id.as_deref(), Some(attempt_id.as_str()));
     assert_eq!(attempt_command_id, resume.command_id);
     let attempt_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&fixture.session_id)
             .fetch_one(&pool)
             .await
             .expect("count attempts after dispatch failure");
     let command_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
             .bind(&fixture.session_id)
             .fetch_one(&pool)
             .await

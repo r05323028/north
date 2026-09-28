@@ -2,9 +2,9 @@
 
 Four instance roles, highest first: **Owner > Admin > Requirement Manager > Requester**.
 
-## North 0.1.0 collaboration policy
+## Requirement collaboration policy
 
-North 0.1.0 uses workspace-wide Requirement visibility and collaboration.
+Requirements currently have workspace-wide visibility and collaboration.
 Authenticated users can view and converse on workspace Requirements. There is no
 per-Requirement ownership or ACL enforcement; these are instance-role
 permissions, not Requirement ownership checks.

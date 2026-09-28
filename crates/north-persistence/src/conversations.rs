@@ -1,5 +1,5 @@
 use crate::AuthStore;
-use sqlx::{FromRow, Postgres, Transaction};
+use sea_orm::{DatabaseTransaction, DbErr, FromQueryResult, TransactionTrait};
 use std::{error::Error, fmt};
 
 /// The single durable conversation attached to one requirement.
@@ -58,7 +58,7 @@ pub struct ConversationPage {
 
 #[derive(Debug)]
 pub enum ConversationError {
-    Database(sqlx::Error),
+    Database(DbErr),
     RequirementNotFound,
     InvalidKind(String),
     InvalidMessage,
@@ -86,8 +86,8 @@ impl Error for ConversationError {
     }
 }
 
-impl From<sqlx::Error> for ConversationError {
-    fn from(error: sqlx::Error) -> Self {
+impl From<DbErr> for ConversationError {
+    fn from(error: DbErr) -> Self {
         Self::Database(error)
     }
 }
@@ -107,7 +107,7 @@ impl AuthStore {
         let conversation = conversation_row(&mut transaction, requirement_id)
             .await?
             .ok_or(ConversationError::RequirementNotFound)?;
-        let row = sqlx::query_as::<_, MessageRow>(
+        let row = crate::query::query_as::<MessageRow>(
             "INSERT INTO messages
                 (id, conversation_id, author_user_id, kind, body)
              VALUES ($1, $2, $3, $4, $5)
@@ -119,7 +119,7 @@ impl AuthStore {
         .bind(author_user_id)
         .bind(MessageKind::Requester.as_str())
         .bind(body.trim())
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
         transaction.commit().await?;
         row.into_record()
@@ -144,7 +144,7 @@ impl AuthStore {
         let conversation = conversation_row(&mut transaction, requirement_id)
             .await?
             .ok_or(ConversationError::RequirementNotFound)?;
-        let rows = sqlx::query_as::<_, MessageRow>(
+        let rows = crate::query::query_as::<MessageRow>(
             "SELECT id, conversation_id, author_user_id, kind, body,
                     created_at::text AS created_at
              FROM messages
@@ -155,7 +155,7 @@ impl AuthStore {
         .bind(&conversation.id)
         .bind(fetch_limit)
         .bind(offset_i64)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&transaction)
         .await?;
         transaction.commit().await?;
 
@@ -188,7 +188,7 @@ impl AuthStore {
         let conversation = conversation_row(&mut transaction, requirement_id)
             .await?
             .ok_or(ConversationError::RequirementNotFound)?;
-        let rows = sqlx::query_as::<_, MessageRow>(
+        let rows = crate::query::query_as::<MessageRow>(
             "SELECT id, conversation_id, author_user_id, kind, body,
                     created_at::text AS created_at
              FROM messages
@@ -196,7 +196,7 @@ impl AuthStore {
              ORDER BY created_at ASC, id ASC",
         )
         .bind(&conversation.id)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&transaction)
         .await?;
         transaction.commit().await?;
         rows.into_iter().map(MessageRow::into_record).collect()
@@ -213,7 +213,7 @@ impl AuthStore {
         let Some(conversation) = conversation else {
             return Ok(None);
         };
-        let row = sqlx::query_as::<_, MessageRow>(
+        let row = crate::query::query_as::<MessageRow>(
             "SELECT id, conversation_id, author_user_id, kind, body,
                     created_at::text AS created_at
              FROM messages
@@ -221,7 +221,7 @@ impl AuthStore {
         )
         .bind(&conversation.id)
         .bind(message_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?;
         transaction.commit().await?;
         row.map(MessageRow::into_record).transpose()
@@ -229,20 +229,20 @@ impl AuthStore {
 }
 
 async fn conversation_row(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     requirement_id: &str,
 ) -> Result<Option<ConversationRow>, ConversationError> {
-    Ok(sqlx::query_as::<_, ConversationRow>(
+    Ok(crate::query::query_as::<ConversationRow>(
         "SELECT id, requirement_id, created_at::text AS created_at
          FROM conversations
          WHERE requirement_id = $1",
     )
     .bind(requirement_id)
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&*transaction)
     .await?)
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct ConversationRow {
     id: String,
     requirement_id: String,
@@ -259,7 +259,7 @@ impl ConversationRow {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct MessageRow {
     id: String,
     conversation_id: String,

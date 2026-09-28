@@ -23,6 +23,17 @@ invalidate the code. A successful verification SHALL consume the code as
 before. Request-code cooldown SHALL remain independent from the verification
 attempt budget.
 
+The HTTP/authentication boundary SHALL apply the established `normalize_email`
+contract—trim surrounding Unicode whitespace with `str::trim`, then ASCII
+lowercase, with no Unicode normalization—before persistence; persistence SHALL
+receive and bind that canonical value without a second normalization policy.
+Stored verification-code values SHALL use the exact framed HMAC-SHA-256
+construction and `NORTH_OTP_HMAC_KEY` configuration defined by
+`otp-at-rest-hardening`; session-token, daemon-setup-token, and
+daemon-credential hashing SHALL remain unchanged. If the configured OTP key is
+unavailable or invalid, issuance and verification SHALL fail closed rather
+than fall back to ordinary hashing.
+
 A syntactically valid request to `POST /auth/request-code` SHALL pass the
 separate process-local bucket keyed by the normalized effective address's
 primary limiter key and the existing normalized-email cooldown/resource
@@ -93,6 +104,16 @@ response SHALL not reveal whether an email has an active code or account.
 - **WHEN** concurrent requests submit invalid codes for the same issued code
 - **THEN** no more than the configured bounded number of attempts can commit
   and the code is invalid once that limit is reached
+
+#### Scenario: Keyed storage preserves login behavior
+
+- **WHEN** a user submits the correct active code while the configured server key is available
+- **THEN** verification succeeds with existing session and single-use semantics without changing high-entropy credential hashing
+
+#### Scenario: Missing key fails closed
+
+- **WHEN** the server cannot load a valid configured OTP key
+- **THEN** it does not issue or verify codes and does not fall back to database-only hashing
 
 ### Requirement: Session establishment
 

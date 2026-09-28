@@ -1,7 +1,7 @@
 ---
 name: PR Agent
 
-"on":  # zizmor: ignore[dangerous-triggers]
+on:  # zizmor: ignore[dangerous-triggers]
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review, review_requested]
 

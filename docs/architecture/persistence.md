@@ -1,8 +1,15 @@
 # Persistence
 
-Relational database, single source of truth for durable product and server
-reliability state. Migrations: versioned SQL in `../migrations/`, applied by the
-server at startup.
+PostgreSQL is the relational source of truth for durable product and server
+reliability state. `north-persistence` owns SeaORM entities and versioned Rust
+migrations. Operators run packaged `north-server migrate` explicitly; normal
+server startup verifies the migration head and performs no schema DDL or sync.
+
+Production access uses SeaORM connections and transactions. Entities model table
+shape and straightforward queries; bound SeaORM statements preserve PostgreSQL-
+specific locks, CTEs, and conditional updates where ORM translation could change
+behavior. Entity-first schema sync is disabled: schema changes use reviewed,
+versioned Rust migrations, with PostgreSQL-specific DDL kept in those migrations.
 
 ## Durable vs ephemeral
 
@@ -11,29 +18,9 @@ server at startup.
 | Durable business | users, roles, requirements (+revisions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
 | Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, execution attempts, server command outbox, event dedupe/rejection records, sequence watermarks, keyed setup quota | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
-Migrations 0003–0005 implement requirements and transition audit,
-one-to-one conversations/messages, and immutable revision-bound readiness
-evidence. Migration 0010 adds positive `requirements.state_version` with a
-backfill of 1 for existing rows. Migration 0011 records the accepted assessment
-Ready-generation identity, marks unverifiable legacy generations as unknown, and
-replaces the evidence foreign-key cascade with restrictive deletion.
-`accepted_state_version` equals `requirements.state_version` only while that
-Requirement remains Ready and reviewable; later review transitions advance the
-Requirement without mutating historical evidence. Migrations 0007–0009
-implement daemon registration/setup-request, execution-session/outbox records,
-and requirement binding used to authorize assessment events. Migration 0013
-adds the configured repository catalog. Migration 0014 adds immutable outbox
-payload fingerprints, command/event contiguous watermarks, and durable server
-event identity/outcome records. Migration 0015 adds clarification-run context, cancellation/runtime outcome fields, and coarse
-activity records. Migration 0016 adds durable attempt rows, bounded failure
-classes, snapshotted retry limits, `attempt_count`, `current_attempt_id`, and
-indexed `next_retry_at`; legacy starts are backfilled conservatively, including
-compacted starts whose payload is gone. Migration 0017 adds ephemeral activity
-retention: `clarification_activities.expires_at`, a deterministic 7-day
-backfill, NOT NULL enforcement, and an `(expires_at, id)` sweep index. Migration
-0018 adds nullable PostgreSQL `CIDR` `daemon_setup_requests.client_network_key`
-and a partial `(client_network_key, expires_at)` index for unclaimed setup
-rows; legacy rows remain NULL and age out normally.
+The compiled SeaORM baseline migration, `crates/north-persistence/src/m0001_initial_schema.rs`, creates the current schema from an empty database: requirements, conversations and readiness evidence; daemon/session and durable delivery state; repositories, retry attempts, retention metadata, setup quota keys, and keyed OTP storage. It represents the final unpublished schema directly; historical data backfills are not run on a fresh database. Pre-0.1.0 SQLx-stamped or partial North databases are unsupported and the migration command rejects them with manual-recreation guidance. North never resets them automatically. After publication, applied migrations are immutable and later versions append in Rust.
+
+
 Readiness evidence rows are append-only;
 database triggers reject direct mutation of evidence, repository source identity,
 and command outbox payloads. Requirement delete is restrictive so evidence never
@@ -50,10 +37,11 @@ Public creation protection is **Enforced** for only
 endpoint buckets use the normalized effective client address, with IPv4 `/32`
 or IPv6 `/64` primary keys, capacity 5, one token per 120 seconds, and reset
 on restart. The normalized-email cooldown remains a separate request-code
-control. Migration 0018 stores the same CIDR value as each new setup row's
-durable `client_network_key`; legacy NULL rows retain claim/expiry behavior and
-are excluded from new keyed counts. Pending counts include unexpired, unclaimed
-pending or approved rows, exclude claimed/expired rows, and serialize count plus
+control. The baseline stores the same CIDR value as each new setup row's
+durable `client_network_key`; rows with NULL network keys retain claim/expiry
+behavior and are excluded from keyed counts. Pending counts include unexpired,
+unclaimed pending or approved rows, exclude claimed/expired rows, and serialize
+count plus
 insert under `pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))`.
 Daemon labels never provide quota identity. A valid request consumes its
 client token before resource-specific checks; cooldown or pending-quota rejection
@@ -66,10 +54,11 @@ PostgreSQL concurrency proof runs with
 Verification-code digests use raw 32-byte HMAC-SHA-256 values framed with
 canonical email, verification row ID, and unmodified code bytes. Server startup
 requires strict 64-hex-character `NORTH_OTP_HMAC_KEY` before serving auth
-routes; migration 0019 consumes active legacy SHA-256 codes. Key rotation
-requires coordinated rollout across instances, invalidates outstanding codes,
-and has no previous-key compatibility window. Do not mix pre-migration and
-post-migration binaries against one live database.
+routes. Pre-0.1.0 databases may contain legacy SHA-256 codes and are not
+supported by the 0.1.0 baseline. Key rotation requires coordinated rollout
+across instances, invalidates outstanding codes, and has no previous-key
+compatibility window. Do not reuse a database created by pre-0.1.0 builds with
+0.1.0; startup never resets it.
 
 Registration rows retain hashed credentials, owner identity,
 protocol/capability metadata, connection liveness, and revocation timestamps.
@@ -83,7 +72,7 @@ bounded batches using an expiry index when setup requests are created or polled.
 
 | Ephemeral (TTL) | `clarification_activities` (coarse agent/tool activity; observability only) | only allowlisted table; swept by bounded expiry GC; expiry must never invalidate a Requirement |
 
-Only tables on the explicit ephemeral allowlist may be swept; the 0.1.0
+Only tables on the explicit ephemeral allowlist may be swept; the current
 allowlist contains exactly `clarification_activities`. New tables are durable
 by default because retention is a named persistence operation with fixed SQL
 and no generic deletion surface. Each activity row stores `expires_at` from
@@ -115,7 +104,7 @@ not a second database authority. Its command `terminal` state records the local
 processing/dispatch outcome of one command, not execution-session completion;
 `session.completed`/`session.failed` events report session outcome separately.
 Its processed-command high-water tombstone is retained for the durable session
-and is not expired by time alone in 0.1.0.
+and is not expired by time alone.
 
 Invariants:
 

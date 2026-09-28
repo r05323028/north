@@ -1,6 +1,8 @@
-use north_persistence::{
-    AuthStore, EventReceiptOutcome, EventReceiptRequest, PersistenceError, PoolOptions,
-};
+#[allow(dead_code)]
+mod support;
+use support::TestDatabaseOptions;
+
+use north_persistence::{AuthStore, EventReceiptOutcome, EventReceiptRequest, PersistenceError};
 use north_protocol::{Command, CommandEnvelope, MessageSend, SCHEMA_VERSION};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -46,9 +48,9 @@ fn command_payload(command_id: &str, session_id: &str, sequence: u64) -> String 
     .expect("valid command payload")
 }
 
-async fn connected_daemon(pool: &north_persistence::PgPool, user_id: &str) -> String {
+async fn connected_daemon(pool: &north_persistence::DatabaseConnection, user_id: &str) -> String {
     let daemon_id = unique("delivery-daemon");
-    sqlx::query(
+    support::query(
         "INSERT INTO daemon_registrations
             (daemon_id, credential_hash, label, created_by, protocol_version,
              capabilities, connected_at, last_seen_at)
@@ -69,7 +71,7 @@ async fn connected_daemon(pool: &north_persistence::PgPool, user_id: &str) -> St
 async fn durable_delivery_survives_lost_ack_gaps_and_retry() {
     let database_url = std::env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for protocol delivery tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -78,7 +80,7 @@ async fn durable_delivery_survives_lost_ack_gaps_and_retry() {
         .await
         .expect("run migrations");
     let user_id = unique("delivery-user");
-    sqlx::query("INSERT INTO users (id, email, role) VALUES ($1, $2, 'Owner')")
+    support::query("INSERT INTO users (id, email, role) VALUES ($1, $2, 'Owner')")
         .bind(&user_id)
         .bind(format!("{user_id}@example.com"))
         .execute(&pool)
@@ -163,7 +165,7 @@ async fn durable_delivery_survives_lost_ack_gaps_and_retry() {
         .await
         .expect("empty pending commands")
         .is_empty());
-    let tombstones: i64 = sqlx::query_scalar(
+    let tombstones: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM server_command_tombstones
          WHERE session_id = $1",
     )

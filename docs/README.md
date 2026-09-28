@@ -2,6 +2,8 @@
 
 Read top-down; each doc stays small and links instead of duplicating.
 
+Human-facing user and contributor guides live in the separate Astro site at [`web/`](../web/src/content/docs/index.md). This directory remains the structured, canonical project knowledge source.
+
 - [DESIGN.md](DESIGN.md) — product UI design system extracted from current prototype
 
 ## Product (semantics agents must not contradict)
@@ -28,5 +30,10 @@ Read top-down; each doc stays small and links instead of duplicating.
 - [development/git-workflow.md](development/git-workflow.md) — PRs and Conventional Commits
 - [development/tooling.md](development/tooling.md) — prek, act, CodeGraph, Graphify
 - [development/documentation.md](development/documentation.md) — where statements belong; update duties
+- [development/release-checklist.md](development/release-checklist.md) — per-candidate qualification, artifact, publication, and post-release checks
+
+## Deployment (operator guidance)
+
+- [deployment/self-hosted.md](deployment/self-hosted.md) — supported topology, configuration, upgrades, and artifact verification
 
 Change proposals and deltas live in `openspec/` (see `AGENTS.md`).

@@ -4,7 +4,7 @@ use axum::{
     Extension,
 };
 use north_domain::role::Role;
-use north_persistence::{PoolOptions, UserRecord};
+use north_persistence::{DatabaseConnection, UserRecord};
 use north_server::{
     authorize_role_assignment, require_admin, require_review, AuthState, CurrentUser, RoleHttpError,
 };
@@ -26,9 +26,7 @@ fn test_otp_key() -> north_persistence::OtpKey {
 }
 
 fn role_router(user: CurrentUser) -> axum::Router {
-    let pool = PoolOptions::new()
-        .connect_lazy("postgres://north:north@127.0.0.1:1/north")
-        .expect("valid lazy pool URL");
+    let pool = DatabaseConnection::default();
     north_server::roles::router()
         .with_state(AuthState::with_log_delivery(
             north_persistence::AuthStore::new(pool, test_otp_key()),

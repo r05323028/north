@@ -9,8 +9,8 @@ use north_domain::{
     requirement::MarkReadyError,
     status::RequirementStatus,
 };
+use sea_orm::{DatabaseTransaction, DbErr, FromQueryResult, TransactionTrait};
 use sha2::{Digest, Sha256};
-use sqlx::{FromRow, Postgres, Transaction};
 use std::{error::Error, fmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +66,7 @@ struct AssessmentEvent<'a> {
 
 #[derive(Debug)]
 pub enum ReadinessError {
-    Database(sqlx::Error),
+    Database(DbErr),
     RequirementNotFound,
     InvalidStatus(String),
     InvalidRevision,
@@ -137,8 +137,8 @@ impl Error for ReadinessError {
     }
 }
 
-impl From<sqlx::Error> for ReadinessError {
-    fn from(error: sqlx::Error) -> Self {
+impl From<DbErr> for ReadinessError {
+    fn from(error: DbErr) -> Self {
         Self::Database(error)
     }
 }
@@ -227,16 +227,16 @@ impl AuthStore {
         };
         let mut transaction = self.pool.begin().await?;
         // ponytail: one advisory lock per event id; replace with a keyed ledger lock only if throughput matters.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        crate::query::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(event.event_id)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
         let sequence =
             i64::try_from(event.daemon_event_seq).map_err(|_| ReadinessError::InvalidEvidence)?;
         let sequence_lock_key = format!("{}:{sequence}", event.session_id);
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        crate::query::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(sequence_lock_key)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
         let session_state = session_delivery_row(&mut transaction, event.session_id).await?;
         if session_state
@@ -296,13 +296,13 @@ impl AuthStore {
                 return Err(ReadinessError::SequenceConflict);
             }
         }
-        let generic_event: Option<String> = sqlx::query_scalar(
+        let generic_event: Option<String> = crate::query::query_scalar(
             "SELECT event_id FROM server_event_dedupe
              WHERE session_id = $1 AND daemon_event_seq = $2",
         )
         .bind(event.session_id)
         .bind(sequence)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?;
         if generic_event.is_some() {
             return Err(ReadinessError::SequenceConflict);
@@ -381,7 +381,7 @@ impl AuthStore {
             update_requirement(&mut transaction, &requirement, expected_state_version)
                 .await
                 .map_err(ReadinessError::from)?;
-            sqlx::query(
+            crate::query::query(
                 "INSERT INTO transition_audit
                     (requirement_id, actor_id, transition, from_status, to_status,
                      assessment_id, state_version)
@@ -397,7 +397,7 @@ impl AuthStore {
                 i64::try_from(requirement.state_version())
                     .map_err(|_| ReadinessError::InvalidEvidence)?,
             )
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
         }
         insert_event_dedupe(
@@ -409,13 +409,13 @@ impl AuthStore {
             rejection_reason.as_deref(),
         )
         .await?;
-        sqlx::query(
+        crate::query::query(
             "UPDATE execution_sessions
              SET updated_at = CURRENT_TIMESTAMP, last_activity_at = CURRENT_TIMESTAMP
              WHERE id = $1",
         )
         .bind(event.session_id)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         advance_event_watermark(&mut transaction, event.session_id, sequence).await?;
         transaction.commit().await?;
@@ -438,7 +438,7 @@ impl AuthStore {
         if requirement.status() != RequirementStatus::Ready {
             return Err(ReadinessError::NotReady);
         }
-        let assessment = sqlx::query_as::<_, AssessmentRow>(
+        let assessment = crate::query::query_as::<AssessmentRow>(
             "SELECT id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
                     requirement_revision, verdict, blockers, assumptions,
                     repositories_reviewed, outcome, accepted_state_version,
@@ -459,7 +459,7 @@ impl AuthStore {
             i64::try_from(requirement.state_version())
                 .map_err(|_| ReadinessError::InvalidEvidence)?,
         )
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         .ok_or(ReadinessError::StaleAssessment {
             assessment_revision: 0,
@@ -500,7 +500,7 @@ impl AuthStore {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct ReadinessEventDedupeRow {
     session_id: String,
     daemon_event_seq: i64,
@@ -509,29 +509,29 @@ struct ReadinessEventDedupeRow {
 }
 
 async fn readiness_event_by_id(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     event_id: &str,
 ) -> Result<Option<ReadinessEventDedupeRow>, ReadinessError> {
-    Ok(sqlx::query_as::<_, ReadinessEventDedupeRow>(
+    Ok(crate::query::query_as::<ReadinessEventDedupeRow>(
         "SELECT session_id, daemon_event_seq, payload_digest, legacy_identity
          FROM server_event_dedupe
          WHERE event_id = $1
          FOR UPDATE",
     )
     .bind(event_id)
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&*transaction)
     .await?)
 }
 
 async fn insert_event_dedupe(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     event: &AssessmentEvent<'_>,
     sequence: i64,
     payload_digest: &str,
     outcome: AssessmentOutcome,
     rejection_reason: Option<&str>,
 ) -> Result<(), ReadinessError> {
-    sqlx::query(
+    crate::query::query(
         "INSERT INTO server_event_dedupe
             (event_id, session_id, daemon_event_seq, payload_digest, payload,
              outcome, rejection_reason)
@@ -544,16 +544,16 @@ async fn insert_event_dedupe(
     .bind(payload_digest)
     .bind(outcome.as_str())
     .bind(rejection_reason)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(())
 }
 
 async fn assessment_by_event(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     event_id: &str,
 ) -> Result<Option<AssessmentRow>, ReadinessError> {
-    Ok(sqlx::query_as::<_, AssessmentRow>(
+    Ok(crate::query::query_as::<AssessmentRow>(
         "SELECT id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
                 requirement_revision, verdict, blockers, assumptions,
                 repositories_reviewed, outcome, accepted_state_version,
@@ -564,26 +564,26 @@ async fn assessment_by_event(
          FOR UPDATE",
     )
     .bind(event_id)
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&*transaction)
     .await?)
 }
 
 async fn session_delivery_row(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
 ) -> Result<Option<SessionDeliveryRow>, ReadinessError> {
-    Ok(sqlx::query_as::<_, SessionDeliveryRow>(
+    Ok(crate::query::query_as::<SessionDeliveryRow>(
         "SELECT requirement_id, event_ack_through_seq, event_ack_sparse, repository_ids
          FROM execution_sessions
          WHERE id = $1
          FOR UPDATE",
     )
     .bind(session_id)
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&*transaction)
     .await?)
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct SessionDeliveryRow {
     requirement_id: Option<String>,
     event_ack_through_seq: i64,
@@ -592,18 +592,18 @@ struct SessionDeliveryRow {
 }
 
 async fn advance_event_watermark(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
     sequence: i64,
 ) -> Result<(), ReadinessError> {
-    let mut cursor = sqlx::query_as::<_, EventCursorRow>(
+    let mut cursor = crate::query::query_as::<EventCursorRow>(
         "SELECT event_ack_through_seq, event_ack_sparse
          FROM execution_sessions
          WHERE id = $1
          FOR UPDATE",
     )
     .bind(session_id)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?;
     cursor.event_ack_through_seq = cursor.event_ack_through_seq.max(sequence);
     loop {
@@ -621,7 +621,7 @@ async fn advance_event_watermark(
     cursor
         .event_ack_sparse
         .retain(|value| *value > cursor.event_ack_through_seq);
-    sqlx::query(
+    crate::query::query(
         "UPDATE execution_sessions
          SET event_ack_through_seq = $2, event_ack_sparse = $3
          WHERE id = $1",
@@ -629,12 +629,12 @@ async fn advance_event_watermark(
     .bind(session_id)
     .bind(cursor.event_ack_through_seq)
     .bind(cursor.event_ack_sparse)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(())
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct EventCursorRow {
     event_ack_through_seq: i64,
     event_ack_sparse: Vec<i64>,
@@ -650,7 +650,7 @@ fn complete_commit_sha(value: &str) -> bool {
 }
 
 async fn repository_citations_exist(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_repository_ids: &[String],
     repositories: &[ReviewedRepository],
 ) -> Result<bool, ReadinessError> {
@@ -662,9 +662,9 @@ async fn repository_citations_exist(
             return Ok(false);
         }
         let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM repositories WHERE id = $1)")
+            crate::query::query_scalar("SELECT EXISTS (SELECT 1 FROM repositories WHERE id = $1)")
                 .bind(&repository.repository_id)
-                .fetch_one(&mut **transaction)
+                .fetch_one(&*transaction)
                 .await?;
         if !exists {
             return Ok(false);
@@ -674,11 +674,11 @@ async fn repository_citations_exist(
 }
 
 async fn assessment_by_sequence(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
     daemon_event_seq: i64,
 ) -> Result<Option<AssessmentRow>, ReadinessError> {
-    Ok(sqlx::query_as::<_, AssessmentRow>(
+    Ok(crate::query::query_as::<AssessmentRow>(
         "SELECT id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
                 requirement_revision, verdict, blockers, assumptions,
                 repositories_reviewed, outcome, accepted_state_version,
@@ -690,7 +690,7 @@ async fn assessment_by_sequence(
     )
     .bind(session_id)
     .bind(daemon_event_seq)
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&*transaction)
     .await?)
 }
 
@@ -705,7 +705,7 @@ struct AssessmentInsert<'a> {
 }
 
 async fn insert_assessment(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     input: AssessmentInsert<'_>,
 ) -> Result<AssessmentRow, ReadinessError> {
     let AssessmentInsert {
@@ -733,7 +733,7 @@ async fn insert_assessment(
             })
             .collect(),
     );
-    Ok(sqlx::query_as::<_, AssessmentRow>(
+    Ok(crate::query::query_as::<AssessmentRow>(
         "INSERT INTO readiness_assessments
             (id, event_id, session_id, daemon_event_seq, event_requirement_id, requirement_id,
              requirement_revision, verdict, blockers, assumptions,
@@ -754,8 +754,8 @@ async fn insert_assessment(
     .bind(requirement_id)
     .bind(requirement_revision)
     .bind(persisted_verdict(assessment.verdict))
-    .bind(&assessment.blockers)
-    .bind(&assessment.assumptions)
+    .bind(assessment.blockers.clone())
+    .bind(assessment.assumptions.clone())
     .bind(repositories_reviewed)
     .bind(outcome.as_str())
     .bind(
@@ -766,11 +766,11 @@ async fn insert_assessment(
     )
     .bind(rejection_reason)
     .bind(assessed_at_ms)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?)
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct AssessmentRow {
     id: String,
     event_id: String,

@@ -29,11 +29,20 @@ mechanisms, not prose.
 | Architecture & boundaries | docs/architecture/ |
 | Testing layers & coverage truth | docs/development/testing.md |
 | CI jobs, merge gate, act parity | docs/development/ci.md |
+| Release qualification and operator checklist | docs/development/release-checklist.md |
+| Self-hosted deployment | docs/deployment/self-hosted.md |
 | Branches, PRs, Conventional Commits | docs/development/git-workflow.md |
 | prek, act, CodeGraph, Graphify | docs/development/tooling.md |
 | Invariant ledger with honest statuses | docs/development/invariants.md |
 | Documentation rules | docs/development/documentation.md |
+| Web frontend development | docs/development/web.md |
 | Change management | openspec/ |
+
+## Web frontend
+
+For changes under `apps/web/`, read the relevant guide in the installed Next.js
+docs at `apps/web/node_modules/next/dist/docs/` before writing code. Details:
+`docs/development/web.md`.
 
 ## OpenSpec (mandatory for behavior changes)
 
@@ -50,9 +59,9 @@ lands. Do not invent competing specification systems.
 ## Validation (single entrypoint)
 
 ```bash
-./scripts/validate.sh fast   # fmt·clippy·unit+archtests·web lint/tc·specs
-./scripts/validate.sh ci     # full workspace gate + web build + specs
-./scripts/pre-push-validation.sh  # ci gate + act parity vs real workflow jobs
+./scripts/validate.sh fast   # fmt·clippy·Rust unit+arch·artifact verifier·web lint/tc/settings·specs
+./scripts/validate.sh ci     # Rust workspace + PostgreSQL integration + web unit/build + specs
+./scripts/pre-push-validation.sh  # ci profile + one selected workflow job via act
 ```
 
 ### Pre-push validation decision
@@ -91,14 +100,18 @@ mixed documentation plus non-documentation diff requires the normal pre-push
 validation. Skipping the hook for a strictly allowlisted documentation diff
 does not remove other relevant documentation or specification checks.
 
-Unsupported test profiles exit explicitly — never fake a suite for a
-name. Any command documented here must actually work.
+`ci` requires `NORTH_TEST_DATABASE_URL`; it does not run hosted `web-e2e` or
+coverage jobs. Pre-push defaults to the `rust` act job; set
+`NORTH_PRE_PUSH_JOB` to select another workflow job. Unsupported test profiles
+exit explicitly — never fake a suite for a name. Any command documented here
+must actually work.
 
 ## Test layers (summary)
 
-Unit · Integration · E2E · Smoke — normative definitions and current
-coverage: docs/development/testing.md. One layer per test; execution
-environment is not a layer.
+Unit · Integration · E2E · Smoke — behavior changes need regression coverage
+in the appropriate layer. Normative definitions and current coverage:
+docs/development/testing.md. One layer per test; execution environment is not
+a layer.
 
 ## Pull requests / commits
 
@@ -114,11 +127,12 @@ environment is not a layer.
 Ledger with honest status per invariant:
 docs/development/invariants.md. Headlines (see ledger for enforcement):
 
-- Daemon reports facts/events; the server owns business state.
-- Browser ↔ daemon direct communication never happens (HTTP + SSE only).
-- Server ↔ daemon uses Axum WebSocket + North JSON text protocol +
-  tokio-tungstenite; transport libraries provide transport only, while North
-  coordination owns reliability, idempotency, replay, ordering, and recovery.
+- Daemon reports execution facts/events; the server owns business transitions.
+  Broad durable-state ownership remains partially enforced (see ledger).
+- Browser uses HTTP + SSE with the server; it never connects directly to daemon.
+- Server ↔ daemon uses North JSON text protocol over Axum WebSocket (server)
+  and tokio-tungstenite (daemon); North coordination owns reliability,
+  idempotency, replay, ordering, and recovery.
 - Server assembles complete `session.start` context; daemon enters Active only
   after hello/welcome, one reconciliation snapshot, and coordination readiness.
   Retryable socket failures back off; protocol/auth failures stop reconnect.

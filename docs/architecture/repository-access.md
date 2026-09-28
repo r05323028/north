@@ -8,7 +8,7 @@ The server stores metadata only:
 - `name`: trimmed editable display name, at most 100 UTF-8 bytes;
 - `name_normalized`: persistence-only non-locale lowercase key, unique across
   enabled and disabled rows;
-- `url`: trimmed supported Git location, immutable after creation in 0.1.0;
+- `url`: trimmed supported Git location, immutable after creation;
 - `description`: trimmed editable text, empty allowed, at most 10,000 UTF-8
   bytes;
 - `created_at`, `updated_at`, and nullable `disabled_at` server timestamps.
@@ -20,7 +20,7 @@ Repeating Remove on an already disabled row is a true idempotent no-op: both
 on the same identity and advances `updated_at`; re-enable of an already-enabled
 row is a true no-op with `updated_at` unchanged. Create sets `created_at` and
 `updated_at` to now with `disabled_at = null`; metadata changes advance
-`updated_at`; `created_at` never changes. North 0.1.0 has no normal hard-delete
+`updated_at`; `created_at` never changes. Hard deletion is not a normal
 repository operation.
 
 Repository names are unique after trimming and non-locale Unicode lowercase.
@@ -40,7 +40,7 @@ for Settings lifecycle controls. Active runtime catalog contains only rows with
 `disabled_at IS NULL`; it is an internal server/persistence read used for
 server-assembled `session.start` context and downstream inspection candidates.
 The daemon receives relevant enabled metadata through `session.start` and does
-not independently fetch a repository catalog. North 0.1.0 creates no public
+not independently fetch a repository catalog. There is no public
 browser catalog-management or standalone daemon-catalog endpoint merely because
 this internal read is called a catalog. Disabled rows remain visible to
 authorized management and historical reads even though active selection
@@ -139,15 +139,15 @@ daemon repository cache (per repository, never runtime working tree)
 
 The cache is reusable source material. Each clarification execution receives a
 unique mutable checkout scoped by session/task and repository ID. A plain local
-copy/clone-from-cache is sufficient; North 0.1.0 does not require Git
-worktrees. Cache and disposable roots are daemon-owned mode-0700 namespaces;
+copy/clone-from-cache is sufficient; Git worktrees are not required. Cache and
+disposable roots are daemon-owned mode-0700 namespaces;
 path checks are process-level protection, not a kernel sandbox. Concurrent sessions inspecting one repository never share a mutable
 directory, and runtime changes cannot contaminate the cache or another session.
 
 After every task, the daemon checks the checkout for unexpected dirty changes.
 A dirty result is an invariant violation: report it and discard the checkout
-before reuse. This is process-level protection, not kernel or sandbox
-isolation. North does not claim OS-level read-only enforcement in 0.1.0.
+before reuse. These checks provide process-level protection, not kernel
+sandboxing or OS-level read-only enforcement.
 
 Mirror clone preparation uses a direct `.source-*` staging child inside each
 encoded repository cache namespace. Failed clones clean this staging immediately

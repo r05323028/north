@@ -3,7 +3,7 @@ use north_domain::{
     requirement::{EditError, PersistedRequirement, Requirement, RequirementEdit, RestoreError},
     status::{InvalidTransition, RequirementStatus},
 };
-use sqlx::{FromRow, Postgres, Transaction};
+use sea_orm::{DatabaseTransaction, DbErr, FromQueryResult, TransactionTrait};
 use std::{error::Error, fmt};
 
 /// Persisted requirement projection returned to server handlers.
@@ -73,7 +73,7 @@ impl RequirementTransition {
 
 #[derive(Debug)]
 pub enum RequirementError {
-    Database(sqlx::Error),
+    Database(DbErr),
     NotFound,
     Conflict,
     InvalidStatus(String),
@@ -113,8 +113,8 @@ impl Error for RequirementError {
     }
 }
 
-impl From<sqlx::Error> for RequirementError {
-    fn from(error: sqlx::Error) -> Self {
+impl From<DbErr> for RequirementError {
+    fn from(error: DbErr) -> Self {
         Self::Database(error)
     }
 }
@@ -148,8 +148,8 @@ impl AuthStore {
         created_by: &str,
     ) -> Result<RequirementRecord, RequirementError> {
         let requirement = Requirement::new(crate::random_hex(16), title, description, created_by);
-        let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query_as::<_, RequirementRow>(
+        let transaction = self.pool.begin().await?;
+        let row = crate::query::query_as::<RequirementRow>(
             "INSERT INTO requirements
                 (id, title, description, summary, acceptance_criteria,
                  assumptions, open_questions, status, revision, state_version,
@@ -174,15 +174,15 @@ impl AuthStore {
                 .map_err(|_| RequirementError::InvalidStateVersion)?,
         )
         .bind(requirement.created_by())
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO conversations (id, requirement_id)
              VALUES ($1, $2)",
         )
         .bind(crate::random_hex(16))
         .bind(requirement.id())
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         transaction.commit().await?;
         row.into_record()
@@ -192,7 +192,7 @@ impl AuthStore {
         &self,
         requirement_id: &str,
     ) -> Result<Option<RequirementRecord>, RequirementError> {
-        let row = sqlx::query_as::<_, RequirementRow>(
+        let row = crate::query::query_as::<RequirementRow>(
             "SELECT id, title, description, summary, acceptance_criteria,
                     assumptions, open_questions, status, revision, state_version,
                     created_by, created_at::text AS created_at,
@@ -212,7 +212,7 @@ impl AuthStore {
     ) -> Result<Vec<RequirementRecord>, RequirementError> {
         let ascending = matches!(query.sort, RequirementSort::UpdatedAscending);
         let status = query.status.map(persisted_status);
-        let rows = sqlx::query_as::<_, RequirementRow>(
+        let rows = crate::query::query_as::<RequirementRow>(
             "SELECT id, title, description, summary, acceptance_criteria,
                     assumptions, open_questions, status, revision, state_version,
                     created_by, created_at::text AS created_at,
@@ -298,7 +298,7 @@ impl AuthStore {
         transition.apply(&mut requirement)?;
         let updated =
             update_requirement(&mut transaction, &requirement, expected_state_version).await?;
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO transition_audit
                 (requirement_id, actor_id, transition, from_status, to_status,
                  feedback, assessment_id, state_version)
@@ -315,7 +315,7 @@ impl AuthStore {
             i64::try_from(requirement.state_version())
                 .map_err(|_| RequirementError::InvalidStateVersion)?,
         )
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         transaction.commit().await?;
         updated.into_record()
@@ -354,7 +354,7 @@ impl AuthStore {
         let updated =
             update_requirement(&mut transaction, &requirement, expected_state_version).await?;
         if was_ready {
-            sqlx::query(
+            crate::query::query(
                 "INSERT INTO transition_audit
                     (requirement_id, actor_id, transition, from_status, to_status,
                      feedback, assessment_id, state_version)
@@ -371,7 +371,7 @@ impl AuthStore {
                 i64::try_from(requirement.state_version())
                     .map_err(|_| RequirementError::InvalidStateVersion)?,
             )
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
         }
         transaction.commit().await?;
@@ -380,10 +380,10 @@ impl AuthStore {
 }
 
 pub(crate) async fn lock_requirement(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     requirement_id: &str,
 ) -> Result<RequirementRow, RequirementError> {
-    sqlx::query_as::<_, RequirementRow>(
+    crate::query::query_as::<RequirementRow>(
         "SELECT id, title, description, summary, acceptance_criteria,
                 assumptions, open_questions, status, revision, state_version,
                 created_by, created_at::text AS created_at,
@@ -393,19 +393,19 @@ pub(crate) async fn lock_requirement(
          FOR UPDATE",
     )
     .bind(requirement_id)
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&*transaction)
     .await?
     .ok_or(RequirementError::NotFound)
 }
 
 async fn current_review_assessment(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     requirement_id: &str,
     requirement_revision: u64,
     requirement_state_version: u64,
     assessment_id: &str,
 ) -> Result<(), RequirementError> {
-    let current_id = sqlx::query_scalar::<_, String>(
+    let current_id = crate::query::query_scalar::<String>(
         "SELECT id
          FROM readiness_assessments
          WHERE id = $4
@@ -422,7 +422,7 @@ async fn current_review_assessment(
             .map_err(|_| RequirementError::InvalidStateVersion)?,
     )
     .bind(assessment_id)
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&*transaction)
     .await?;
     if current_id.as_deref() == Some(assessment_id) {
         Ok(())
@@ -432,11 +432,11 @@ async fn current_review_assessment(
 }
 
 pub(crate) async fn update_requirement(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     requirement: &Requirement,
     expected_state_version: u64,
 ) -> Result<RequirementRow, RequirementError> {
-    let row = sqlx::query_as::<_, RequirementRow>(
+    let row = crate::query::query_as::<RequirementRow>(
         "UPDATE requirements
          SET title = $2,
              description = $3,
@@ -468,12 +468,12 @@ pub(crate) async fn update_requirement(
             .map_err(|_| RequirementError::InvalidStateVersion)?,
     )
     .bind(i64::try_from(expected_state_version).map_err(|_| RequirementError::InvalidStateVersion)?)
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&*transaction)
     .await?;
     row.ok_or(RequirementError::Conflict)
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 pub(crate) struct RequirementRow {
     id: String,
     title: String,

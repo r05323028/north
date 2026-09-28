@@ -32,9 +32,10 @@ Never added as placeholders just to justify the layer name.
 
 ### Smoke
 
-The built/deployed system basically starts and serves essential surfaces:
-server boots, migrations apply, health endpoint responds, web starts and can
-reach the server. Shallow and fast by design.
+The built/deployed system starts and serves essential surfaces: packaged
+`north-server migrate` applies schema, normal server startup verifies it without
+DDL, health endpoint responds, and web reaches the server. Shallow and fast by
+design.
 
 Classification rules: do not promote integration tests to E2E because Docker
 is involved; do not call a test smoke merely because it is quick.
@@ -66,9 +67,11 @@ member so `cargo test --workspace` executes it.
 | --- | --- |
 | Unit (Rust) | Implemented — `cargo test --workspace --lib` (domain invariants) |
 | Unit (Web) | Implemented — Vitest via `npm test` in `apps/web` |
-| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, public endpoint abuse controls, repository lifecycle/citation, durable coordination, runtime activity retention, and post-commit browser notification coverage; execute with `NORTH_TEST_DATABASE_URL` |
-| E2E | Partial — Playwright web-boundary coverage includes Board/List/create/direct workspace, SSE invalidation, and human review; full server-backed assembled workflow remains pending |
-| Smoke | Not implemented — arrives with runnable server/web artifacts |
+| Unit (release tooling) | Implemented — Node tests for artifact/OCI verification, no-publish main checks, and tag-built SemVer-only GHCR publication; included in `./scripts/validate.sh fast` |
+| Unit (north CLI) | Implemented — `cargo test -p north-daemon --bin north --test cli_lifecycle` verifies CLI behavior and local daemon lifecycle safety |
+| Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, public endpoint abuse controls, repository lifecycle/citation, durable coordination, runtime activity retention, post-commit browser notification coverage, and fresh-install baseline; execute with `NORTH_TEST_DATABASE_URL` |
+| E2E | Partial — Playwright web-boundary coverage includes Board/List/create/direct workspace, SSE invalidation, and human review; assembled server-backed suite passed locally against exact synthetic Linux/amd64 artifacts, while hosted protected-main/tag evidence remains NOT RUN |
+| Smoke | Implemented — `./scripts/validate.sh smoke` requires `NORTH_RELEASE_ARTIFACT_DIR` and never falls back to workspace binaries; isolated PostgreSQL and persistent trusted TLS identity are required. Set `NORTH_RELEASE_OCI_DIR` and `NORTH_RELEASE_IMAGE_OWNER` to include exact OCI/Compose qualification. Local Linux/amd64 synthetic-artifact smoke passed; hosted protected-main/tag artifact smoke remains NOT RUN |
 
 Human-review browser integration, including Review Packet loading, stale repair,
 and generation-bound acknowledgement, is **Enforced** by Web Vitest and
@@ -76,27 +79,28 @@ Playwright web-boundary coverage. Public endpoint abuse limiting is implemented
 with Rust identity/limiter unit tests and the ignored
 `public_endpoint_abuse` PostgreSQL/HTTP boundary suite; that suite requires
 `NORTH_TEST_DATABASE_URL` and is the PostgreSQL/HTTP boundary proof for the hardening change. The public endpoint suite proves concurrent client buckets, cooldown and
-pending-quota interaction, generic 429s, no-resource rejection, and migration
-compatibility against PostgreSQL. Execution retry is implemented and covered by Rust unit tests and
+pending-quota interaction, generic 429s, no-resource rejection, and durable quota behavior on the baseline schema. Execution retry is implemented and covered by Rust unit tests and
 server integration paths. PostgreSQL restart/concurrency proofs run in
 `retry_authority` and require `NORTH_TEST_DATABASE_URL`.
 
-PostgreSQL integration also exercises keyed OTP issuance/verification, legacy OTP invalidation across the historical 0018-to-0019 upgrade, key rotation rejection, public endpoint quota/HTTP-boundary controls, legacy readiness schema upgrades, and migration backfill invariants. `./scripts/validate.sh integration` runs the ignored `migration_upgrade` regression explicitly with `NORTH_TEST_DATABASE_URL`; `cargo test --workspace` alone does not execute it. Runtime activity retention sweeps, their amnesia proof, and the migration-0017 expiry backfill run in `retention` and `migration_upgrade` under the same prerequisite.
+PostgreSQL integration exercises keyed OTP issuance/verification, key rotation rejection, public endpoint quota/HTTP boundaries, readiness invariants, and runtime-retention sweeps/amnesia. The ignored `fresh_install` suite compares the compiled SeaORM migration catalog with the former SQL baseline in isolated schemas, verifies fresh and repeat `up`, rejects SQLx history and partial schemas without mutation, and checks the packaged `migrate` command without OTP configuration. `./scripts/validate.sh integration` and `ci` include these tests; `cargo test --workspace` alone does not execute ignored PostgreSQL proofs. Upgrades and data backfills from pre-0.1.0 schemas are intentionally unsupported; retention integration tests operate on rows they create.
 
 ## Coverage matrix
 
-Rows marked `Implemented` are current evidence; remaining rows are required
-future proofs.
+`Implemented` means runnable coverage exists; it does not claim execution for this
+checkout or release. Run the named profile and record its result before treating
+a test as evidence. Remaining rows require future proofs.
 
 | Contract | Primary layer | Owning change |
 | --- | --- | --- |
 | browser approval HTML/JSON → authenticated POST → CLI claim, exact command envelope persistence/order, daemon inbox, duplicate `message.send`, restart recovery | Integration | daemon runtime and `introduce-server-daemon-protocol` suites |
+| Bundled `north` setup and daemon lifecycle; stale socket/PID safety, concurrency, and connection status | Unit + Integration | `cargo test -p north-daemon --bin north --test cli_lifecycle` |
 | sequence gaps, late/out-of-order replay, protocol errors | Integration | introduce-server-daemon-protocol |
 | expected_state_version HTTP 409, assessment identity binding, and no side effects | Integration | Implemented by requirement/readiness/conversation integration tests |
 | atomic assessment evidence/transition/dedupe before event ACK | Integration | Implemented by readiness-assessment, including authenticated daemon ACK path |
 | daemon selection, pinned reconnect, credential revocation | Integration | daemon-runtime-connection |
 | server retry authority, durable attempt identity, restart/due discovery, duplicate failure, cancellation races, pinned-owner policy, and immediate-dispatch redelivery | Integration | introduce-runtime-retry-and-failure-state |
-| keyed OTP issuance/verification, strict key startup, legacy invalidation, rotation rejection, raw-MAC storage, and preserved attempt/session semantics | Integration | harden-otp-at-rest |
+| keyed OTP issuance/verification, strict key startup, legacy digest rejection without fallback, rotation rejection, raw-MAC storage, and preserved attempt/session semantics | Integration | harden-otp-at-rest |
 | public request-code/setup normalized effective address, mapped IPv6 → IPv4 normalization, trusted-proxy spoofing, IPv4 `/32`/IPv6 `/64` primary-key derivation, durable setup quota key, generic 429, restart reset, and no-resource-on-rejection | Integration | public-endpoint-abuse-protection |
 | canonical workspace review packet, exact mutation identities, stale 409 repair with generation-bound acknowledgement, unchanged duplicate SSE/focus refetch preservation, state-version/assessment-id reset, Reopen reset, feedback preservation, permissions, and durable audit boundary | E2E + Integration | introduce-human-requirement-review |
 | concurrent disposable checkouts, dirty discard, exact SHA | Integration | local-repository-inspection |
@@ -110,16 +114,23 @@ runnable test exists and passes.
 ## Profiles
 
 ```bash
-./scripts/validate.sh fast        # fmt, clippy, unit + architecture, web lint/typecheck, openspec
+./scripts/validate.sh fast        # fmt, clippy, Rust/script unit + architecture, web lint/typecheck, OpenSpec
 ./scripts/validate.sh rust        # full Rust merge-gate validation
-./scripts/validate.sh web         # web lint, typecheck, and production build
+./scripts/validate.sh web         # apps/web lint/typecheck/build + Astro docs-site build
 ./scripts/validate.sh specs       # strict OpenSpec validation
 ./scripts/validate.sh unit        # Rust + Web unit tests + architecture
 ./scripts/validate.sh ci          # complete local merge-gate mirror; requires NORTH_TEST_DATABASE_URL
 ./scripts/validate.sh integration # PostgreSQL-backed suites; requires NORTH_TEST_DATABASE_URL
 ./scripts/validate.sh e2e         # Playwright browser workflows
-./scripts/validate.sh smoke        # explicit 'not yet' until real
+cargo test -p north-daemon --bin north --test cli_lifecycle # CLI/lifecycle regressions
+./scripts/validate.sh smoke        # extracted-artifact release qualification
 ```
+
+`./scripts/pre-push-validation.sh` provisions disposable PostgreSQL 16 with
+Testcontainers and scopes its connection URL to the native CI child process.
+Docker must be running; no manually configured URL is needed for pre-push.
+Direct `./scripts/validate.sh ci` and `integration` invocations still require
+`NORTH_TEST_DATABASE_URL`; hosted CI supplies its own PostgreSQL service.
 
 ## Web (apps/web)
 
@@ -130,6 +141,12 @@ Playwright (`npm run test:e2e`) and run in merge-gate job `web-e2e` on
 `ubuntu-latest`; this mocked-route suite does not prove assembled server/browser
 behavior. Install its browser locally with `npx playwright install chromium`.
 Coverage generation/upload remains CI-specific (`npm run test:coverage`).
+
+## Human documentation site (`web/`)
+
+The Astro/Starlight site is independently authored under `web/src/content/docs/`.
+`./scripts/validate.sh web` builds its static output after installing dependencies
+with `cd web && npm ci`; it requires no North server or database.
 
 ## Requirement workspace coverage
 
@@ -143,8 +160,13 @@ load, canonical panes, durable message POST, initial start without duplicate
 dispatch, active run dispatch, explicit cancellation URLs, reload-safe same-start
 retry, awaiting/cancellation-pending states, 503 unavailability, 409 edit
 reconciliation, human review decisions, Reopen, stale acknowledgement, and
-SSE/focus repair. Full assembled server-backed E2E and smoke coverage remain
-separate obligations and are not claimed here.
+SSE/focus repair. Mocked Playwright coverage does not prove assembled
+server/browser behavior; run assembled E2E and smoke qualification for each
+release candidate and record results against its tag, source SHA, and artifact.
+Smoke requires an extracted artifact and `NORTH_TEST_DATABASE_URL`; missing
+artifact/database input exits with an error. Missing or invalid persistent TLS
+material is reported as an owner action. The entrypoint never creates a temporary
+CA or bypasses certificate verification.
 
 ## Specs
 
@@ -174,6 +196,7 @@ continuity. The real transport integration test is
 durable protocol delivery tests run locally with `NORTH_TEST_DATABASE_URL` and
 are required in CI job `daemon-integration`. Browser-boundary SSE behavior is
 covered by the requirement-board Playwright suite; full server-backed assembly
-remains an E2E obligation. Server outbox redelivery/ACK processing, daemon journal replay,
+remains an E2E obligation. `release_qualification.rs` adds the live trusted-WSS
+protocol path; assembled qualification remains owner-run. Server outbox redelivery/ACK processing, daemon journal replay,
 identity conflict handling, durable reconciliation restore, and exact
 persistence-before-dispatch are covered by the protocol delivery suites.

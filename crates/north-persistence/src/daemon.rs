@@ -1,5 +1,5 @@
 use crate::{hash_secret, random_hex, AuthStore, PersistenceError};
-use sqlx::FromRow;
+use sea_orm::{DatabaseTransaction, FromQueryResult, TransactionTrait};
 use subtle::ConstantTimeEq;
 
 pub const DAEMON_SETUP_TTL_SECONDS: i64 = 10 * 60;
@@ -77,7 +77,7 @@ pub struct PinnedCommand {
 impl AuthStore {
     /// Remove only old expired setup rows, keeping recent rows for diagnostics.
     pub async fn cleanup_expired_daemon_setup_requests(&self) -> Result<u64, PersistenceError> {
-        let deleted = sqlx::query(
+        let deleted = crate::query::query(
             "WITH expired AS (
                  SELECT id
                  FROM daemon_setup_requests
@@ -106,12 +106,12 @@ impl AuthStore {
             return Err(PersistenceError::InvalidSetup);
         }
         self.cleanup_expired_daemon_setup_requests().await?;
-        let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        let transaction = self.pool.begin().await?;
+        crate::query::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
             .bind(client_network_key)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
-        let pending: i64 = sqlx::query_scalar(
+        let pending: i64 = crate::query::query_scalar(
             "SELECT COUNT(*)
              FROM daemon_setup_requests
              WHERE client_network_key = $1::cidr
@@ -119,14 +119,14 @@ impl AuthStore {
                AND expires_at > CURRENT_TIMESTAMP",
         )
         .bind(client_network_key)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
         if pending >= DAEMON_SETUP_PENDING_LIMIT {
             return Err(PersistenceError::RateLimited);
         }
 
         let request_token = random_hex(32);
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO daemon_setup_requests
                 (id, request_token_hash, label, expires_at, client_network_key)
              VALUES ($1, $2, $3, CURRENT_TIMESTAMP
@@ -137,7 +137,7 @@ impl AuthStore {
         .bind(label)
         .bind(DAEMON_SETUP_TTL_SECONDS)
         .bind(client_network_key)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         transaction.commit().await?;
         Ok(DaemonSetupRequest {
@@ -150,7 +150,7 @@ impl AuthStore {
         &self,
         request_token: &str,
     ) -> Result<DaemonSetupPreview, PersistenceError> {
-        let Some(request) = sqlx::query_as::<_, SetupPreviewRow>(
+        let Some(request) = crate::query::query_as::<SetupPreviewRow>(
             "SELECT label, expires_at <= CURRENT_TIMESTAMP AS expired,
                     approved_at IS NOT NULL AS approved,
                     claimed_at IS NOT NULL AS claimed
@@ -185,7 +185,7 @@ impl AuthStore {
         user_id: &str,
     ) -> Result<(), PersistenceError> {
         let token_hash = hash_secret(request_token.as_bytes());
-        let updated = sqlx::query(
+        let updated = crate::query::query(
             "UPDATE daemon_setup_requests
              SET created_by = $2, approved_at = CURRENT_TIMESTAMP
              WHERE request_token_hash = $1
@@ -193,7 +193,7 @@ impl AuthStore {
                AND approved_at IS NULL
                AND claimed_at IS NULL",
         )
-        .bind(&token_hash)
+        .bind(token_hash.as_slice())
         .bind(user_id)
         .execute(&self.pool)
         .await?;
@@ -201,7 +201,7 @@ impl AuthStore {
             return Ok(());
         }
 
-        let state = sqlx::query_as::<_, SetupStateRow>(
+        let state = crate::query::query_as::<SetupStateRow>(
             "SELECT expires_at <= CURRENT_TIMESTAMP AS expired,
                     approved_at IS NOT NULL AS approved,
                     claimed_at IS NOT NULL AS claimed
@@ -225,8 +225,8 @@ impl AuthStore {
         request_token: &str,
     ) -> Result<DaemonSetupClaim, PersistenceError> {
         self.cleanup_expired_daemon_setup_requests().await?;
-        let mut transaction = self.pool.begin().await?;
-        let Some(request) = sqlx::query_as::<_, SetupRequestRow>(
+        let transaction = self.pool.begin().await?;
+        let Some(request) = crate::query::query_as::<SetupRequestRow>(
             "SELECT label, created_by, approved_at IS NOT NULL AS approved,
                     claimed_at IS NOT NULL AS claimed,
                     expires_at <= CURRENT_TIMESTAMP AS expired
@@ -235,7 +235,7 @@ impl AuthStore {
              FOR UPDATE",
         )
         .bind(hash_secret(request_token.as_bytes()))
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         else {
             return Err(PersistenceError::SetupNotFound);
@@ -257,7 +257,7 @@ impl AuthStore {
 
         let daemon_id = random_hex(16);
         let credential = random_hex(32);
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO daemon_registrations
                 (daemon_id, credential_hash, label, created_by, protocol_version)
              VALUES ($1, $2, $3, $4, '0.1')",
@@ -266,16 +266,16 @@ impl AuthStore {
         .bind(hash_secret(credential.as_bytes()))
         .bind(&request.label)
         .bind(created_by)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
-        sqlx::query(
+        crate::query::query(
             "UPDATE daemon_setup_requests
              SET claimed_at = CURRENT_TIMESTAMP, daemon_id = $2
              WHERE request_token_hash = $1",
         )
         .bind(hash_secret(request_token.as_bytes()))
         .bind(&daemon_id)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         transaction.commit().await?;
         Ok(DaemonSetupClaim::Claimed {
@@ -285,7 +285,7 @@ impl AuthStore {
     }
 
     pub async fn list_daemons(&self) -> Result<Vec<DaemonRegistration>, PersistenceError> {
-        let rows = sqlx::query_as::<_, DaemonRegistrationRow>(
+        let rows = crate::query::query_as::<DaemonRegistrationRow>(
             "SELECT daemon_id, label, created_by, created_at::text AS created_at,
                     revoked_at::text AS revoked_at,
                     last_seen_at::text AS last_seen_at,
@@ -307,7 +307,7 @@ impl AuthStore {
         &self,
         daemon_id: &str,
     ) -> Result<Option<DaemonRegistration>, PersistenceError> {
-        let row = sqlx::query_as::<_, DaemonRegistrationRow>(
+        let row = crate::query::query_as::<DaemonRegistrationRow>(
             "SELECT daemon_id, label, created_by, created_at::text AS created_at,
                     revoked_at::text AS revoked_at,
                     last_seen_at::text AS last_seen_at,
@@ -326,7 +326,7 @@ impl AuthStore {
 
     /// Invalidate connection leases left by a prior single-server process.
     pub async fn invalidate_daemon_connections(&self) -> Result<u64, PersistenceError> {
-        let updated = sqlx::query(
+        let updated = crate::query::query(
             "UPDATE daemon_registrations
              SET connected_at = NULL, connection_id = NULL
              WHERE connected_at IS NOT NULL OR connection_id IS NOT NULL",
@@ -344,15 +344,15 @@ impl AuthStore {
         capabilities: &[String],
     ) -> Result<AuthenticatedDaemon, PersistenceError> {
         let capabilities = encode_capabilities(capabilities)?;
-        let mut transaction = self.pool.begin().await?;
-        let Some(row) = sqlx::query_as::<_, DaemonCredentialRow>(
+        let transaction = self.pool.begin().await?;
+        let Some(row) = crate::query::query_as::<DaemonCredentialRow>(
             "SELECT credential_hash, revoked_at::text AS revoked_at
              FROM daemon_registrations
              WHERE daemon_id = $1
              FOR UPDATE",
         )
         .bind(daemon_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         else {
             return Err(PersistenceError::InvalidDaemonCredential);
@@ -372,7 +372,7 @@ impl AuthStore {
         }
 
         let connection_id = random_hex(16);
-        sqlx::query(
+        crate::query::query(
             "UPDATE daemon_registrations
              SET protocol_version = $2,
                  capabilities = $3,
@@ -385,7 +385,7 @@ impl AuthStore {
         .bind(protocol_version)
         .bind(capabilities)
         .bind(&connection_id)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         transaction.commit().await?;
         Ok(AuthenticatedDaemon {
@@ -399,7 +399,7 @@ impl AuthStore {
         daemon_id: &str,
         connection_id: &str,
     ) -> Result<(), PersistenceError> {
-        let updated = sqlx::query(
+        let updated = crate::query::query(
             "UPDATE daemon_registrations
              SET last_seen_at = CURRENT_TIMESTAMP
              WHERE daemon_id = $1
@@ -422,7 +422,7 @@ impl AuthStore {
         daemon_id: &str,
         connection_id: &str,
     ) -> Result<(), PersistenceError> {
-        sqlx::query(
+        crate::query::query(
             "UPDATE daemon_registrations
              SET connected_at = NULL, connection_id = NULL
              WHERE daemon_id = $1 AND connection_id = $2",
@@ -435,27 +435,27 @@ impl AuthStore {
     }
 
     pub async fn revoke_daemon(&self, daemon_id: &str) -> Result<Option<String>, PersistenceError> {
-        let mut transaction = self.pool.begin().await?;
-        let Some(row) = sqlx::query_as::<_, ConnectionIdRow>(
+        let transaction = self.pool.begin().await?;
+        let Some(row) = crate::query::query_as::<ConnectionIdRow>(
             "SELECT connection_id
              FROM daemon_registrations
              WHERE daemon_id = $1
              FOR UPDATE",
         )
         .bind(daemon_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         else {
             return Err(PersistenceError::DaemonNotFound);
         };
-        sqlx::query(
+        crate::query::query(
             "UPDATE daemon_registrations
              SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP),
                  connected_at = NULL, connection_id = NULL
              WHERE daemon_id = $1",
         )
         .bind(daemon_id)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         transaction.commit().await?;
         Ok(row.connection_id)
@@ -465,7 +465,7 @@ impl AuthStore {
         &self,
         daemon_id: &str,
     ) -> Result<Vec<DaemonSessionState>, PersistenceError> {
-        let rows = sqlx::query_as::<_, SessionReconcileRow>(
+        let rows = crate::query::query_as::<SessionReconcileRow>(
             "SELECT execution_sessions.id AS session_id,
                     execution_sessions.command_ack_through_seq,
                     execution_sessions.event_ack_through_seq,
@@ -502,7 +502,7 @@ impl AuthStore {
         &self,
         command_id: &str,
     ) -> Result<Option<PinnedCommand>, PersistenceError> {
-        let outbox = sqlx::query_as::<_, ExistingCommandRow>(
+        let outbox = crate::query::query_as::<ExistingCommandRow>(
             "SELECT command_id, session_id, daemon_id, server_command_seq, payload,
                     payload_digest, command_identity_digest, FALSE AS compacted
              FROM server_command_outbox
@@ -514,7 +514,7 @@ impl AuthStore {
         if let Some(command) = outbox {
             return command.into_pinned_command().map(Some);
         }
-        sqlx::query_as::<_, ExistingCommandRow>(
+        crate::query::query_as::<ExistingCommandRow>(
             "SELECT command_id, session_id, daemon_id, server_command_seq,
                     payload, payload_digest, command_identity_digest,
                     TRUE AS compacted
@@ -535,7 +535,12 @@ impl AuthStore {
         message_id: &str,
         content: &str,
     ) -> Result<bool, PersistenceError> {
-        let mapping: Option<(String, String)> = sqlx::query_as(
+        #[derive(FromQueryResult)]
+        struct MessageCommandMapRow {
+            command_id: String,
+            content_digest: String,
+        }
+        let mapping = crate::query::query_as::<MessageCommandMapRow>(
             "SELECT command_id, content_digest
              FROM server_message_command_map
              WHERE session_id = $1 AND message_id = $2",
@@ -544,8 +549,9 @@ impl AuthStore {
         .bind(message_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(mapping.is_some_and(|(mapped_command, digest)| {
-            mapped_command == command_id && digest == crate::payload_digest(content)
+        Ok(mapping.is_some_and(|mapping| {
+            mapping.command_id == command_id
+                && mapping.content_digest == crate::payload_digest(content)
         }))
     }
 
@@ -553,7 +559,7 @@ impl AuthStore {
         &self,
         session_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
-        let row = sqlx::query_as::<_, SessionOwnerRow>(
+        let row = crate::query::query_as::<SessionOwnerRow>(
             "SELECT daemon_id, requirement_id, repository_ids,
                     repository_context_initialized
              FROM execution_sessions WHERE id = $1",
@@ -568,7 +574,7 @@ impl AuthStore {
         &self,
         session_id: &str,
     ) -> Result<Option<String>, PersistenceError> {
-        let row = sqlx::query_as::<_, SessionRequirementRow>(
+        let row = crate::query::query_as::<SessionRequirementRow>(
             "SELECT requirement_id FROM execution_sessions WHERE id = $1",
         )
         .bind(session_id)
@@ -636,7 +642,7 @@ impl AuthStore {
         let repository_ids = repository_ids.unwrap_or(&[]);
         let mut transaction = self.pool.begin().await?;
         let mut build_payload = Some(build_payload);
-        let existing_command = if let Some(row) = sqlx::query_as::<_, ExistingCommandRow>(
+        let existing_command = if let Some(row) = crate::query::query_as::<ExistingCommandRow>(
             "SELECT command_id, session_id, daemon_id, server_command_seq, payload, payload_digest,
                     command_identity_digest, FALSE AS compacted
              FROM server_command_outbox
@@ -644,12 +650,12 @@ impl AuthStore {
              FOR UPDATE",
         )
         .bind(command_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         {
             Some(row)
         } else {
-            sqlx::query_as::<_, ExistingCommandRow>(
+            crate::query::query_as::<ExistingCommandRow>(
                 "SELECT command_id, session_id, daemon_id, server_command_seq,
                         payload, payload_digest, command_identity_digest,
                         TRUE AS compacted
@@ -658,7 +664,7 @@ impl AuthStore {
                  FOR UPDATE",
             )
             .bind(command_id)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&transaction)
             .await?
         };
         if let Some(existing_command) = existing_command {
@@ -694,7 +700,7 @@ impl AuthStore {
             transaction.commit().await?;
             return existing_command.into_pinned_command();
         }
-        let existing = sqlx::query_as::<_, SessionOwnerRow>(
+        let existing = crate::query::query_as::<SessionOwnerRow>(
             "SELECT daemon_id, requirement_id, repository_ids,
                     repository_context_initialized
              FROM execution_sessions
@@ -702,7 +708,7 @@ impl AuthStore {
              FOR UPDATE",
         )
         .bind(session_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?;
 
         let daemon_id = if let Some(existing) = existing {
@@ -716,14 +722,14 @@ impl AuthStore {
             }
             if repository_context_initialized && !existing.repository_context_initialized {
                 validate_active_repository_ids(&mut transaction, repository_ids).await?;
-                sqlx::query(
+                crate::query::query(
                     "UPDATE execution_sessions
                      SET repository_ids = $2, repository_context_initialized = TRUE
                      WHERE id = $1",
                 )
                 .bind(session_id)
-                .bind(repository_ids)
-                .execute(&mut *transaction)
+                .bind(repository_ids.to_vec())
+                .execute(&transaction)
                 .await?;
             } else if repository_context_initialized
                 && existing.repository_context_initialized
@@ -736,14 +742,14 @@ impl AuthStore {
             if let Some(requirement_id) =
                 requirement_id.filter(|_| existing.requirement_id.is_none())
             {
-                sqlx::query(
+                crate::query::query(
                     "UPDATE execution_sessions
                      SET requirement_id = $2
                      WHERE id = $1",
                 )
                 .bind(session_id)
                 .bind(requirement_id)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
             }
             if let Some(daemon_id) = existing.daemon_id {
@@ -751,17 +757,17 @@ impl AuthStore {
             } else {
                 let daemon_id =
                     choose_eligible_daemon(&mut transaction, required_capabilities).await?;
-                sqlx::query("UPDATE execution_sessions SET daemon_id = $2 WHERE id = $1")
+                crate::query::query("UPDATE execution_sessions SET daemon_id = $2 WHERE id = $1")
                     .bind(session_id)
                     .bind(&daemon_id)
-                    .execute(&mut *transaction)
+                    .execute(&transaction)
                     .await?;
                 daemon_id
             }
         } else {
             validate_active_repository_ids(&mut transaction, repository_ids).await?;
             let daemon_id = choose_eligible_daemon(&mut transaction, required_capabilities).await?;
-            sqlx::query(
+            crate::query::query(
                 "INSERT INTO execution_sessions
                     (id, daemon_id, requirement_id, repository_ids,
                      repository_context_initialized)
@@ -770,14 +776,14 @@ impl AuthStore {
             .bind(session_id)
             .bind(&daemon_id)
             .bind(requirement_id)
-            .bind(repository_ids)
+            .bind(repository_ids.to_vec())
             .bind(repository_context_initialized)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
             daemon_id
         };
 
-        let next_sequence: i64 = sqlx::query_scalar(
+        let next_sequence: i64 = crate::query::query_scalar(
             "SELECT GREATEST(
                     COALESCE((SELECT MAX(server_command_seq)
                              FROM server_command_outbox WHERE session_id = $1), 0),
@@ -787,7 +793,7 @@ impl AuthStore {
                  ) + 1",
         )
         .bind(session_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
         let server_command_seq =
             u64::try_from(next_sequence).map_err(|_| PersistenceError::InvalidSessionState)?;
@@ -798,7 +804,7 @@ impl AuthStore {
         let payload_digest = crate::payload_digest(&payload);
         let command_identity_digest = crate::command_identity_digest(&payload);
         if let Some((message_id, content_digest)) = message_identity(&payload) {
-            let inserted = sqlx::query(
+            let inserted = crate::query::query(
                 "INSERT INTO server_message_command_map
                     (session_id, message_id, command_id, content_digest)
                  VALUES ($1, $2, $3, $4)
@@ -808,10 +814,15 @@ impl AuthStore {
             .bind(&message_id)
             .bind(command_id)
             .bind(&content_digest)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
             if inserted.rows_affected() == 0 {
-                let existing: (String, String) = sqlx::query_as(
+                #[derive(FromQueryResult)]
+                struct ExistingMessageCommandRow {
+                    command_id: String,
+                    content_digest: String,
+                }
+                let existing = crate::query::query_as::<ExistingMessageCommandRow>(
                     "SELECT command_id, content_digest
                      FROM server_message_command_map
                      WHERE session_id = $1 AND message_id = $2
@@ -819,16 +830,16 @@ impl AuthStore {
                 )
                 .bind(session_id)
                 .bind(&message_id)
-                .fetch_one(&mut *transaction)
+                .fetch_one(&transaction)
                 .await?;
-                if existing.0 != command_id || existing.1 != content_digest {
+                if existing.command_id != command_id || existing.content_digest != content_digest {
                     return Err(PersistenceError::ProtocolIntegrity(
                         "message ID is already bound to another command".into(),
                     ));
                 }
             }
         }
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO server_command_outbox
                 (command_id, session_id, daemon_id, server_command_seq, payload,
                  payload_digest, command_identity_digest)
@@ -841,7 +852,7 @@ impl AuthStore {
         .bind(&payload)
         .bind(&payload_digest)
         .bind(&command_identity_digest)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         transaction.commit().await?;
         Ok(PinnedCommand {
@@ -871,18 +882,18 @@ fn message_identity(payload: &str) -> Option<(String, String)> {
 }
 
 async fn validate_active_repository_ids(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    transaction: &mut DatabaseTransaction,
     repository_ids: &[String],
 ) -> Result<(), PersistenceError> {
     for repository_id in repository_ids {
-        let exists: bool = sqlx::query_scalar(
+        let exists: bool = crate::query::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM repositories
                  WHERE id = $1 AND disabled_at IS NULL
              )",
         )
         .bind(repository_id)
-        .fetch_one(&mut **transaction)
+        .fetch_one(&*transaction)
         .await?;
         if !exists {
             return Err(PersistenceError::RepositoryNotFound);
@@ -892,10 +903,10 @@ async fn validate_active_repository_ids(
 }
 
 async fn choose_eligible_daemon(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    transaction: &mut DatabaseTransaction,
     required_capabilities: &[String],
 ) -> Result<String, PersistenceError> {
-    let candidates = sqlx::query_as::<_, DaemonCandidateRow>(
+    let candidates = crate::query::query_as::<DaemonCandidateRow>(
         "SELECT daemon_id, capabilities
          FROM daemon_registrations
          WHERE revoked_at IS NULL
@@ -905,7 +916,7 @@ async fn choose_eligible_daemon(
          ORDER BY daemon_id ASC
          FOR UPDATE",
     )
-    .fetch_all(&mut **transaction)
+    .fetch_all(&*transaction)
     .await?;
     candidates
         .into_iter()
@@ -927,7 +938,7 @@ fn decode_capabilities(value: &str) -> Result<Vec<String>, PersistenceError> {
     serde_json::from_str(value).map_err(|_| PersistenceError::InvalidCapabilities)
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct SetupPreviewRow {
     label: String,
     expired: bool,
@@ -935,14 +946,14 @@ struct SetupPreviewRow {
     claimed: bool,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct SetupStateRow {
     expired: bool,
     approved: bool,
     claimed: bool,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct SetupRequestRow {
     label: String,
     created_by: Option<String>,
@@ -951,7 +962,7 @@ struct SetupRequestRow {
     expired: bool,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct DaemonRegistrationRow {
     daemon_id: String,
     label: String,
@@ -980,18 +991,18 @@ impl DaemonRegistrationRow {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct DaemonCredentialRow {
     credential_hash: Vec<u8>,
     revoked_at: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct ConnectionIdRow {
     connection_id: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct SessionReconcileRow {
     session_id: String,
     command_ack_through_seq: i64,
@@ -999,7 +1010,7 @@ struct SessionReconcileRow {
     event_ack_sparse: Vec<i64>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct ExistingCommandRow {
     command_id: String,
     session_id: String,
@@ -1036,7 +1047,7 @@ impl ExistingCommandRow {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct SessionOwnerRow {
     daemon_id: Option<String>,
     requirement_id: Option<String>,
@@ -1044,12 +1055,12 @@ struct SessionOwnerRow {
     repository_context_initialized: bool,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct SessionRequirementRow {
     requirement_id: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct DaemonCandidateRow {
     daemon_id: String,
     capabilities: String,

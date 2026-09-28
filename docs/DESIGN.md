@@ -1,6 +1,6 @@
 # North — Product UI Design System
 >
-> **Source of truth:** current prototype HTML/CSS/JS as implemented (8 screens + index launcher). Documentation extraction, not redesign. Extracted 2026-09 · v0.1.0 prototype.
+> **Source of truth:** current prototype HTML/CSS/JS as implemented (8 screens + index launcher). Documentation extraction, not redesign. Extracted 2026-09 from the prototype.
 > **Scope:** foundations + core component depth. Neutral monochrome admin workflow, light/dark/system theme, Traditional Chinese UI with English domain labels.
 
 ---
@@ -30,7 +30,7 @@
 | Brand accent colour choice | **Inferred:** `#09090b` is effectively “North black” — no logo colour guideline exists; logo-mark is same token. No secondary brand hue. |
 | Illustration / empty-state photography | None in prototype; placeholders are minimal SVG + muted text. No brand illustration system defined. |
 | Tone scale beyond zh-TW | Preference selector offers EN/ja, but only zh-TW strings exist. No translation source. |
-| Sidebar “0.1.0” badge | Hardcoded version string; release versioning not formalised. |
+| Sidebar version badge | Prototype uses a static label; version metadata source is undefined. |
 
 ---
 
@@ -246,7 +246,7 @@ Never atmospheric blur — hairline + whisper.
 ```text
 ┌─────────────────┬──────────────────────────────────┐
 │ sidebar (232)   │ mobile-topbar (52, <960 only)     │
-│  logo N North 0.1.0 │ [hamburger]  N North  0.1.0       │
+│  N North [v]      │ [hamburger]  N North [v]        │
 │  Workspace       │ page-head (h1 + sub + actions)  │
 │   對話            │ toolbar (search + filters + reset)│
 │   需求  [14] ●   │ ────────────────                 │

@@ -6,6 +6,7 @@ pub mod journal;
 pub mod repository_inspection;
 pub mod runtime;
 pub mod scheduler;
+pub mod status;
 pub mod transport;
 
 pub use coordination::{

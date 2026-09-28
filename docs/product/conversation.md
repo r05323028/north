@@ -34,11 +34,11 @@ reconstructs specification truth by replaying the stream.
 
 ## Durable API boundary
 
-Migration 0004 creates exactly one conversation for each Requirement. Requester
+The 0.1.0 initial-schema baseline creates exactly one conversation for each Requirement. Requester
 messages are appended through the conversation API and reads use deterministic
 paged ordering. The structured edit route reuses `Requirement::apply_edit`; it
 never infers specification state from transcript content. Authenticated users
-share workspace-wide Requirement/conversation visibility in 0.1.0; no
+share workspace-wide Requirement/conversation visibility; no
 per-Requirement ACL is implied. Agent/system messages remain server-owned typed
 facts, not raw tool output.
 

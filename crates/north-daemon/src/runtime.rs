@@ -285,7 +285,7 @@ struct PiAssessment {
     #[serde(default)]
     verdict: Option<String>,
     #[serde(default)]
-    blockers: Vec<String>,
+    blockers: Option<Vec<String>>,
     #[serde(default)]
     assumptions: Vec<String>,
 }
@@ -1420,8 +1420,14 @@ fn facts_for_response(
             requirement_id: context.requirement_id,
             requirement_revision: context.requirement_revision,
             verdict: response.verdict,
-            blockers: non_empty_facts(response.blockers, "No blockers identified"),
-            assumptions: non_empty_facts(response.assumptions, "North context is authoritative"),
+            blockers: response.blockers.map_or_else(
+                || vec!["Pi response omitted the blockers field".into()],
+                |values| facts_or_fallback(values, None),
+            ),
+            assumptions: facts_or_fallback(
+                response.assumptions,
+                Some("North context is authoritative"),
+            ),
             repositories_reviewed: context.repositories_reviewed,
         });
     }
@@ -1437,7 +1443,7 @@ fn facts_for_response(
 struct ParsedAssessment {
     message: String,
     verdict: ReadinessVerdict,
-    blockers: Vec<String>,
+    blockers: Option<Vec<String>>,
     assumptions: Vec<String>,
 }
 
@@ -1468,7 +1474,9 @@ fn parse_assessment(text: &str) -> ParsedAssessment {
             trimmed.into()
         },
         verdict: ReadinessVerdict::NeedsClarification,
-        blockers: vec!["Pi response was not a structured readiness assessment".into()],
+        blockers: Some(vec![
+            "Pi response was not a structured readiness assessment".into(),
+        ]),
         assumptions: vec!["North server remains readiness authority".into()],
     }
 }
@@ -1481,14 +1489,14 @@ fn verdict(value: Option<&str>) -> ReadinessVerdict {
     }
 }
 
-fn non_empty_facts(values: Vec<String>, fallback: &str) -> Vec<String> {
+fn facts_or_fallback(values: Vec<String>, fallback: Option<&str>) -> Vec<String> {
     let values = values
         .into_iter()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
     if values.is_empty() {
-        vec![fallback.into()]
+        fallback.map_or_else(Vec::new, |value| vec![value.into()])
     } else {
         values
     }
@@ -1579,7 +1587,10 @@ mod tests {
     fn unstructured_pi_result_stays_needs_clarification() {
         let result = parse_assessment("not JSON");
         assert_eq!(result.verdict, ReadinessVerdict::NeedsClarification);
-        assert!(!result.blockers.is_empty());
+        assert!(result
+            .blockers
+            .as_ref()
+            .is_some_and(|blockers| !blockers.is_empty()));
     }
 
     #[test]
@@ -1648,7 +1659,7 @@ mod tests {
         fs::write(
             &command,
             r##"#!/bin/sh
-printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"{\"message\":\"Need scope\",\"verdict\":\"ready\",\"blockers\":[\"scope\"],\"assumptions\":[\"context\"]}"}}'
+printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"{\"message\":\"Need scope\",\"verdict\":\"ready\",\"blockers\":[],\"assumptions\":[]}"}}'
 "##,
         )?;
         let mut permissions = fs::metadata(&command)?.permissions();
@@ -1702,6 +1713,50 @@ printf '%s\n' '{"type":"message_update","assistantMessageEvent":{"type":"text_de
         assert!(matches!(events[3], Event::RequirementAssessed(_)));
         assert!(matches!(events[4], Event::SessionCompleted(_)));
         assert_eq!(events.len(), 5);
+        let Event::RequirementAssessed(assessment) = &events[3] else {
+            panic!("expected assessment event");
+        };
+        assert!(assessment.blockers.is_empty());
+        assert_eq!(
+            assessment.assumptions,
+            vec!["North context is authoritative".to_owned()]
+        );
+
+        let context = AssessmentContext {
+            requirement_id: "requirement-1".into(),
+            requirement_revision: 1,
+            repositories_reviewed: Vec::new(),
+            evidence: Vec::new(),
+            context: None,
+            in_flight: false,
+        };
+        let emitted_blockers = |text: &str| {
+            facts_for_response(
+                "blocker-test",
+                "runtime-1".into(),
+                parse_assessment(text),
+                Some(context.clone()),
+                false,
+                false,
+            )
+            .into_iter()
+            .find_map(|fact| match fact {
+                RuntimeFact::Assessed { blockers, .. } => Some(blockers),
+                _ => None,
+            })
+            .expect("assessment fact")
+        };
+        assert!(
+            emitted_blockers(r#"{"message":"Ready","verdict":"ready","blockers":[]}"#).is_empty()
+        );
+        assert_eq!(
+            emitted_blockers(r#"{"message":"Blocked","verdict":"ready","blockers":["scope"]}"#),
+            vec!["scope".to_owned()]
+        );
+        assert_eq!(
+            emitted_blockers(r#"{"message":"Ready","verdict":"ready"}"#),
+            vec!["Pi response omitted the blockers field".to_owned()]
+        );
 
         Ok(())
     }

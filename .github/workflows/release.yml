@@ -1,0 +1,801 @@
+---
+name: Release
+
+# yamllint disable rule:truthy
+on:
+# yamllint enable rule:truthy
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full SHA on protected main; qualify only, do not publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    release-${{ github.ref_type == 'tag' && github.ref ||
+    inputs.source_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  ci-qualification:
+    name: CI qualification
+    outputs:
+      initial_release: ${{ steps.validate_release_tag.outputs.initial_release }}
+    if: >-
+      github.event_name != 'push' || github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: north
+          POSTGRES_PASSWORD: north
+          POSTGRES_DB: north
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U north -d north"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Validate release tag before build
+        id: validate_release_tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: ./scripts/validate-release-tag.sh "$GITHUB_REF_NAME"
+      - run: npm ci
+        working-directory: apps/web
+      - name: Verify immutable checkout
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git merge-base --is-ancestor "$EXPECTED_SHA" origin/main
+      - name: Run merge validation
+        env:
+          NORTH_TEST_DATABASE_URL: postgres://north:north@127.0.0.1:5432/north
+        run: ./scripts/validate.sh fast
+
+  build-package:
+    name: Build and package
+    if: >-
+      github.event_name != 'push' || github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v')
+    needs: ci-qualification
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.upload-release.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload-release.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/web
+      - name: Verify immutable checkout
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git merge-base --is-ancestor "$EXPECTED_SHA" origin/main
+      - name: Build one release package
+        env:
+          NORTH_RELEASE_SOURCE_SHA: ${{ inputs.source_sha || github.sha }}
+          NORTH_RELEASE_OUTPUT_DIR: ${{ runner.temp }}/north-release/package
+        run: ./scripts/release.sh package
+      - name: Build OCI images from release package
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha || github.sha }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE_DIR: ${{ runner.temp }}/north-release/package
+          OCI_DIR: ${{ runner.temp }}/north-release/oci
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version "$PACKAGE_DIR/manifest.json")
+          version_changed=$(jq -r .version_changed "$PACKAGE_DIR/manifest.json")
+          [[ "$version_changed" == true || "$version_changed" == false ]]
+          version_ref="v$version"
+          sha_tag="sha-$EXPECTED_SHA"
+          owner="${OWNER,,}"
+          server_image="ghcr.io/${owner}/north-server:${sha_tag}"
+          web_image="ghcr.io/${owner}/north-web:${sha_tag}"
+          server_archive="$OCI_DIR/north-server.oci.tar"
+          web_archive="$OCI_DIR/north-web.oci.tar"
+          server_output="type=oci,dest=$server_archive,name=$server_image"
+          web_output="type=oci,dest=$web_archive,name=$web_image"
+          mkdir -p "$OCI_DIR"
+          builder_args=(
+            --name "north-release-${GITHUB_RUN_ID}"
+            --driver docker-container
+            --use
+          )
+          docker buildx create "${builder_args[@]}"
+          docker buildx inspect --bootstrap
+          common_args=(
+            --platform linux/amd64
+            --build-arg "VERSION=$version"
+            --build-arg "SOURCE_COMMIT=$EXPECTED_SHA"
+            --build-arg "SOURCE_URL=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          )
+          server_args=(
+            "${common_args[@]}"
+            --file "$GITHUB_WORKSPACE/Dockerfile.server"
+            --output "$server_output"
+          )
+          docker buildx build "${server_args[@]}" "$PACKAGE_DIR"
+          web_args=(
+            "${common_args[@]}"
+            --file "$GITHUB_WORKSPACE/apps/web/Dockerfile"
+            --output "$web_output"
+          )
+          docker buildx build "${web_args[@]}" "$PACKAGE_DIR/web"
+
+          manifest_digest() {
+            local archive=$1 index digest blob_path actual
+            index=$(tar -xOf "$archive" index.json)
+            digest=$(node -e '
+              const index = JSON.parse(process.argv[1]);
+              if (!Array.isArray(index.manifests) ||
+                  index.manifests.length !== 1) process.exit(1);
+              process.stdout.write(index.manifests[0].digest);
+            ' "$index")
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            blob_path=$(printf '%s' "$digest" | tr ':' '/')
+            blob_path="blobs/$blob_path"
+            actual=$(
+              tar -xOf "$archive" "$blob_path" |
+                sha256sum |
+                awk '{print "sha256:" $1}'
+            )
+            [[ "$actual" == "$digest" ]]
+            printf '%s' "$digest"
+          }
+          server_digest=$(manifest_digest "$server_archive")
+          web_digest=$(manifest_digest "$web_archive")
+          server_sha=$(sha256sum "$server_archive" | awk '{print $1}')
+          web_sha=$(sha256sum "$web_archive" | awk '{print $1}')
+          metadata_args=(
+            "$OCI_DIR/images.json"
+            "$version"
+            "$EXPECTED_SHA"
+            "$version_changed"
+            "$sha_tag"
+            "$server_image"
+            "$server_digest"
+            "$server_sha"
+            "$web_image"
+            "$web_digest"
+            "$web_sha"
+          )
+          node - "${metadata_args[@]}" <<'NODE'
+          const fs = require("node:fs");
+          const [
+            path, version, sourceCommit, versionChanged, shaTag,
+            serverImage, serverDigest, serverSha, webImage, webDigest, webSha,
+          ] = process.argv.slice(2);
+          fs.writeFileSync(path, JSON.stringify({
+            version,
+            version_changed: versionChanged === "true",
+            sha_tag: shaTag,
+            source_commit: sourceCommit,
+            target: "linux/amd64",
+            images: [
+              {
+                service: "north-server",
+                image: serverImage,
+                archive: "north-server.oci.tar",
+                manifest_digest: serverDigest,
+                archive_sha256: serverSha,
+              },
+              {
+                service: "north-web",
+                image: webImage,
+                archive: "north-web.oci.tar",
+                manifest_digest: webDigest,
+                archive_sha256: webSha,
+              },
+            ],
+          }, null, 2) + String.fromCharCode(10));
+          NODE
+          (
+            cd "$OCI_DIR"
+            sha256sum north-server.oci.tar > checksums.sha256
+            sha256sum north-web.oci.tar >> checksums.sha256
+          )
+          verify_args=(
+            "$OCI_DIR"
+            "$EXPECTED_SHA"
+            "$version_ref"
+            "$version_changed"
+            "$OWNER"
+          )
+          node scripts/verify-release-images.mjs "${verify_args[@]}"
+          mkdir -p "$RUNNER_TEMP/north-release/scripts"
+          cp \
+            scripts/release.sh \
+            scripts/validate-release-tag.sh \
+            scripts/verify-cli-archive.mjs \
+            scripts/publish-cli-release.sh \
+            "$RUNNER_TEMP/north-release/scripts/"
+          cp \
+            scripts/verify-release-artifact.mjs \
+            scripts/verify-release-images.mjs \
+            scripts/publish-release-images.sh \
+            "$RUNNER_TEMP/north-release/scripts/"
+      - id: upload-release
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: north-release-${{ inputs.source_sha || github.sha }}
+          path: |
+            ${{ runner.temp }}/north-release/
+            !${{ runner.temp }}/north-release/**/.env*
+            !${{ runner.temp }}/north-release/**/*.pem
+            !${{ runner.temp }}/north-release/**/*.key
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record internal workflow artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.upload-release.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload-release.outputs.artifact-digest }}
+          EXPECTED_SHA: ${{ inputs.source_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          artifact_digest="${ARTIFACT_DIGEST#sha256:}"
+          [[ "$artifact_digest" =~ ^[0-9a-f]{64}$ ]]
+          manifest="$RUNNER_TEMP/north-release/package/manifest.json"
+          version=$(jq -r .version "$manifest")
+          {
+            printf '## Internal release artifact\n\n'
+            printf -- '- Version: %s\n' "$version"
+            printf -- '- Source commit: %s\n' "$EXPECTED_SHA"
+            printf -- '- OCI ref (internal, not pushed): sha-%s\n' \\
+              "$EXPECTED_SHA"
+            printf -- '- SemVer: publish only on strict tag v%s\n' \
+              "$version"
+            printf -- '- Actions artifact ID: %s\n' "$ARTIFACT_ID"
+            printf -- '- Actions artifact SHA-256: %s\n' "$artifact_digest"
+            printf -- '- Retention: 14 days\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-cli-archives:
+    name: Build native CLI (${{ matrix.target }})
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: ci-qualification
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Install Rust target
+        run: rustup target add "${{ matrix.target }}"
+      - name: Build and native-smoke CLI pair
+        env:
+          NORTH_RELEASE_SOURCE_SHA: ${{ github.sha }}
+          NORTH_CLI_OUTPUT_DIR: ${{ runner.temp }}/north-cli
+        run: ./scripts/release.sh cli-package "${{ matrix.target }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: north-cli-${{ github.sha }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/north-cli/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-cli-archives:
+    name: Verify tag CLI archives
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build-package, build-cli-archives]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build-package.outputs.artifact_id }}
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: north-cli-${{ github.sha }}-*
+          path: cli-assets
+          merge-multiple: true
+      - name: Verify all native-built CLI archives
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          version=$(
+            node -p "require('./release/package/manifest.json').version"
+          )
+          [[ "$version" == "${GITHUB_REF_NAME#v}" ]]
+          archives=(cli-assets/*.tar.gz)
+          [[ ${#archives[@]} -eq 3 ]]
+          targets=(
+            x86_64-unknown-linux-gnu
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+          )
+          for target in "${targets[@]}"; do
+            archive="cli-assets/north-cli-v${version}-${target}.tar.gz"
+            verify_args=("$archive" "$EXPECTED_SHA" "$version" "$target")
+            node release/scripts/verify-cli-archive.mjs "${verify_args[@]}"
+          done
+
+  release-preflight:
+    name: Release artifact preflight
+    if: >-
+      github.event_name != 'push' || github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v')
+    needs: build-package
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Verify immutable workflow artifact ID and SHA-256
+        env:
+          ARTIFACT_ID: ${{ needs.build-package.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.build-package.outputs.artifact_digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          expected_digest="${ARTIFACT_DIGEST#sha256:}"
+          [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]]
+          artifact_endpoint="repos/$GITHUB_REPOSITORY/actions/artifacts/"
+          actual_digest=$(
+            gh api "${artifact_endpoint}${ARTIFACT_ID}" --jq '.digest'
+          )
+          actual_digest="${actual_digest#sha256:}"
+          [[ "$actual_digest" == "$expected_digest" ]]
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build-package.outputs.artifact_id }}
+          path: ${{ runner.temp }}/north-release
+      - name: Verify source and immutable artifact
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha || github.sha }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git merge-base --is-ancestor "$EXPECTED_SHA" origin/main
+          artifact_dir="$RUNNER_TEMP/north-release/package"
+          oci_dir="$RUNNER_TEMP/north-release/oci"
+          manifest="$artifact_dir/manifest.json"
+          test -f "$manifest" -a -f "$artifact_dir/checksums.sha256"
+          (cd "$artifact_dir" && shasum -a 256 -c checksums.sha256 >/dev/null)
+          version=$(jq -r .version "$manifest")
+          version_changed=$(jq -r .version_changed "$manifest")
+          [[ "$version_changed" == true || "$version_changed" == false ]]
+          version_ref="v$version"
+          artifact_args=("$artifact_dir" "$EXPECTED_SHA" "$version_ref")
+          node scripts/verify-release-artifact.mjs "${artifact_args[@]}"
+          oci_args=(
+            "$oci_dir"
+            "$EXPECTED_SHA"
+            "$version_ref"
+            "$version_changed"
+            "$OWNER"
+          )
+          node scripts/verify-release-images.mjs "${oci_args[@]}"
+          cmp scripts/verify-release-artifact.mjs \
+            "$RUNNER_TEMP/north-release/scripts/verify-release-artifact.mjs"
+          cmp scripts/verify-release-images.mjs \
+            "$RUNNER_TEMP/north-release/scripts/verify-release-images.mjs"
+          cmp scripts/publish-release-images.sh \
+            "$RUNNER_TEMP/north-release/scripts/publish-release-images.sh"
+          cmp scripts/release.sh \
+            "$RUNNER_TEMP/north-release/scripts/release.sh"
+          cmp scripts/validate-release-tag.sh \
+            "$RUNNER_TEMP/north-release/scripts/validate-release-tag.sh"
+          cmp scripts/verify-cli-archive.mjs \
+            "$RUNNER_TEMP/north-release/scripts/verify-cli-archive.mjs"
+          cmp scripts/publish-cli-release.sh \
+            "$RUNNER_TEMP/north-release/scripts/publish-cli-release.sh"
+  release-qualification:
+    name: Release qualification
+    if: >-
+      github.event_name != 'push' || github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v')
+    needs: [build-package, release-preflight]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: north
+          POSTGRES_PASSWORD: north
+          POSTGRES_DB: north
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U north -d north"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: stable
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: apps/web
+      - name: Require one uploaded artifact ID
+        env:
+          ARTIFACT_ID: ${{ needs.build-package.outputs.artifact_id }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build-package.outputs.artifact_id }}
+          path: ${{ runner.temp }}/north-release
+      - name: Verify source and artifact before TLS secrets
+        env:
+          EXPECTED_SHA: ${{ inputs.source_sha || github.sha }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git merge-base --is-ancestor "$EXPECTED_SHA" origin/main
+          artifact_dir="$RUNNER_TEMP/north-release/package"
+          oci_dir="$RUNNER_TEMP/north-release/oci"
+          manifest="$artifact_dir/manifest.json"
+          test -f "$manifest" -a -f "$artifact_dir/checksums.sha256"
+          (cd "$artifact_dir" && shasum -a 256 -c checksums.sha256 >/dev/null)
+          version=$(jq -r .version "$manifest")
+          version_changed=$(jq -r .version_changed "$manifest")
+          [[ "$version_changed" == true || "$version_changed" == false ]]
+          version_ref="v$version"
+          artifact_args=("$artifact_dir" "$EXPECTED_SHA" "$version_ref")
+          node scripts/verify-release-artifact.mjs "${artifact_args[@]}"
+          oci_args=(
+            "$oci_dir"
+            "$EXPECTED_SHA"
+            "$version_ref"
+            "$version_changed"
+            "$OWNER"
+          )
+          node scripts/verify-release-images.mjs "${oci_args[@]}"
+          cmp scripts/verify-release-artifact.mjs \
+            "$RUNNER_TEMP/north-release/scripts/verify-release-artifact.mjs"
+          cmp scripts/verify-release-images.mjs \
+            "$RUNNER_TEMP/north-release/scripts/verify-release-images.mjs"
+          cmp scripts/publish-release-images.sh \
+            "$RUNNER_TEMP/north-release/scripts/publish-release-images.sh"
+          cmp scripts/release.sh \
+            "$RUNNER_TEMP/north-release/scripts/release.sh"
+          cmp scripts/validate-release-tag.sh \
+            "$RUNNER_TEMP/north-release/scripts/validate-release-tag.sh"
+          cmp scripts/verify-cli-archive.mjs \
+            "$RUNNER_TEMP/north-release/scripts/verify-cli-archive.mjs"
+          cmp scripts/publish-cli-release.sh \
+            "$RUNNER_TEMP/north-release/scripts/publish-cli-release.sh"
+      - name: Install Skopeo and NSS trust tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes skopeo libnss3-tools
+      - name: Provision existing PKI trust in ephemeral runner
+        env:
+          RELEASE_TLS_CA_PEM: ${{ secrets.NORTH_RELEASE_TLS_CA_PEM }}
+          RELEASE_TLS_CERT_PEM: ${{ secrets.NORTH_RELEASE_TLS_CERT_PEM }}
+          RELEASE_TLS_KEY_PEM: ${{ secrets.NORTH_RELEASE_TLS_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          : "${RELEASE_TLS_CA_PEM:?Missing CA secret}"
+          : "${RELEASE_TLS_CERT_PEM:?Missing server cert secret}"
+          : "${RELEASE_TLS_KEY_PEM:?Missing server key secret}"
+          umask 077
+          install -d -m 700 "$RUNNER_TEMP/release-tls"
+          ca_file="$RUNNER_TEMP/release-tls/ca.crt"
+          cert_file="$RUNNER_TEMP/release-tls/server.crt"
+          key_file="$RUNNER_TEMP/release-tls/server.key"
+          printf '%s\n' "$RELEASE_TLS_CA_PEM" > "$ca_file"
+          printf '%s\n' "$RELEASE_TLS_CERT_PEM" > "$cert_file"
+          printf '%s\n' "$RELEASE_TLS_KEY_PEM" > "$key_file"
+          chmod 644 "$ca_file" "$cert_file"
+          chmod 600 "$key_file"
+
+          fail() { echo "$1" >&2; exit 1; }
+          ca_count=$(grep -cF "BEGIN CERTIFICATE" "$ca_file" || true)
+          [[ "$ca_count" == 1 ]] || fail "CA secret must be one PEM certificate"
+          if grep -q "PRIVATE KEY" "$ca_file"; then
+            fail "CA secret must not contain a private key"
+          fi
+          openssl x509 -in "$ca_file" -noout >/dev/null
+          ca_constraints=$(
+            openssl x509 -in "$ca_file" -noout -ext basicConstraints
+          )
+          if ! grep -q 'CA:TRUE' <<< "$ca_constraints"; then
+            fail "CA secret must be a CA certificate"
+          fi
+          openssl x509 -in "$ca_file" -checkend 86400 -noout >/dev/null
+
+          openssl x509 -in "$cert_file" -noout >/dev/null
+          openssl pkey -in "$key_file" -passin pass: -noout >/dev/null
+          openssl x509 -in "$cert_file" -checkend 86400 -noout >/dev/null
+          cert_details=$(openssl x509 -in "$cert_file" -text -noout)
+          if grep -q 'CA:TRUE' <<< "$cert_details"; then
+            fail "server certificate must not be a CA"
+          fi
+          if ! grep -q 'Digital Signature' <<< "$cert_details"; then
+            fail "server cert needs digitalSignature usage"
+          fi
+          if ! grep -q 'TLS Web Server Authentication' <<< "$cert_details"; then
+            fail "server cert needs serverAuth EKU"
+          fi
+          san=$(openssl x509 -in "$cert_file" -noout -ext subjectAltName)
+          if ! grep -q 'DNS:localhost' <<< "$san"; then
+            fail "server cert SAN needs DNS:localhost"
+          fi
+          if ! grep -q 'IP Address:127.0.0.1' <<< "$san"; then
+            fail "server cert SAN needs IP:127.0.0.1"
+          fi
+          cert_pub=$(
+            openssl x509 -in "$cert_file" -pubkey -noout |
+              openssl pkey -pubin -outform DER |
+              openssl dgst -sha256
+          )
+          key_pub=$(
+            openssl pkey -in "$key_file" -passin pass: -pubout |
+              openssl pkey -pubin -outform DER |
+              openssl dgst -sha256
+          )
+          [[ "$cert_pub" == "$key_pub" ]] || \
+            fail "server certificate and key do not match"
+          verify_cert() {
+            openssl verify -CAfile "$ca_file" \
+              -untrusted "$cert_file" -purpose sslserver \
+              "$@" "$cert_file" >/dev/null
+          }
+          verify_cert -verify_hostname localhost
+          verify_cert -verify_ip 127.0.0.1
+
+          trust_file=/usr/local/share/ca-certificates/north-release.crt
+          sudo install -m 644 "$ca_file" "$trust_file"
+          sudo update-ca-certificates
+      - name: Run extracted-artifact release qualification
+        env:
+          NORTH_TEST_DATABASE_URL: postgres://north:north@127.0.0.1:5432/north
+          NORTH_RELEASE_ARTIFACT_DIR: ${{ runner.temp }}/north-release/package
+          NORTH_RELEASE_OCI_DIR: ${{ runner.temp }}/north-release/oci
+          NORTH_RELEASE_IMAGE_OWNER: ${{ github.repository_owner }}
+          NORTH_RELEASE_TLS_DIR: ${{ runner.temp }}/release-tls
+          NORTH_RELEASE_NSS_CA_TRUST: "true"
+        run: ./scripts/validate.sh smoke
+      - name: Remove temporary PKI trust and files
+        if: always()
+        run: |
+          set -u
+          cleanup_failed=0
+          trust_file=/usr/local/share/ca-certificates/north-release.crt
+          sudo rm -f "$trust_file" || cleanup_failed=1
+          rm -rf "$RUNNER_TEMP/release-tls" || cleanup_failed=1
+          sudo update-ca-certificates || cleanup_failed=1
+          exit "$cleanup_failed"
+
+
+  create-cli-release-draft:
+    name: Upload CLI assets to draft Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build-package, release-qualification, verify-cli-archives]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build-package.outputs.artifact_id }}
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: north-cli-${{ github.sha }}-*
+          path: cli-assets
+          merge-multiple: true
+      - name: Verify exact qualified release payload
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version release/package/manifest.json)
+          [[ "$GITHUB_REF_NAME" == "v$version" ]]
+          version_changed=$(
+            jq -r .version_changed release/package/manifest.json
+          )
+          node release/scripts/verify-release-artifact.mjs \
+            release/package "$GITHUB_SHA" "v$version"
+          image_args=(
+            release/oci
+            "$GITHUB_SHA"
+            "v$version"
+            "$version_changed"
+            "$OWNER"
+          )
+          node release/scripts/verify-release-images.mjs "${image_args[@]}"
+      - name: Create draft and upload verified CLI assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash release/scripts/publish-cli-release.sh \
+            draft "$GITHUB_REF_NAME" "$GITHUB_SHA" cli-assets
+
+  publish-semver-images:
+    name: Publish tag-built SemVer OCI images
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - ci-qualification
+      - build-package
+      - release-preflight
+      - release-qualification
+      - create-cli-release-draft
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build-package.outputs.artifact_id }}
+          path: release
+      - name: Verify exact tag-qualified package and OCI archives
+        env:
+          OWNER: ${{ github.repository_owner }}
+          INITIAL_RELEASE: ${{ needs.ci-qualification.outputs.initial_release }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          version=$(jq -r .version release/package/manifest.json)
+          version_changed=$(
+            jq -r .version_changed release/package/manifest.json
+          )
+          [[ "$GITHUB_REF_NAME" == "v$version" ]]
+          [[ "$INITIAL_RELEASE" == true || "$INITIAL_RELEASE" == false ]]
+          [[ "$version_changed" == true || "$INITIAL_RELEASE" == true ]]
+          image_args=(
+            release/oci
+            "$GITHUB_SHA"
+            "v$version"
+            "$version_changed"
+            "$OWNER"
+          )
+          node release/scripts/verify-release-artifact.mjs \
+            release/package "$GITHUB_SHA" "v$version"
+          node release/scripts/verify-release-images.mjs "${image_args[@]}"
+      - name: Install Skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes skopeo
+      - name: Authenticate to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" |
+            skopeo login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+      - name: Publish exact tag-built OCI archives to SemVer refs
+        env:
+          INITIAL_RELEASE: ${{ needs.ci-qualification.outputs.initial_release }}
+        run: |
+          bash release/scripts/publish-release-images.sh \
+            release/oci \
+            "$GITHUB_REPOSITORY_OWNER" \
+            "$GITHUB_REF_NAME" \
+            "$INITIAL_RELEASE"
+
+  finalize-cli-release:
+    name: Publish GitHub Release after OCI success
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [build-package, verify-cli-archives, publish-semver-images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: >- # zizmor: ignore[cache-poisoning] no cache input
+          actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ needs.build-package.outputs.artifact_id }}
+          path: release
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: north-cli-${{ github.sha }}-*
+          path: cli-assets
+          merge-multiple: true
+      - name: Publish verified draft Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash release/scripts/publish-cli-release.sh \
+            finalize "$GITHUB_REF_NAME" "$GITHUB_SHA" cli-assets

@@ -40,17 +40,9 @@ pub use roles::{
     RoleHttpError,
 };
 
-/// Run schema migrations as part of server startup.
-pub async fn run_migrations(
-    pool: &north_persistence::DatabasePool,
-) -> Result<(), north_persistence::MigrationError> {
-    north_persistence::run_migrations(pool).await
-}
-
 #[derive(Debug)]
 pub enum BuildAppError {
     Configuration(north_persistence::OtpKeyError),
-    Migration(north_persistence::MigrationError),
     Startup(north_persistence::PersistenceError),
 }
 
@@ -58,7 +50,6 @@ impl fmt::Display for BuildAppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Configuration(error) => write!(f, "load OTP HMAC key: {error}"),
-            Self::Migration(error) => write!(f, "run migrations: {error}"),
             Self::Startup(error) => write!(f, "initialize server state: {error}"),
         }
     }
@@ -68,7 +59,6 @@ impl Error for BuildAppError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Configuration(error) => Some(error),
-            Self::Migration(error) => Some(error),
             Self::Startup(error) => Some(error),
         }
     }
@@ -85,7 +75,7 @@ fn load_otp_key() -> Result<north_persistence::OtpKey, BuildAppError> {
 /// routes require that `ConnectInfo<SocketAddr>` extension to resolve the
 /// immediate peer safely.
 pub async fn build_app(
-    pool: north_persistence::DatabasePool,
+    pool: north_persistence::DatabaseConnection,
     delivery: std::sync::Arc<dyn CodeDelivery>,
 ) -> Result<axum::Router, BuildAppError> {
     build_app_with_retention(
@@ -96,13 +86,13 @@ pub async fn build_app(
     .await
 }
 
-/// Build authenticated HTTP routes only after migrations and lease reset succeed.
+/// Build authenticated HTTP routes and reset runtime leases.
 ///
 /// Retention settings apply prospectively: already-persisted activity rows keep
 /// the expiry computed when they were written, while the window drives future
 /// inserts and the cadence and batch bound drive future sweeps.
 pub async fn build_app_with_retention(
-    pool: north_persistence::DatabasePool,
+    pool: north_persistence::DatabaseConnection,
     delivery: std::sync::Arc<dyn CodeDelivery>,
     retention: north_persistence::RetentionConfig,
 ) -> Result<axum::Router, BuildAppError> {
@@ -120,7 +110,7 @@ pub async fn build_app_with_retention(
 /// The returned router must be served with Axum `ConnectInfo<SocketAddr>`
 /// support, as documented on [`build_app`].
 pub async fn build_app_with_public_endpoint_config(
-    pool: north_persistence::DatabasePool,
+    pool: north_persistence::DatabaseConnection,
     delivery: std::sync::Arc<dyn CodeDelivery>,
     config: public_abuse::PublicEndpointConfig,
 ) -> Result<axum::Router, BuildAppError> {
@@ -135,15 +125,12 @@ pub async fn build_app_with_public_endpoint_config(
 
 /// Build the HTTP routes with explicit retention and public endpoint settings.
 pub async fn build_app_with_retention_and_public_endpoint_config(
-    pool: north_persistence::DatabasePool,
+    pool: north_persistence::DatabaseConnection,
     delivery: std::sync::Arc<dyn CodeDelivery>,
     retention: north_persistence::RetentionConfig,
     config: public_abuse::PublicEndpointConfig,
 ) -> Result<axum::Router, BuildAppError> {
     let otp_key = load_otp_key()?;
-    run_migrations(&pool)
-        .await
-        .map_err(BuildAppError::Migration)?;
     let store = north_persistence::AuthStore::with_retention(pool, otp_key, retention);
     store
         .invalidate_daemon_connections()

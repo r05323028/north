@@ -4,7 +4,7 @@ use axum::{
     Extension, Router,
 };
 use north_domain::role::Role;
-use north_persistence::{AuthStore, PoolOptions, RequirementTransition};
+use north_persistence::{AuthStore, RequirementTransition};
 use north_protocol::{ReadinessVerdictWire, RequirementAssessed, ReviewedRepositoryWire};
 use north_server::{
     assessment::process_requirement_assessed, repositories, AuthState, CurrentUser,
@@ -15,6 +15,7 @@ use tower::ServiceExt;
 
 #[allow(dead_code)]
 mod support;
+use support::TestDatabaseOptions;
 
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
@@ -24,7 +25,7 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-fn app(pool: north_persistence::PgPool, id: &str, role: Role) -> Router {
+fn app(pool: north_persistence::DatabaseConnection, id: &str, role: Role) -> Router {
     repositories::router()
         .with_state(AuthState::with_log_delivery(AuthStore::new(
             pool,
@@ -64,7 +65,7 @@ async fn json_body(response: axum::response::Response) -> Value {
 async fn repository_management_preserves_identity_and_lifecycle() {
     let database_url = std::env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for repository integration tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -234,7 +235,7 @@ async fn repository_management_preserves_identity_and_lifecycle() {
 async fn repository_citations_require_identity_but_survive_disable() {
     let database_url = std::env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for repository integration tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -243,7 +244,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
         .await
         .expect("run migrations");
     let user_id = unique("citation-user");
-    sqlx::query("INSERT INTO users (id, email, role) VALUES ($1, $2, 'Requester')")
+    support::query("INSERT INTO users (id, email, role) VALUES ($1, $2, 'Requester')")
         .bind(&user_id)
         .bind(format!("{user_id}@example.com"))
         .execute(&pool)
@@ -287,7 +288,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
         .await
         .expect("add criteria");
     let unknown_session = unique("unknown-citation-session");
-    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+    support::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
         .bind(&unknown_session)
         .bind(&requirement.id)
         .execute(&pool)
@@ -339,7 +340,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
     assert_eq!(unknown.reason.as_deref(), Some("unknown_repository"));
 
     let outside_session = unique("outside-citation-session");
-    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+    support::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
         .bind(&outside_session)
         .bind(&requirement.id)
         .execute(&pool)
@@ -368,7 +369,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
     assert_eq!(outside.reason.as_deref(), Some("unknown_repository"));
 
     let valid_session = unique("valid-citation-session");
-    sqlx::query(
+    support::query(
         "INSERT INTO execution_sessions (id, requirement_id, repository_ids)
          VALUES ($1, $2, $3)",
     )
@@ -408,7 +409,7 @@ async fn repository_citations_require_identity_but_survive_disable() {
     .await
     .expect("valid citation after disable");
     assert_eq!(valid.status, north_protocol::EventAckStatus::Accepted);
-    let historical: (String, String) = sqlx::query_as(
+    let historical: (String, String) = support::query_tuple(
         "SELECT repositories_reviewed->0->>\'repository_id\', repositories_reviewed->0->>\'commit_sha\'\n         FROM readiness_assessments WHERE session_id = $1",
     )
     .bind(&valid_session)

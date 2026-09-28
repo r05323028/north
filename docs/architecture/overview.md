@@ -14,6 +14,15 @@
 - Browser talks **only** to server over HTTP and SSE. SSE is notification; after
   connect/reconnect UI refetches canonical API state.
 - Daemon always initiates persistent WebSocket connection.
+- Release artifacts target Linux x86_64/glibc and package server/daemon
+  binaries, standalone Next.js output, migrations, docs, manifest, and checksums.
+  The protected-main workflow builds and qualifies OCI once, retaining archives
+  internally without GHCR publication. A strict `vX.Y.Z` Git-tag push builds
+  fresh images and publishes only SemVer refs; the GitHub Release becomes
+  public only after both images succeed. Compose
+  runs PostgreSQL, server, and web; the operator owns the TLS proxy, and daemon
+  remains host-managed. Remote qualification/publication still requires owner-run
+  workflow evidence.
 
 - The requester Requirement workspace loads Requirement, durable conversation,
   readiness, coarse activity, latest clarification run, and `/auth/me` through
@@ -58,6 +67,11 @@
 The daemon's local transport journal is not North business state and is not
 server database access. It records enough command/event delivery state to make
 reconnects idempotent.
+
+The bundled `north` CLI wraps the existing HTTPS enrollment flow and supervises
+its sibling daemon through an owner-only local control socket. It manages local
+process lifecycle only; the daemon remains the sole outbound server connection,
+and the CLI owns no Requirement or other server business state.
 
 ## Repository validation
 

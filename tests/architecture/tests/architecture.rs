@@ -486,7 +486,14 @@ impl<'ast> Visit<'ast> for DeletionVisitor<'_> {
                 .last()
                 .map(|segment| segment.ident.to_string())
                 .is_some_and(|ident| QUERY_CALLS.contains(&ident.as_str()));
-            if query_call {
+            let adapter_forward = self.relative == "crates/north-persistence/src/query.rs"
+                && path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "query")
+                && matches!(call.args.first(), Some(syn::Expr::Path(argument)) if argument.path.is_ident("sql"));
+            if query_call && !adapter_forward {
                 match call.args.first() {
                     Some(syn::Expr::Lit(expr_lit)) => match &expr_lit.lit {
                         syn::Lit::Str(value) => self.classify_literal(&value.value()),
@@ -680,6 +687,22 @@ fn deletion_scanner_requires_static_classified_literals() {
         "variable-held SQL must be rejected"
     );
 
+    let adapter_forward = "fn query_as(sql: String) { query(sql); }";
+    assert!(deletion_violations(
+        "crates/north-persistence/src/query.rs",
+        adapter_forward,
+        &allowed
+    )
+    .is_empty());
+    let dynamic_adapter_call =
+        "fn query_as(sql: String) { query(format!(\"DELETE FROM {sql}\")); }";
+    assert!(!deletion_violations(
+        "crates/north-persistence/src/query.rs",
+        dynamic_adapter_call,
+        &allowed
+    )
+    .is_empty());
+
     // Unclassified durable table.
     let wrong_table = deletion_violations(
         "crates/x/retention.rs",
@@ -852,31 +875,18 @@ fn daemon_does_not_own_business_retry_policy() {
     );
 }
 
-fn collect_sql_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_sql_sources(&path, out);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("sql") {
-            out.push(path);
-        }
-    }
-}
-
 #[test]
 fn repository_schema_never_stores_credentials() {
-    // Skip until repository migrations exist. Once they do, inspect only table
-    // definitions whose name contains repository; daemon credential tables are
-    // intentionally outside this rule.
-    let migrations = repo_root().join("migrations");
-    if !migrations.exists() {
-        return;
-    }
-    let mut sources = Vec::new();
-    collect_sql_sources(&migrations, &mut sources);
+    let entities = fs::read_to_string(repo_root().join("crates/north-persistence/src/entities.rs"))
+        .expect("read persistence entities");
+    let repository_entity = entities
+        .split("entity!(repositories,")
+        .nth(1)
+        .expect("repository entity is defined")
+        .split("});")
+        .next()
+        .expect("repository entity is terminated")
+        .to_ascii_lowercase();
     const FORBIDDEN_FIELDS: &[&str] = &[
         "token",
         "access_token",
@@ -887,39 +897,19 @@ fn repository_schema_never_stores_credentials() {
         "private_key",
         "ssh_key",
     ];
-    let mut in_repository_table = false;
-    let mut violations = Vec::new();
-    for path in sources {
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in text.lines() {
-            let lower = line.to_ascii_lowercase();
-            if lower.contains("create table") && lower.contains("repository") {
-                in_repository_table = true;
-            }
-            if in_repository_table {
-                let field = line
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .trim_matches(|c| matches!(c, '"' | '`' | ','));
-                if FORBIDDEN_FIELDS.contains(&field) {
-                    violations.push(format!(
-                        "{} contains repository credential field `{field}`",
-                        path.display()
-                    ));
-                }
-                if lower.contains(");") {
-                    in_repository_table = false;
-                }
-            }
-        }
-    }
+    let violations: Vec<_> = FORBIDDEN_FIELDS
+        .iter()
+        .filter_map(|forbidden| {
+            let forbidden = *forbidden;
+            repository_entity
+                .contains(forbidden)
+                .then(|| forbidden.to_owned())
+        })
+        .collect();
     assert!(
         violations.is_empty(),
-        "repository configuration must never store Git credentials:\n{}",
-        violations.join("\n")
+        "repository configuration must never store Git credentials: {}",
+        violations.join(", ")
     );
 }
 
@@ -1142,6 +1132,44 @@ fn pr_agent_workflow_preserves_security_boundary() {
         !ci.contains("pr-agent") && !ci.contains("pr_agent"),
         "PR-Agent must stay advisory and out of the merge gate"
     );
+}
+
+#[test]
+fn server_binary_reuses_library_startup_boundary() {
+    let source = fs::read_to_string(repo_root().join("crates/north-server/src/main.rs"))
+        .expect("read north-server binary");
+
+    for required in [
+        "north_server::build_app",
+        "into_make_service_with_connect_info",
+        ".route(\"/healthz\"",
+    ] {
+        assert!(
+            source.contains(required),
+            "server binary is missing required startup boundary `{required}`"
+        );
+    }
+    let migration_command = source
+        .split("async fn run_migration_command()")
+        .nth(1)
+        .and_then(|body| body.split("async fn connect_database").next())
+        .expect("explicit migration command is present");
+    assert!(migration_command.contains("north_persistence::run_migrations("));
+
+    let startup = source
+        .split("async fn run()")
+        .nth(1)
+        .and_then(|body| body.split("async fn healthz()").next())
+        .expect("normal server startup is present");
+    assert!(startup.contains("north_persistence::verify_migrations("));
+    assert!(!startup.contains("run_migrations("));
+
+    for forbidden in ["auth_router(", "sqlx::query"] {
+        assert!(
+            !source.contains(forbidden),
+            "server binary must not duplicate business setup `{forbidden}`"
+        );
+    }
 }
 
 fn read_pr_agent_workflow() -> String {

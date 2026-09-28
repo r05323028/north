@@ -22,5 +22,9 @@ coverage/
 apps/web/coverage/
 apps/web/playwright-report/
 apps/web/test-results/
+
+# Astro documentation site
+/web/.astro/
+/web/dist/
 rust-lcov.info
 lcov.info

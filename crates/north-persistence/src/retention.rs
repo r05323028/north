@@ -144,7 +144,7 @@ impl AuthStore {
     /// statement is bounded by the configured batch size. This is the only
     /// deletion primitive in the persistence surface.
     pub async fn purge_expired_clarification_activities(&self) -> Result<u64, PersistenceError> {
-        let deleted = sqlx::query(
+        let deleted = crate::query::query(
             "WITH expired AS (
                  SELECT id
                  FROM clarification_activities
@@ -169,7 +169,7 @@ impl AuthStore {
     /// exact unbounded COUNT(*) over a large expired backlog. Exact backlog
     /// size is deliberately an observability concern, not retention progress.
     pub async fn expired_activity_remains(&self) -> Result<bool, PersistenceError> {
-        let row: Option<i32> = sqlx::query_scalar(
+        let row: Option<i32> = crate::query::query_scalar(
             "SELECT 1
              FROM clarification_activities
              WHERE expires_at <= CURRENT_TIMESTAMP

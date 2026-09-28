@@ -31,6 +31,7 @@ web_unit() {
 
 web_full() {
   (cd apps/web && npm run lint && npm run typecheck && npm run check:repository-settings && npm run build)
+  (cd web && npm run build)
 }
 
 web_e2e() {
@@ -59,7 +60,7 @@ database_integration() {
   cargo test -p north-server --test public_endpoint_abuse -- --ignored
   cargo test -p north-server --test retry_authority -- --ignored
   cargo test -p north-server --test retention -- --ignored
-  cargo test -p north-server --test migration_upgrade -- --ignored
+  cargo test -p north-server --test fresh_install -- --ignored
   cargo test -p north-server --test repositories -- --ignored
   cargo test -p north-server --test protocol_delivery -- --ignored
   cargo test -p north-transport-integration --test websocket
@@ -68,6 +69,15 @@ database_integration() {
 case "$PROFILE" in
 fast)
   rust_fast
+  node --test \
+    tests/release/verify-release-artifact.test.mjs \
+    tests/release/verify-release-images.test.mjs \
+    tests/release/publish-release-images.test.mjs \
+    tests/release/validate-release-tag.test.mjs \
+    tests/release/verify-cli-archive.test.mjs \
+    tests/release/publish-cli-release.test.mjs \
+    tests/release/release-workflow.test.mjs \
+    tests/release/validate-smoke.test.mjs
   web_lint_tc
   openspec validate --all --strict
   ;;
@@ -94,8 +104,12 @@ e2e)
   web_e2e
   ;;
 smoke)
-  # Start-and-serve probes (server boots, migrations apply, health responds).
-  unsupported
+  # Extracted-artifact release qualification; never fall back to workspace builds.
+  if [[ -z "${NORTH_RELEASE_ARTIFACT_DIR:-}" ]]; then
+    printf 'validate.sh: smoke requires NORTH_RELEASE_ARTIFACT_DIR.\n' >&2
+    exit 2
+  fi
+  ./scripts/release.sh qualify
   ;;
 ci)
   # Complete merge gate mirror: full workspace and database tests plus build.

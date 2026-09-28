@@ -4,19 +4,23 @@
 //! row must leave every canonical product and coordination projection
 //! identical, and replaying a purged activity event must not recreate it.
 
+#[allow(dead_code)]
+mod support;
+use support::TestDatabaseOptions;
+
 use north_domain::readiness::{ReadinessAssessment, ReviewedRepository, Verdict};
 use north_domain::requirement::RequirementEdit;
 use north_domain::status::RequirementStatus;
 use north_persistence::{
     canonical_payload_digest, AuthStore, ClarificationEvent, ClarificationEventError,
-    ClarificationStartInput, DaemonSetupClaim, EventReceipt, PersistenceError, PoolOptions,
+    ClarificationStartInput, DaemonSetupClaim, DatabaseConnection, EventReceipt, PersistenceError,
     RequirementListQuery, RequirementTransition, RetentionConfig,
 };
 use north_protocol::{
     AgentActivity, Event, EventEnvelope, SessionFailed, SessionStarted, SCHEMA_VERSION,
 };
 use serde_json::{json, Value};
-use sqlx::PgPool;
+
 use std::{
     env,
     sync::OnceLock,
@@ -49,10 +53,10 @@ fn unique_id(prefix: &str) -> String {
     )
 }
 
-async fn test_pool() -> PgPool {
+async fn test_pool() -> DatabaseConnection {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for retention integration tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -63,10 +67,10 @@ async fn test_pool() -> PgPool {
     pool
 }
 
-async fn independent_pool() -> PgPool {
+async fn independent_pool() -> DatabaseConnection {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for retention integration tests");
-    PoolOptions::new()
+    TestDatabaseOptions::new()
         .max_connections(1)
         .connect(&database_url)
         .await
@@ -79,15 +83,20 @@ fn valid_small_batch() -> RetentionConfig {
 
 /// Test-only cleanup: the production sweep is intentionally global, so
 /// mechanics assertions start from an empty ephemeral set.
-async fn clear_activities(pool: &PgPool) {
-    sqlx::query("DELETE FROM clarification_activities")
+async fn clear_activities(pool: &DatabaseConnection) {
+    support::query("DELETE FROM clarification_activities")
         .execute(pool)
         .await
         .expect("clear activity telemetry");
 }
 
-async fn insert_activity(pool: &PgPool, session_id: &str, event_id: &str, expires_in_seconds: i64) {
-    sqlx::query(
+async fn insert_activity(
+    pool: &DatabaseConnection,
+    session_id: &str,
+    event_id: &str,
+    expires_in_seconds: i64,
+) {
+    support::query(
         "INSERT INTO clarification_activities (event_id, session_id, activity, expires_at)
          VALUES ($1, $2, 'sweep activity',
                  CURRENT_TIMESTAMP + ($3::double precision * INTERVAL '1 second'))",
@@ -100,8 +109,8 @@ async fn insert_activity(pool: &PgPool, session_id: &str, event_id: &str, expire
     .expect("insert activity row");
 }
 
-async fn activity_ids(pool: &PgPool, session_id: &str) -> Vec<String> {
-    sqlx::query_scalar(
+async fn activity_ids(pool: &DatabaseConnection, session_id: &str) -> Vec<String> {
+    support::query_scalar(
         "SELECT event_id
          FROM clarification_activities
          WHERE session_id = $1
@@ -113,16 +122,16 @@ async fn activity_ids(pool: &PgPool, session_id: &str) -> Vec<String> {
     .expect("read activity ids")
 }
 
-async fn json_snapshot(pool: &PgPool, sql: &str, bind: &str) -> Value {
-    sqlx::query_scalar(sql)
+async fn json_snapshot(pool: &DatabaseConnection, sql: &str, bind: &str) -> Value {
+    support::query_scalar(sql)
         .bind(bind)
         .fetch_one(pool)
         .await
         .expect("durable snapshot query")
 }
 
-async fn json_snapshot_array(pool: &PgPool, sql: &str, bind: Vec<String>) -> Value {
-    sqlx::query_scalar(sql)
+async fn json_snapshot_array(pool: &DatabaseConnection, sql: &str, bind: Vec<String>) -> Value {
+    support::query_scalar(sql)
         .bind(bind)
         .fetch_one(pool)
         .await
@@ -241,8 +250,8 @@ struct AmnesiaFixture {
     session_id: String,
 }
 
-async fn amnesia_fixture(pool: &PgPool) -> AmnesiaFixture {
-    sqlx::query(
+async fn amnesia_fixture(pool: &DatabaseConnection) -> AmnesiaFixture {
+    support::query(
         "UPDATE daemon_registrations
          SET connected_at = NULL, connection_id = NULL, last_seen_at = NULL",
     )
@@ -469,7 +478,7 @@ async fn ready_requirement(
         .expect("read review requirement")
         .expect("review requirement exists");
     assert_eq!(ready.status, RequirementStatus::Ready);
-    let assessment_id: String = sqlx::query_scalar(
+    let assessment_id: String = support::query_scalar(
         "SELECT id FROM readiness_assessments
          WHERE requirement_id = $1 AND outcome = 'accepted'
          ORDER BY created_at DESC, id DESC
@@ -488,7 +497,7 @@ async fn ready_requirement(
 }
 
 async fn durable_snapshot(
-    pool: &PgPool,
+    pool: &DatabaseConnection,
     requirement_ids: &[String],
     session_ids: &[String],
     daemon_id: &str,
@@ -696,7 +705,7 @@ async fn purging_all_ephemeral_telemetry_preserves_canonical_state() {
     )
     .await
     .expect("project windowed activity");
-    let windowed_seconds: f64 = sqlx::query_scalar(
+    let windowed_seconds: f64 = support::query_scalar(
         "SELECT EXTRACT(EPOCH FROM (expires_at - created_at))::double precision
          FROM clarification_activities
          WHERE event_id = $1",
@@ -770,7 +779,7 @@ async fn purging_all_ephemeral_telemetry_preserves_canonical_state() {
         insert_activity(&pool, session_id, &unique_id("retention-extra"), -3_600).await;
     }
     assert_eq!(activity_ids(&pool, session_id).await.len(), 6);
-    sqlx::query(
+    support::query(
         "UPDATE clarification_activities
          SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
          WHERE session_id = $1",
@@ -932,9 +941,9 @@ struct SweepFixture {
     session_id: String,
 }
 
-async fn sweep_fixture(pool: &PgPool) -> SweepFixture {
+async fn sweep_fixture(pool: &DatabaseConnection) -> SweepFixture {
     let session_id = unique_id("retention-sweep-session");
-    sqlx::query("INSERT INTO execution_sessions (id, state) VALUES ($1, 'Idle')")
+    support::query("INSERT INTO execution_sessions (id, state) VALUES ($1, 'Idle')")
         .bind(&session_id)
         .execute(pool)
         .await

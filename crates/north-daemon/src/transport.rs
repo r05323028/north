@@ -94,6 +94,7 @@ pub struct HandshakeResult {
 /// Values delivered from the transport supervisor to North coordination.
 #[derive(Debug)]
 pub enum ConnectionEvent {
+    Reconnecting,
     HandshakeComplete {
         result: HandshakeResult,
         ready: oneshot::Sender<()>,
@@ -104,6 +105,7 @@ pub enum ConnectionEvent {
 #[derive(Debug)]
 pub enum ConnectionControl {
     CloseRetryable,
+    Stop,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -192,6 +194,7 @@ pub enum ConnectionError {
     Protocol(FrameError),
     BinaryFrame,
     PeerClosed,
+    ShutdownRequested,
     ChannelClosed(&'static str),
     Task(String),
     HandshakeTimeout(&'static str),
@@ -202,7 +205,7 @@ pub enum ConnectionError {
 impl ConnectionError {
     pub fn failure_class(&self) -> FailureClass {
         match self {
-            Self::ChannelClosed(_) => FailureClass::Shutdown,
+            Self::ChannelClosed(_) | Self::ShutdownRequested => FailureClass::Shutdown,
             Self::Protocol(_)
             | Self::BinaryFrame
             | Self::HandshakeViolation(_)
@@ -212,6 +215,14 @@ impl ConnectionError {
             | Self::PeerClosed
             | Self::Task(_)
             | Self::HandshakeTimeout(_) => FailureClass::Retryable,
+        }
+    }
+
+    pub fn safe_failure_class(&self) -> &'static str {
+        match self.failure_class() {
+            FailureClass::Retryable => "transport",
+            FailureClass::Terminal => "protocol",
+            FailureClass::Shutdown => "shutdown",
         }
     }
 }
@@ -224,6 +235,7 @@ impl fmt::Display for ConnectionError {
             Self::Protocol(error) => write!(f, "North protocol error: {error}"),
             Self::BinaryFrame => write!(f, "North 0.1 accepts JSON text frames only"),
             Self::PeerClosed => write!(f, "server WebSocket closed"),
+            Self::ShutdownRequested => write!(f, "daemon shutdown requested"),
             Self::ChannelClosed(side) => write!(f, "{side} connection channel closed"),
             Self::Task(reason) => write!(f, "connection task failed: {reason}"),
             Self::HandshakeTimeout(stage) => write!(f, "handshake timed out waiting for {stage}"),
@@ -301,8 +313,25 @@ impl ConnectionSupervisor {
                 Err(error) => match error.failure_class() {
                     FailureClass::Shutdown | FailureClass::Terminal => return Err(error),
                     FailureClass::Retryable => {
-                        tokio::time::sleep(self.config.backoff.delay(attempt)).await;
-                        attempt = attempt.saturating_add(1);
+                        inbound
+                            .send(ConnectionEvent::Reconnecting)
+                            .await
+                            .map_err(|_| ConnectionError::ChannelClosed("inbound"))?;
+                        let delay = self.config.backoff.delay(attempt);
+                        tokio::select! {
+                            _ = tokio::time::sleep(delay) => {
+                                attempt = attempt.saturating_add(1);
+                            }
+                            command = control.recv() => match command {
+                                Some(ConnectionControl::Stop) => {
+                                    return Err(ConnectionError::ShutdownRequested);
+                                }
+                                Some(ConnectionControl::CloseRetryable) => {
+                                    attempt = attempt.saturating_add(1);
+                                }
+                                None => return Err(ConnectionError::ChannelClosed("control")),
+                            }
+                        }
                     }
                 },
             }
@@ -320,9 +349,17 @@ impl ConnectionSupervisor {
             .max_message_size(Some(self.config.max_message_size))
             .max_frame_size(Some(self.config.max_frame_size))
             .max_write_buffer_size(self.config.max_message_size);
-        let (stream, _) = connect_async_with_config(&self.config.server_url, Some(config), true)
-            .await
-            .map_err(|error| ConnectionError::Connect(error.to_string()))?;
+        let connect = connect_async_with_config(&self.config.server_url, Some(config), true);
+        tokio::pin!(connect);
+        let (stream, _) = tokio::select! {
+            result = &mut connect => result
+                .map_err(|error| ConnectionError::Connect(error.to_string()))?,
+            command = control.recv() => match command {
+                Some(ConnectionControl::Stop) => return Err(ConnectionError::ShutdownRequested),
+                Some(ConnectionControl::CloseRetryable) => return Err(ConnectionError::PeerClosed),
+                None => return Err(ConnectionError::ChannelClosed("control")),
+            },
+        };
         let (mut writer, reader) = stream.split();
 
         let hello = encode_daemon_frame(&DaemonFrame::Hello(self.config.hello.clone()))
@@ -406,6 +443,9 @@ impl ConnectionSupervisor {
                     control_message = control.recv() => match control_message {
                         Some(ConnectionControl::CloseRetryable) => {
                             return Err(ConnectionError::PeerClosed);
+                        }
+                        Some(ConnectionControl::Stop) => {
+                            return Err(ConnectionError::ShutdownRequested);
                         }
                         None => return Err(ConnectionError::ChannelClosed("control")),
                     },

@@ -31,7 +31,18 @@ WSS. These are configuration points, not reliability guarantees.
 ## Transport & topology
 
 - Daemon-initiated persistent connection (WebSocket over TLS in deployment);
-  the daemon may sit behind NAT/firewalls; no inbound ports.
+  the daemon may sit behind NAT/firewalls; no inbound ports. Release topology
+  routes `/daemon/ws` through the same trusted TLS origin used by server HTTP and
+  SSE; browser communication remains HTTP + SSE only. Compose runs PostgreSQL 16
+  and the tagged server/web images with app host ports bound to loopback; the
+  operator TLS proxy remains external and daemon remains host-managed. Main and
+  manual qualification retain OCI archives internally and publish no GHCR refs.
+  Strict `vX.Y.Z` tags build and qualify fresh inputs, publish only tag-built
+  SemVer refs, and finalize the GitHub Release after both images succeed; CLI
+  archive checksums upload to a draft before image publication.
+
+The bundled `north` CLI wraps setup and local daemon lifecycle; it does not
+replace the daemon's outbound WSS connection or introduce server business state.
 - The server endpoint is an Axum upgrade handler plus a thin transport adapter;
   the adapter starts the hello deadline immediately after upgrade, reads the
   first `hello`, and admits the hello-bearing connection through a bounded
@@ -330,6 +341,10 @@ unacknowledged commands, and leaves the session pinned; revocation closes only
 that connection and leaves durable work eligible for a future authorized
 connection. Business retry/failure policy remains server-owned and downstream
 of this delivery layer.
+
+The extracted release smoke and assembled qualification use the same server
+router, migration path, SSE route, and daemon WSS transport; they do not add a
+second protocol or business-state implementation.
 
 The implemented readiness flow is: Agent produces a readiness assessment →
 daemon emits `requirement.assessed` → server deduplicates and locks the

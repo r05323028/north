@@ -11,7 +11,8 @@
     "check:repository-settings": "node ./repository-settings.check.mjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:e2e:release": "playwright test --config=playwright.release.config.ts"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.3.3",

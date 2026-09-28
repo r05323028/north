@@ -6,9 +6,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use north_domain::{requirement::RequirementEdit, role::Role, status::RequirementStatus};
-use north_persistence::{
-    AuthStore, PersistenceError, PoolOptions, DAEMON_SETUP_CLEANUP_BATCH_SIZE,
-};
+use north_persistence::{AuthStore, PersistenceError, DAEMON_SETUP_CLEANUP_BATCH_SIZE};
 use north_protocol::{
     encode_daemon_frame, Command, CommandAck, DaemonFrame, Event, EventAckStatus, EventEnvelope,
     Heartbeat, MessageSend, ProtocolErrorFrame, ReadinessVerdictWire, RepositoryContext,
@@ -33,7 +31,9 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::Message, WebSocketStream};
 use tower::ServiceExt;
 
+#[allow(dead_code)]
 mod support;
+use support::TestDatabaseOptions;
 
 #[derive(Debug, Deserialize)]
 struct SetupClaimed {
@@ -178,16 +178,16 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for daemon integration tests");
     let _database_test_guard = database_test_lock().await;
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
         .expect("connect test database");
-    north_server::run_migrations(&pool)
+    north_persistence::run_migrations(&pool)
         .await
         .expect("run migrations");
     let store = AuthStore::new(pool.clone(), test_otp_key());
-    sqlx::query(
+    support::query(
         "INSERT INTO repositories (id, name, name_normalized, url, description)
          VALUES ('00000000-0000-4000-8000-000000000001', 'North', 'north', 'https://example.test/north.git', '')
          ON CONFLICT (id) DO NOTHING",
@@ -379,7 +379,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .create_daemon_setup_request("expired integration daemon", "192.0.2.2/32")
         .await
         .expect("create expired setup request");
-    sqlx::query(
+    support::query(
         "UPDATE daemon_setup_requests\n         SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'\n         WHERE label = $1",
     )
     .bind(&expired.label)
@@ -540,7 +540,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         .expect("pinned session");
     let received = next_server_frame(&mut socket).await;
     let stored_payload: String =
-        sqlx::query_scalar("SELECT payload FROM server_command_outbox WHERE command_id = $1")
+        support::query_scalar("SELECT payload FROM server_command_outbox WHERE command_id = $1")
             .bind(&command_id)
             .fetch_one(&pool)
             .await
@@ -726,7 +726,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     };
     assert_eq!(duplicate_ack.status, EventAckStatus::Accepted);
     let assessment_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
             .bind(&assessment_event_id)
             .fetch_one(&pool)
             .await
@@ -852,13 +852,13 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     assert_eq!(foreign_state.revision, 2);
     assert_eq!(foreign_state.state_version, 3);
     let foreign_assessments: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
             .bind(&foreign_event_id)
             .fetch_one(&pool)
             .await
             .expect("count foreign assessments");
     assert_eq!(foreign_assessments, 0);
-    let foreign_ready_audits: i64 = sqlx::query_scalar(
+    let foreign_ready_audits: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM transition_audit
          WHERE requirement_id = $1 AND transition = 'mark_ready'",
     )
@@ -991,7 +991,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         failure,
         Err(north_server::DaemonDispatchError::DaemonUnavailable)
     ));
-    let (stored_daemon_id, stored_seq, stored_payload): (String, i64, String) = sqlx::query_as(
+    let (stored_daemon_id, stored_seq, stored_payload): (String, i64, String) = support::query_tuple(
         "SELECT daemon_id, server_command_seq, payload\n         FROM server_command_outbox WHERE command_id = $1",
     )
     .bind(format!("dispatch-failure-command-{}", second_claimed.daemon_id))
@@ -1043,7 +1043,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     }
     assert!(heartbeat_seen, "heartbeat did not update last_seen_at");
 
-    sqlx::query(
+    support::query(
         "UPDATE daemon_registrations
          SET last_seen_at = CURRENT_TIMESTAMP - INTERVAL '1 minute'
          WHERE daemon_id = $1",
@@ -1136,7 +1136,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
             .expect("send replay ACK");
     }
     for _ in 0..100 {
-        let pending: i64 = sqlx::query_scalar(
+        let pending: i64 = support::query_scalar(
             "SELECT COUNT(*) FROM server_command_outbox
              WHERE daemon_id = $1 AND acknowledged_at IS NULL",
         )
@@ -1149,7 +1149,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
         }
         sleep(Duration::from_millis(5)).await;
     }
-    let pending: i64 = sqlx::query_scalar(
+    let pending: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM server_command_outbox
          WHERE daemon_id = $1 AND acknowledged_at IS NULL",
     )
@@ -1268,7 +1268,7 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
-    sqlx::query(
+    support::query(
         "DELETE FROM server_command_tombstones
          WHERE session_id = $1",
     )
@@ -1276,22 +1276,22 @@ async fn daemon_setup_connection_liveness_and_revocation_are_server_owned() {
     .execute(&pool)
     .await
     .expect("cleanup command tombstones");
-    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
+    support::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
         .bind(format!("assessment-session-{}", claimed.daemon_id))
         .execute(&pool)
         .await
         .expect("cleanup event tombstones");
-    sqlx::query("DELETE FROM server_message_command_map WHERE session_id = $1")
+    support::query("DELETE FROM server_message_command_map WHERE session_id = $1")
         .bind(format!("assessment-session-{}", claimed.daemon_id))
         .execute(&pool)
         .await
         .expect("cleanup message command map");
-    sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
+    support::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(format!("assessment-session-{}", claimed.daemon_id))
         .execute(&pool)
         .await
         .expect("cleanup assessment session");
-    sqlx::query("DELETE FROM requirements WHERE id = $1")
+    support::query("DELETE FROM requirements WHERE id = $1")
         .bind(&foreign_requirement.id)
         .execute(&pool)
         .await
@@ -1308,12 +1308,12 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
         Err(_) => panic!("NORTH_TEST_DATABASE_URL is required for daemon integration tests"),
     };
     let _database_test_guard = database_test_lock().await;
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
         .expect("connect test database");
-    north_server::run_migrations(&pool)
+    north_persistence::run_migrations(&pool)
         .await
         .expect("run migrations");
     let store = AuthStore::new(pool.clone(), test_otp_key());
@@ -1378,7 +1378,7 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
         .create_daemon_setup_request(&expired_label, "192.0.2.4/32")
         .await
         .expect("create expired setup request");
-    sqlx::query(
+    support::query(
         "UPDATE daemon_setup_requests\n         SET expires_at = CURRENT_TIMESTAMP - INTERVAL '2 days'\n         WHERE label = $1",
     )
     .bind(&expired.label)
@@ -1391,13 +1391,13 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
         .expect("cleanup expired setup requests");
     assert!(deleted >= 1);
     let expired_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label = $1")
+        support::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label = $1")
             .bind(&expired.label)
             .fetch_one(&pool)
             .await
             .expect("count expired rows");
     let recent_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label = $1")
+        support::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label = $1")
             .bind(&recent.label)
             .fetch_one(&pool)
             .await
@@ -1413,7 +1413,7 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
             .await
             .expect("create batch cleanup setup request");
     }
-    sqlx::query(
+    support::query(
         "UPDATE daemon_setup_requests
          SET expires_at = CURRENT_TIMESTAMP - INTERVAL '2 days'
          WHERE label LIKE $1",
@@ -1431,7 +1431,7 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
         u64::try_from(DAEMON_SETUP_CLEANUP_BATCH_SIZE).expect("positive cleanup batch")
     );
     let remaining_after_first: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
+        support::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
             .bind(format!("{batch_prefix}-%"))
             .fetch_one(&pool)
             .await
@@ -1443,7 +1443,7 @@ async fn server_restart_invalidates_stale_daemon_lease_and_cleans_setup_rows() {
         .expect("finish bounded cleanup");
     assert_eq!(second_batch_deleted, 1);
     let remaining_after_second: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
+        support::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
             .bind(format!("{batch_prefix}-%"))
             .fetch_one(&pool)
             .await
@@ -1569,15 +1569,15 @@ async fn clarification_start_reuse_cancel_and_terminal_slot_release() {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for clarification integration tests");
     let _database_test_guard = database_test_lock().await;
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
         .expect("connect test database");
-    north_server::run_migrations(&pool)
+    north_persistence::run_migrations(&pool)
         .await
         .expect("run migrations");
-    sqlx::query(
+    support::query(
         "UPDATE daemon_registrations
          SET connected_at = NULL, connection_id = NULL",
     )
@@ -1853,15 +1853,15 @@ async fn clarification_runtime_projects_existing_events_and_releases_slot() {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for clarification integration tests");
     let _database_test_guard = database_test_lock().await;
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
         .expect("connect test database");
-    north_server::run_migrations(&pool)
+    north_persistence::run_migrations(&pool)
         .await
         .expect("run migrations");
-    sqlx::query(
+    support::query(
         "UPDATE daemon_registrations
          SET connected_at = NULL, connection_id = NULL",
     )
@@ -2439,15 +2439,15 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for clarification integration tests");
     let _database_test_guard = database_test_lock().await;
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(16)
         .connect(&database_url)
         .await
         .expect("connect test database");
-    north_server::run_migrations(&pool)
+    north_persistence::run_migrations(&pool)
         .await
         .expect("run migrations");
-    sqlx::query(
+    support::query(
         "UPDATE daemon_registrations
          SET connected_at = NULL, connection_id = NULL",
     )
@@ -2470,7 +2470,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         .expect("promote test user")
         .expect("test user exists");
     let daemon_id = unique_email("clarification-daemon").replace(['@', '.'], "-");
-    sqlx::query(
+    support::query(
         "INSERT INTO daemon_registrations
             (daemon_id, credential_hash, label, created_by, protocol_version,
              connected_at, last_seen_at, capabilities)
@@ -2590,13 +2590,13 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     assert_ne!(left.reused, right.reused);
     assert_eq!(left.command_id, right.command_id);
     let assigned_sessions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
             .bind(&assigned_requirement.id)
             .fetch_one(&pool)
             .await
             .expect("count assigned sessions");
     let assigned_commands: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
             .bind(&left.run.run_id)
             .fetch_one(&pool)
             .await
@@ -2687,7 +2687,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         north_persistence::ClarificationError::ExistingRunDifferentStart
     ));
     let different_sessions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
             .bind(&different_requirement.id)
             .fetch_one(&pool)
             .await
@@ -2726,7 +2726,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         Err(north_persistence::ClarificationError::StateVersionConflict)
     ));
     let stale_sessions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
             .bind(&stale_requirement.id)
             .fetch_one(&pool)
             .await
@@ -2888,7 +2888,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         north_persistence::ClarificationError::ExistingRunDifferentStart
     ));
     let awaiting_sessions: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_sessions WHERE requirement_id = $1")
             .bind(&awaiting_requirement.id)
             .fetch_one(&pool)
             .await
@@ -3016,7 +3016,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
     );
     assert_eq!(first_cancel.command_id, second_cancel.command_id);
     let assigned_cancel_commands: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
             .bind(&assigned_cancel.run.run_id)
             .fetch_one(&pool)
             .await
@@ -3045,7 +3045,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         Err(north_persistence::ClarificationError::RunNotEligible)
     ));
 
-    sqlx::query(
+    support::query(
         "UPDATE daemon_registrations
          SET connected_at = NULL, last_seen_at = NULL",
     )
@@ -3080,7 +3080,7 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         race_run.run.phase,
         north_persistence::ClarificationPhase::AwaitingAssignment
     );
-    sqlx::query(
+    support::query(
         "UPDATE daemon_registrations
          SET connected_at = CURRENT_TIMESTAMP, last_seen_at = CURRENT_TIMESTAMP",
     )
@@ -3131,13 +3131,13 @@ async fn clarification_postgres_concurrency_preserves_single_slot_and_command_id
         .await
         .expect("read raced run");
     let raced_daemon: Option<String> =
-        sqlx::query_scalar("SELECT daemon_id FROM execution_sessions WHERE id = $1")
+        support::query_scalar("SELECT daemon_id FROM execution_sessions WHERE id = $1")
             .bind(&race_run.run.run_id)
             .fetch_one(&pool)
             .await
             .expect("read raced daemon");
     let raced_commands: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
             .bind(&race_run.run.run_id)
             .fetch_one(&pool)
             .await
@@ -3171,12 +3171,12 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for retry integration tests");
     let _database_test_guard = database_test_lock().await;
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(16)
         .connect(&database_url)
         .await
         .expect("connect test database");
-    north_server::run_migrations(&pool)
+    north_persistence::run_migrations(&pool)
         .await
         .expect("run migrations");
     let store = AuthStore::new(pool.clone(), test_otp_key());
@@ -3190,7 +3190,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
         .await
         .expect("verify user code");
     let daemon_id = unique_email("retry-worker-daemon").replace(['@', '.'], "-");
-    sqlx::query(
+    support::query(
         "INSERT INTO daemon_registrations
             (daemon_id, credential_hash, label, created_by, protocol_version)
          VALUES ($1, $2, $3, $4, '0.1')",
@@ -3207,7 +3207,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     let seed_attempt_id = format!("{session_id}-attempt-1");
     let seed_command_id = format!("{session_id}-start");
     let seed_failure_id = format!("{session_id}-failure");
-    sqlx::query(
+    support::query(
         "INSERT INTO execution_sessions
             (id, daemon_id, state, attempt_count, max_attempts, next_retry_at,
              failure_class, failure_reason)
@@ -3220,7 +3220,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     .execute(&pool)
     .await
     .expect("insert due retry session");
-    sqlx::query(
+    support::query(
         "INSERT INTO execution_attempts
             (id, session_id, attempt_number, command_id, command_kind, outcome,
              failure_event_id, failure_class, failure_reason)
@@ -3234,7 +3234,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     .execute(&pool)
     .await
     .expect("insert failed seed attempt");
-    sqlx::query(
+    support::query(
         "INSERT INTO server_command_outbox
             (command_id, session_id, daemon_id, server_command_seq, payload,
              payload_digest, command_identity_digest)
@@ -3266,7 +3266,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
         i64,
         Option<String>,
         Option<String>,
-    ) = sqlx::query_as(
+    ) = support::query_tuple(
         "SELECT state, attempt_count, current_attempt_id, next_retry_at::text
          FROM execution_sessions WHERE id = $1",
     )
@@ -3279,13 +3279,13 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     assert!(current_attempt_id.is_some());
     assert!(next_retry_at.is_none());
     let attempt_rows: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&session_id)
             .fetch_one(&pool)
             .await
             .expect("count retry attempts");
     assert_eq!(attempt_rows, 2);
-    let resume_rows: i64 = sqlx::query_scalar(
+    let resume_rows: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM server_command_outbox
          WHERE session_id = $1 AND command_id = $2",
     )
@@ -3300,7 +3300,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     let revoked_attempt_id = format!("{revoked_session_id}-attempt-1");
     let revoked_command_id = format!("{revoked_session_id}-start");
     let revoked_failure_id = format!("{revoked_session_id}-failure");
-    sqlx::query(
+    support::query(
         "INSERT INTO execution_sessions
             (id, daemon_id, state, attempt_count, max_attempts, next_retry_at,
              failure_class, failure_reason)
@@ -3313,7 +3313,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     .execute(&pool)
     .await
     .expect("insert revoked retry session");
-    sqlx::query(
+    support::query(
         "INSERT INTO execution_attempts
             (id, session_id, attempt_number, command_id, command_kind, outcome,
              failure_event_id, failure_class, failure_reason)
@@ -3327,7 +3327,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     .execute(&pool)
     .await
     .expect("insert revoked seed attempt");
-    sqlx::query(
+    support::query(
         "INSERT INTO server_command_outbox
             (command_id, session_id, daemon_id, server_command_seq, payload,
              payload_digest, command_identity_digest)
@@ -3339,7 +3339,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     .execute(&pool)
     .await
     .expect("insert revoked seed command");
-    sqlx::query(
+    support::query(
         "UPDATE daemon_registrations SET revoked_at = CURRENT_TIMESTAMP WHERE daemon_id = $1",
     )
     .bind(&daemon_id)
@@ -3359,7 +3359,7 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
         revoked_owner,
         revoked_attempt_count,
         revoked_current_attempt,
-    ): (String, String, Option<String>, i64, Option<String>) = sqlx::query_as(
+    ): (String, String, Option<String>, i64, Option<String>) = support::query_tuple(
         "SELECT state, failure_reason, daemon_id, attempt_count, current_attempt_id
          FROM execution_sessions WHERE id = $1",
     )
@@ -3373,13 +3373,13 @@ async fn due_retry_workers_claim_one_resume_and_reject_revoked_owner() {
     assert_eq!(revoked_attempt_count, 1);
     assert!(revoked_current_attempt.is_none());
     let revoked_attempts: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM execution_attempts WHERE session_id = $1")
             .bind(&revoked_session_id)
             .fetch_one(&pool)
             .await
             .expect("count revoked attempts");
     let revoked_commands: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM server_command_outbox WHERE session_id = $1")
             .bind(&revoked_session_id)
             .fetch_one(&pool)
             .await

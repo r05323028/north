@@ -4,6 +4,7 @@ use north_daemon::{
     repository_inspection::RepositoryInspector,
     runtime::PiClarificationAdapter,
     scheduler::{RuntimeFollowup, RuntimeScheduler},
+    status::{self, ConnectionState, DaemonStatus, ProcessState},
     transport::{ConnectionConfig, ConnectionControl, ConnectionEvent, ConnectionSupervisor},
 };
 use north_protocol::{DaemonFrame, Heartbeat, Hello};
@@ -17,6 +18,7 @@ use std::{
     fs::{self, OpenOptions},
     future::Future,
     io::Write,
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant},
@@ -24,7 +26,11 @@ use std::{
 
 #[cfg(test)]
 static START_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-use tokio::sync::mpsc;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt},
+    net::{UnixListener, UnixStream},
+    sync::mpsc,
+};
 
 #[derive(Debug)]
 struct CliError(String);
@@ -101,6 +107,10 @@ async fn run(args: Vec<String>) -> Result<(), CliError> {
     match command {
         "setup" => setup(&args[1..]).await,
         "start" => start(&args[1..]).await,
+        "--version" | "-V" => {
+            println!("north-daemon {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             print_usage();
             Ok(())
@@ -119,7 +129,7 @@ async fn setup(args: &[String]) -> Result<(), CliError> {
     let label = option(args, "--label").unwrap_or_else(|| "North daemon".into());
     let state_path = option(args, "--state-file")
         .map(PathBuf::from)
-        .unwrap_or_else(default_state_path);
+        .unwrap_or_else(status::default_state_path);
     let base = server_url.trim_end_matches('/');
     let request: SetupCreated = curl_json(
         "POST",
@@ -131,6 +141,9 @@ async fn setup(args: &[String]) -> Result<(), CliError> {
         "Approve daemon setup in browser: {base}{}",
         request.verification_path
     );
+    std::io::stdout()
+        .flush()
+        .map_err(|_| CliError("write setup approval URL".into()))?;
 
     let expires = u64::try_from(request.expires_in_seconds).unwrap_or(0);
     let deadline = Instant::now() + Duration::from_secs(expires);
@@ -208,10 +221,153 @@ where
     }
 }
 
+struct SocketPathGuard {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl SocketPathGuard {
+    fn new(path: PathBuf) -> Result<Self, CliError> {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|_| CliError("inspect daemon control socket".into()))?;
+        if !metadata.file_type().is_socket() {
+            return Err(CliError("daemon control path is not a socket".into()));
+        }
+        Ok(Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+impl Drop for SocketPathGuard {
+    fn drop(&mut self) {
+        if let Ok(metadata) = fs::symlink_metadata(&self.path) {
+            if metadata.file_type().is_socket()
+                && metadata.dev() == self.device
+                && metadata.ino() == self.inode
+            {
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+struct StatusWriter {
+    path: PathBuf,
+    status: DaemonStatus,
+}
+
+impl StatusWriter {
+    fn new(path: PathBuf, status: DaemonStatus) -> Result<Self, CliError> {
+        let writer = Self { path, status };
+        writer.persist()?;
+        Ok(writer)
+    }
+
+    fn status(&self) -> &DaemonStatus {
+        &self.status
+    }
+
+    fn persist(&self) -> Result<(), CliError> {
+        status::write_status(&self.path, &self.status)
+            .map_err(|_| CliError("write daemon status".into()))
+    }
+
+    fn update(
+        &mut self,
+        process_state: ProcessState,
+        connection_state: ConnectionState,
+        failure_class: Option<&str>,
+    ) -> Result<(), CliError> {
+        self.status.process_state = process_state;
+        self.status.connection_state = connection_state;
+        self.status.failure_class = failure_class.map(str::to_owned);
+        self.persist()
+    }
+}
+
+impl Drop for StatusWriter {
+    fn drop(&mut self) {
+        if !matches!(
+            self.status.process_state,
+            ProcessState::Stopped | ProcessState::Failed
+        ) {
+            self.status.process_state = ProcessState::Failed;
+            self.status.connection_state = ConnectionState::Failed;
+            self.status.failure_class = Some("daemon_exit".into());
+            let _ = status::write_status(&self.path, &self.status);
+        }
+    }
+}
+
+fn daemon_instance_id() -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{}-{timestamp}", std::process::id())
+}
+
+async fn handle_control_request(
+    mut stream: UnixStream,
+    status_writer: &mut StatusWriter,
+) -> Result<bool, CliError> {
+    let mut request = String::new();
+    let read = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::io::BufReader::new(&mut stream).read_line(&mut request),
+    )
+    .await
+    .map_err(|_| CliError("daemon control request timed out".into()))?
+    .map_err(|_| CliError("read daemon control request".into()))?;
+    if read == 0 || request.len() > 256 {
+        stream
+            .write_all(b"error: invalid request\n")
+            .await
+            .map_err(|_| CliError("write daemon control response".into()))?;
+        return Ok(false);
+    }
+    let request = request.trim_end_matches(['\r', '\n']);
+    if request == "status" {
+        status_writer.persist()?;
+        let mut response = serde_json::to_vec(status_writer.status())
+            .map_err(|_| CliError("encode daemon status".into()))?;
+        response.push(b'\n');
+        stream
+            .write_all(&response)
+            .await
+            .map_err(|_| CliError("write daemon status".into()))?;
+        return Ok(false);
+    }
+    if let Some(instance_id) = request.strip_prefix("stop ") {
+        if instance_id == status_writer.status().instance_id {
+            status_writer.update(ProcessState::Stopping, ConnectionState::Stopped, None)?;
+            stream
+                .write_all(b"stopping\n")
+                .await
+                .map_err(|_| CliError("write daemon stop response".into()))?;
+            return Ok(true);
+        }
+        stream
+            .write_all(b"error: instance mismatch\n")
+            .await
+            .map_err(|_| CliError("write daemon control response".into()))?;
+        return Ok(false);
+    }
+    stream
+        .write_all(b"error: unsupported request\n")
+        .await
+        .map_err(|_| CliError("write daemon control response".into()))?;
+    Ok(false)
+}
+
 async fn start(args: &[String]) -> Result<(), CliError> {
     let state_path = option(args, "--state-file")
         .map(PathBuf::from)
-        .unwrap_or_else(default_state_path);
+        .unwrap_or_else(status::default_state_path);
     let state: LocalState = serde_json::from_str(
         &fs::read_to_string(&state_path)
             .map_err(|error| CliError(format!("read {}: {error}", state_path.display())))?,
@@ -252,6 +408,43 @@ async fn start(args: &[String]) -> Result<(), CliError> {
     let recovered = coordinator
         .recover_for_scheduler()
         .map_err(|error| CliError(format!("recover daemon journal: {error}")))?;
+    let control_path = status::control_socket_path(&state_path);
+    let status_path = status::status_path(&state_path);
+    let status_parent = control_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if state_path == status::default_state_path() {
+        status::ensure_private_directory(status_parent)
+            .map_err(|_| CliError("prepare daemon control directory".into()))?;
+    } else {
+        fs::create_dir_all(status_parent)
+            .map_err(|error| CliError(format!("create daemon control directory: {error}")))?;
+    }
+    let control_listener = UnixListener::bind(&control_path).map_err(|error| {
+        let message = match error.kind() {
+            std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::AddrInUse => {
+                "daemon control socket exists or is stale; refusing to replace it".into()
+            }
+            _ => format!("bind daemon control socket: {error}"),
+        };
+        CliError(message)
+    })?;
+    let _socket_guard = SocketPathGuard::new(control_path.clone())?;
+    fs::set_permissions(&control_path, fs::Permissions::from_mode(0o600))
+        .map_err(|_| CliError("protect daemon control socket".into()))?;
+    let mut status_writer = StatusWriter::new(
+        status_path,
+        DaemonStatus {
+            instance_id: daemon_instance_id(),
+            pid: std::process::id(),
+            server_url: state.server_url.clone(),
+            daemon_id: state.daemon_id.clone(),
+            process_state: ProcessState::Starting,
+            connection_state: ConnectionState::Starting,
+            failure_class: None,
+        },
+    )?;
     let (outbound, outbound_receiver) = ConnectionSupervisor::outbound_channel();
     let (close_sender, close_receiver) = ConnectionSupervisor::control_channel();
     let (events, mut events_receiver) = mpsc::channel(256);
@@ -281,15 +474,44 @@ async fn start(args: &[String]) -> Result<(), CliError> {
             .run_with_control(outbound_receiver, events, close_receiver)
             .await
     });
+    status_writer.update(ProcessState::Running, ConnectionState::Connecting, None)?;
+    let mut shutdown = Box::pin(shutdown_signal());
     let mut pending_frames = recovered.frames;
     let mut pending_commands = recovered.commands;
-    loop {
+    'event_loop: loop {
         tokio::select! {
+            signal = &mut shutdown => {
+                signal.map_err(|_| CliError("daemon shutdown signal handler failed".into()))?;
+                break 'event_loop;
+            }
+            accepted = control_listener.accept() => {
+                let (stream, _) = accepted
+                    .map_err(|_| CliError("accept daemon control request".into()))?;
+                if handle_control_request(stream, &mut status_writer).await? {
+                    break 'event_loop;
+                }
+            }
             result = &mut task => {
                 let _ = scheduler.request_shutdown();
-                return result
-                    .map_err(|error| CliError(format!("supervisor task failed: {error}")))?
-                    .map_err(|error| CliError(error.to_string()));
+                match result {
+                    Ok(Ok(())) => {
+                        status_writer.update(ProcessState::Stopped, ConnectionState::Stopped, None)?;
+                        return Ok(());
+                    }
+                    Ok(Err(error)) => {
+                        let failure_class = error.safe_failure_class();
+                        if failure_class == "shutdown" {
+                            status_writer.update(ProcessState::Stopped, ConnectionState::Stopped, None)?;
+                            return Ok(());
+                        }
+                        status_writer.update(ProcessState::Failed, ConnectionState::Failed, Some(failure_class))?;
+                        return Err(CliError(format!("daemon connection failed ({failure_class})")));
+                    }
+                    Err(_) => {
+                        status_writer.update(ProcessState::Failed, ConnectionState::Failed, Some("supervisor"))?;
+                        return Err(CliError("daemon supervisor failed".into()));
+                    }
+                }
             }
             completion = runtime_completion_receiver.recv() => {
                 let Some(completion) = completion else {
@@ -331,12 +553,16 @@ async fn start(args: &[String]) -> Result<(), CliError> {
                 }
             }
             event = events_receiver.recv() => match event {
+                Some(ConnectionEvent::Reconnecting) => {
+                    status_writer.update(ProcessState::Running, ConnectionState::Reconnecting, Some("transport"))?;
+                }
                 Some(ConnectionEvent::HandshakeComplete { result, ready }) => {
                     let mut actions = coordinator
                         .reconcile(result.reconciliation)
                         .map_err(|error| CliError(format!("reconcile daemon journal: {error}")))?;
                     actions.replay.append(&mut pending_frames);
                     ready.send(()).map_err(|_| CliError("supervisor stopped during handshake".into()))?;
+                    status_writer.update(ProcessState::Running, ConnectionState::Connected, None)?;
                     for frame in actions.replay {
                         outbound
                             .send(frame)
@@ -373,6 +599,84 @@ async fn start(args: &[String]) -> Result<(), CliError> {
             }
         }
     }
+
+    status_writer.update(ProcessState::Stopping, ConnectionState::Stopped, None)?;
+    let _ = scheduler.request_shutdown();
+    let _ = close_sender.send(ConnectionControl::Stop).await;
+    match wait_for_supervisor_shutdown(&mut task, Duration::from_secs(10)).await {
+        SupervisorShutdown::Complete => {}
+        SupervisorShutdown::ConnectionFailed(failure_class) => {
+            status_writer.update(
+                ProcessState::Failed,
+                ConnectionState::Failed,
+                Some(&failure_class),
+            )?;
+            return Err(CliError(format!(
+                "daemon shutdown failed ({failure_class})"
+            )));
+        }
+        SupervisorShutdown::TaskFailed => {
+            status_writer.update(
+                ProcessState::Failed,
+                ConnectionState::Failed,
+                Some("supervisor"),
+            )?;
+            return Err(CliError("daemon supervisor failed during shutdown".into()));
+        }
+        SupervisorShutdown::TimedOut => {
+            status_writer.update(
+                ProcessState::Failed,
+                ConnectionState::Failed,
+                Some("shutdown_timeout"),
+            )?;
+            return Err(CliError("graceful daemon shutdown timed out".into()));
+        }
+    }
+    status_writer.update(ProcessState::Stopped, ConnectionState::Stopped, None)?;
+    Ok(())
+}
+
+enum SupervisorShutdown {
+    Complete,
+    ConnectionFailed(String),
+    TaskFailed,
+    TimedOut,
+}
+
+async fn wait_for_supervisor_shutdown(
+    task: &mut tokio::task::JoinHandle<Result<(), north_daemon::transport::ConnectionError>>,
+    timeout: Duration,
+) -> SupervisorShutdown {
+    match tokio::time::timeout(timeout, &mut *task).await {
+        Ok(Ok(Ok(()))) => SupervisorShutdown::Complete,
+        Ok(Ok(Err(error))) if error.safe_failure_class() == "shutdown" => {
+            SupervisorShutdown::Complete
+        }
+        Ok(Ok(Err(error))) => {
+            SupervisorShutdown::ConnectionFailed(error.safe_failure_class().to_owned())
+        }
+        Ok(Err(_)) => SupervisorShutdown::TaskFailed,
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            SupervisorShutdown::TimedOut
+        }
+    }
+}
+
+async fn shutdown_signal() -> std::io::Result<()> {
+    let ctrl_c = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = ctrl_c => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    ctrl_c.await
 }
 
 async fn emit_runtime_actions<E: RuntimeExecutor + 'static>(
@@ -507,13 +811,6 @@ fn default_daemon_directory(state_path: &Path, name: &str) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .join(name)
-}
-
-fn default_state_path() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".north/daemon.json")
 }
 
 fn option(args: &[String], name: &str) -> Option<String> {
@@ -652,6 +949,16 @@ mod tests {
         assert!(START_USAGE.contains("--repository-cache-dir"));
         assert!(START_USAGE.contains("--repository-workspace-dir"));
         print_usage();
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_aborts_supervisor_task() {
+        let mut task = tokio::spawn(std::future::pending::<
+            Result<(), north_daemon::transport::ConnectionError>,
+        >());
+        let result = wait_for_supervisor_shutdown(&mut task, Duration::ZERO).await;
+        assert!(matches!(result, SupervisorShutdown::TimedOut));
+        assert!(task.is_finished());
     }
 
     #[tokio::test]

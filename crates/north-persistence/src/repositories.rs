@@ -1,7 +1,7 @@
 use crate::{AuthStore, PersistenceError};
 use north_domain::repository::{validate_metadata, RepositoryError, RepositoryMetadata};
 use rand::{rng, Rng};
-use sqlx::FromRow;
+use sea_orm::{DbErr, FromQueryResult, SqlErr, TransactionTrait};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryRecord {
@@ -36,7 +36,7 @@ impl From<RepositoryRow> for RepositoryRecord {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct RepositoryRow {
     id: String,
     name: String,
@@ -66,7 +66,7 @@ impl AuthStore {
         let metadata = repository_metadata(name, url, description)
             .map_err(PersistenceError::InvalidRepository)?;
         let id = repository_id();
-        let result = sqlx::query_as::<_, RepositoryRow>(
+        let result = crate::query::query_as::<RepositoryRow>(
             "INSERT INTO repositories (id, name, name_normalized, url, description)
              VALUES ($1, $2, $3, $4, $5)
              RETURNING id, name, name_normalized, url, description,
@@ -90,7 +90,7 @@ impl AuthStore {
         name: &str,
     ) -> Result<Option<RepositoryRecord>, PersistenceError> {
         let normalized = name.trim().to_lowercase();
-        sqlx::query_as::<_, RepositoryRow>(
+        crate::query::query_as::<RepositoryRow>(
             "SELECT id, name, name_normalized, url, description,
                     created_at::text AS created_at, updated_at::text AS updated_at,
                     disabled_at::text AS disabled_at
@@ -108,7 +108,7 @@ impl AuthStore {
         &self,
         repository_id: &str,
     ) -> Result<Option<RepositoryRecord>, PersistenceError> {
-        sqlx::query_as::<_, RepositoryRow>(
+        crate::query::query_as::<RepositoryRow>(
             "SELECT id, name, name_normalized, url, description,
                     created_at::text AS created_at, updated_at::text AS updated_at,
                     disabled_at::text AS disabled_at
@@ -124,7 +124,7 @@ impl AuthStore {
 
     /// Complete Admin/Owner management list, including disabled rows.
     pub async fn list_repositories(&self) -> Result<Vec<RepositoryRecord>, PersistenceError> {
-        sqlx::query_as::<_, RepositoryRow>(
+        crate::query::query_as::<RepositoryRow>(
             "SELECT id, name, name_normalized, url, description,
                     created_at::text AS created_at, updated_at::text AS updated_at,
                     disabled_at::text AS disabled_at
@@ -139,7 +139,7 @@ impl AuthStore {
 
     /// Internal enabled-only catalog for server-assembled runtime context.
     pub async fn active_repositories(&self) -> Result<Vec<RepositoryRecord>, PersistenceError> {
-        sqlx::query_as::<_, RepositoryRow>(
+        crate::query::query_as::<RepositoryRow>(
             "SELECT id, name, name_normalized, url, description,
                     created_at::text AS created_at, updated_at::text AS updated_at,
                     disabled_at::text AS disabled_at
@@ -171,8 +171,8 @@ impl AuthStore {
         description: Option<&str>,
         url: Option<&str>,
     ) -> Result<RepositoryRecord, PersistenceError> {
-        let mut transaction = self.pool.begin().await?;
-        let existing = sqlx::query_as::<_, RepositoryRow>(
+        let transaction = self.pool.begin().await?;
+        let existing = crate::query::query_as::<RepositoryRow>(
             "SELECT id, name, name_normalized, url, description,
                     created_at::text AS created_at, updated_at::text AS updated_at,
                     disabled_at::text AS disabled_at
@@ -180,7 +180,7 @@ impl AuthStore {
              WHERE id = $1 FOR UPDATE",
         )
         .bind(repository_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         .ok_or(PersistenceError::RepositoryNotFound)?;
         if let Some(url) = url {
@@ -198,7 +198,7 @@ impl AuthStore {
             transaction.commit().await?;
             return Ok(existing.into());
         }
-        let result = sqlx::query_as::<_, RepositoryRow>(
+        let result = crate::query::query_as::<RepositoryRow>(
             "UPDATE repositories
              SET name = $2, name_normalized = $3, description = $4,
                  updated_at = CURRENT_TIMESTAMP
@@ -211,7 +211,7 @@ impl AuthStore {
         .bind(&metadata.name)
         .bind(&metadata.name_normalized)
         .bind(&metadata.description)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await
         .map_err(map_repository_database_error)?;
         transaction.commit().await?;
@@ -234,7 +234,7 @@ impl AuthStore {
 
     pub async fn repository_exists(&self, repository_id: &str) -> Result<bool, PersistenceError> {
         Ok(
-            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM repositories WHERE id = $1)")
+            crate::query::query_scalar("SELECT EXISTS (SELECT 1 FROM repositories WHERE id = $1)")
                 .bind(repository_id)
                 .fetch_one(&self.pool)
                 .await?,
@@ -243,12 +243,12 @@ impl AuthStore {
 }
 
 async fn lifecycle_repository(
-    pool: &sqlx::PgPool,
+    pool: &sea_orm::DatabaseConnection,
     repository_id: &str,
     enable: bool,
 ) -> Result<RepositoryRecord, PersistenceError> {
-    let mut transaction = pool.begin().await?;
-    let existing = sqlx::query_as::<_, RepositoryRow>(
+    let transaction = pool.begin().await?;
+    let existing = crate::query::query_as::<RepositoryRow>(
         "SELECT id, name, name_normalized, url, description,
                 created_at::text AS created_at, updated_at::text AS updated_at,
                 disabled_at::text AS disabled_at
@@ -256,7 +256,7 @@ async fn lifecycle_repository(
          WHERE id = $1 FOR UPDATE",
     )
     .bind(repository_id)
-    .fetch_optional(&mut *transaction)
+    .fetch_optional(&transaction)
     .await?
     .ok_or(PersistenceError::RepositoryNotFound)?;
     let already_in_target_state = existing.disabled_at.is_none() == enable;
@@ -265,7 +265,7 @@ async fn lifecycle_repository(
         return Ok(existing.into());
     }
     let updated = if enable {
-        sqlx::query_as::<_, RepositoryRow>(
+        crate::query::query_as::<RepositoryRow>(
             "UPDATE repositories
              SET disabled_at = NULL, updated_at = CURRENT_TIMESTAMP
              WHERE id = $1
@@ -274,10 +274,10 @@ async fn lifecycle_repository(
                        disabled_at::text AS disabled_at",
         )
         .bind(repository_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?
     } else {
-        sqlx::query_as::<_, RepositoryRow>(
+        crate::query::query_as::<RepositoryRow>(
             "UPDATE repositories
              SET disabled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE id = $1
@@ -286,19 +286,15 @@ async fn lifecycle_repository(
                        disabled_at::text AS disabled_at",
         )
         .bind(repository_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?
     };
     transaction.commit().await?;
     Ok(updated.into())
 }
 
-fn map_repository_database_error(error: sqlx::Error) -> PersistenceError {
-    if error
-        .as_database_error()
-        .and_then(|database| database.code())
-        .is_some_and(|code| code == "23505")
-    {
+fn map_repository_database_error(error: DbErr) -> PersistenceError {
+    if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
         PersistenceError::RepositoryNameConflict
     } else {
         PersistenceError::Database(error)

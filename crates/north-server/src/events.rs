@@ -181,10 +181,10 @@ mod tests {
     #[tokio::test]
     async fn route_exposes_sse_response() -> Result<(), Box<dyn std::error::Error>> {
         use axum::{body::Body, http::Request};
-        use north_persistence::{AuthStore, PoolOptions};
+        use north_persistence::{AuthStore, DatabaseConnection};
         use tower::ServiceExt;
 
-        let pool = PoolOptions::new().connect_lazy("postgres://localhost/north")?;
+        let pool = DatabaseConnection::default();
         let state = crate::auth::AuthState::with_log_delivery(AuthStore::new(pool, test_otp_key()));
         let response = router()
             .with_state(state)
@@ -206,10 +206,10 @@ mod tests {
     async fn auth_router_rejects_events_without_session_cookie(
     ) -> Result<(), Box<dyn std::error::Error>> {
         use axum::{body::Body, http::Request};
-        use north_persistence::{AuthStore, PoolOptions};
+        use north_persistence::{AuthStore, DatabaseConnection};
         use tower::ServiceExt;
 
-        let pool = PoolOptions::new().connect_lazy("postgres://localhost/north")?;
+        let pool = DatabaseConnection::default();
         let state = crate::auth::AuthState::with_log_delivery(AuthStore::new(pool, test_otp_key()));
         let response = crate::auth::router(state)
             .oneshot(Request::builder().uri("/events").body(Body::empty())?)

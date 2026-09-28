@@ -11,12 +11,13 @@
 Self-hosted requirement management: requesters collaborate with an AI agent to turn
 ambiguous requests into structured, reviewable requirements.
 
-Status: **0.1.0 under active development** — roadmap lives in `openspec/changes/`.
+Status: **under active development** — roadmap lives in `openspec/changes/`.
 
 ## Layout
 
 ```text
 apps/web/            Next.js UI (App Router, Tailwind CSS, shadcn/ui)
+web/                 Astro/Starlight human docs site (user guide, contributors, changelog)
 crates/
   north-domain/      pure requirement business behavior (no infra)
   north-server/      HTTP/SSE host; owns business state transitions
@@ -26,7 +27,7 @@ crates/
 tests/
   architecture/    structural architecture enforcement (runs in cargo test)
 docs/                canonical product/architecture/development documentation
-migrations/          versioned SQL migrations
+crates/north-persistence/src/m0001_initial_schema.rs  SeaORM baseline migration
 openspec/            change management (proposal → specs → design → tasks)
 ```
 
@@ -38,11 +39,49 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-# Web
+# Web app
 cd apps/web && npm ci && npm run lint && npm run typecheck && npm run build
+
+# Human documentation site
+cd web && npm ci && npm run dev
 
 # Specs
 openspec validate --all --strict
 ```
 
 Start with `AGENTS.md`, then `docs/README.md`.
+
+## Self-hosted deployment
+
+Supported deployment topology and upgrade steps live in [`docs/deployment/self-hosted.md`](docs/deployment/self-hosted.md). Release artifacts use one same-origin TLS proxy for Next.js HTTP, server HTTP/SSE, and daemon WSS. The browser never opens WebSockets. Install the matching `north`/`north-daemon` CLI archive, run `north setup --server-url https://north.example`, and manage the host daemon with `north daemon start`, `north daemon stop`, and `north daemon status`. See the operator guide for archive checksums and protected state paths.
+
+Set `VERSION` in your shell to the target release version (`X.Y.Z`, without `v`), then build and verify an extracted package:
+
+```bash
+./scripts/release.sh package "$VERSION"
+(cd "dist/north-v$VERSION" && shasum -a 256 -c checksums.sha256)
+```
+
+Full release evidence checklist: [`docs/development/release-checklist.md`](docs/development/release-checklist.md).
+
+Protected-main runs build and qualify OCI archives but publish no images to GHCR.
+An authorized strict `vX.Y.Z` Git tag starts a fresh build and qualification;
+only tag-built images publish under matching SemVer refs, and the GitHub Release
+becomes public after both images publish. Example 0.1.0 refs are
+`ghcr.io/r05323028/north-server:v0.1.0` and
+`ghcr.io/r05323028/north-web:v0.1.0`. Pin images with `@sha256:` digests from
+the tag workflow summary. Use
+`docker-compose.yaml` from the matching source tag; set `POSTGRES_DB`,
+`POSTGRES_USER`, `POSTGRES_PASSWORD`, `DATABASE_URL`, `NORTH_OTP_HMAC_KEY`,
+`NORTH_SERVER_IMAGE`, and `NORTH_WEB_IMAGE` before startup:
+
+```bash
+git show "v0.1.0:docker-compose.yaml" > docker-compose.yaml
+docker compose --file docker-compose.yaml up --detach postgres
+docker compose --file docker-compose.yaml run --rm --no-deps north-server migrate
+docker compose --file docker-compose.yaml up --detach
+```
+
+Compose keeps PostgreSQL data in a named volume and binds app ports to loopback;
+TLS proxy stays external, and daemon remains host-managed. See the self-hosted
+guide for secrets, backups, proxy routes, and digest pinning.

@@ -7,8 +7,16 @@ use hmac::{Hmac, Mac};
 use north_domain::role::Role;
 use rand::{rng, Rng};
 use sha2::{Digest, Sha256};
-use sqlx::FromRow;
-pub use sqlx::{postgres::PgPoolOptions, PgPool};
+pub mod entities;
+pub mod migrations;
+pub(crate) mod query;
+pub use migrations::MigrationError;
+
+use sea_orm::{
+    sea_query::Expr, ColumnTrait, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
+    TransactionTrait,
+};
+pub use sea_orm::{ConnectOptions, Database, DatabaseConnection};
 use std::{error::Error, fmt};
 use subtle::ConstantTimeEq;
 
@@ -51,9 +59,6 @@ pub use retention::{
     RetentionConfig, RetentionConfigError, DEFAULT_RETENTION_BATCH_SIZE, DEFAULT_RETENTION_SECONDS,
     DEFAULT_RETENTION_SWEEP_SECONDS, MAX_RETENTION_BATCH_SIZE,
 };
-
-pub use sqlx::postgres::PgPoolOptions as PoolOptions;
-pub use sqlx::PgPool as DatabasePool;
 
 /// Verification codes remain usable for ten minutes.
 pub const VERIFICATION_CODE_TTL_SECONDS: i64 = 10 * 60;
@@ -158,18 +163,19 @@ fn otp_digest(key: &OtpKey, canonical_email: &str, id: i64, code: &str) -> Vec<u
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Compile-time embedded migrations applied by server startup.
-pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+/// Apply pending schema migrations as an explicit deployment operation.
+pub async fn run_migrations(database: &DatabaseConnection) -> Result<(), MigrationError> {
+    migrations::apply(database).await
+}
 
-pub type MigrationError = sqlx::migrate::MigrateError;
-
-pub async fn run_migrations(pool: &PgPool) -> Result<(), MigrationError> {
-    MIGRATOR.run(pool).await
+/// Verify schema readiness without applying DDL.
+pub async fn verify_migrations(database: &DatabaseConnection) -> Result<(), MigrationError> {
+    migrations::verify(database).await
 }
 
 #[derive(Debug)]
 pub enum PersistenceError {
-    Database(sqlx::Error),
+    Database(sea_orm::DbErr),
     InvalidCode,
     InvalidRole(String),
     RateLimited,
@@ -261,8 +267,8 @@ impl Error for PersistenceError {
     }
 }
 
-impl From<sqlx::Error> for PersistenceError {
-    fn from(error: sqlx::Error) -> Self {
+impl From<sea_orm::DbErr> for PersistenceError {
+    fn from(error: sea_orm::DbErr) -> Self {
         Self::Database(error)
     }
 }
@@ -284,13 +290,13 @@ pub struct AuthenticatedSession {
 
 #[derive(Clone)]
 pub struct AuthStore {
-    pool: PgPool,
+    pool: DatabaseConnection,
     otp_key: OtpKey,
     retention: RetentionConfig,
 }
 
 impl AuthStore {
-    pub fn new(pool: PgPool, otp_key: OtpKey) -> Self {
+    pub fn new(pool: DatabaseConnection, otp_key: OtpKey) -> Self {
         Self {
             pool,
             otp_key,
@@ -299,7 +305,11 @@ impl AuthStore {
     }
 
     /// Build a store with explicit validated retention settings.
-    pub fn with_retention(pool: PgPool, otp_key: OtpKey, retention: RetentionConfig) -> Self {
+    pub fn with_retention(
+        pool: DatabaseConnection,
+        otp_key: OtpKey,
+        retention: RetentionConfig,
+    ) -> Self {
         Self {
             pool,
             otp_key,
@@ -312,7 +322,7 @@ impl AuthStore {
         self.retention
     }
 
-    pub fn pool(&self) -> &PgPool {
+    pub fn pool(&self) -> &DatabaseConnection {
         &self.pool
     }
 
@@ -320,15 +330,15 @@ impl AuthStore {
     ///
     /// `email` must already be canonicalized by the authentication boundary.
     pub async fn issue_code(&self, email: &str, code: &str) -> Result<(), PersistenceError> {
-        let mut transaction = self.pool.begin().await?;
+        let transaction = self.pool.begin().await?;
 
         // Serialize requests for the same email before checking the cooldown.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        crate::query::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(email)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
 
-        let recently_requested: bool = sqlx::query_scalar(
+        let recently_requested: bool = crate::query::query_scalar(
             "SELECT EXISTS (
                 SELECT 1
                 FROM verification_codes
@@ -339,27 +349,27 @@ impl AuthStore {
         )
         .bind(email)
         .bind(CODE_REQUEST_COOLDOWN_SECONDS)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
         if recently_requested {
             return Err(PersistenceError::RateLimited);
         }
 
-        sqlx::query(
+        crate::query::query(
             "UPDATE verification_codes
              SET used_at = CURRENT_TIMESTAMP
              WHERE email = $1 AND used_at IS NULL",
         )
         .bind(email)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
 
-        let id: i64 = sqlx::query_scalar("SELECT nextval('verification_codes_id_seq')")
-            .fetch_one(&mut *transaction)
+        let id: i64 = crate::query::query_scalar("SELECT nextval('verification_codes_id_seq')")
+            .fetch_one(&transaction)
             .await?;
         let code_hash = otp_digest(&self.otp_key, email, id, code);
 
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO verification_codes (id, email, code_hash, expires_at)
              VALUES ($1, $2, $3, CURRENT_TIMESTAMP
                  + ($4::double precision * INTERVAL '1 second'))",
@@ -368,7 +378,7 @@ impl AuthStore {
         .bind(email)
         .bind(code_hash)
         .bind(VERIFICATION_CODE_TTL_SECONDS)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
 
         transaction.commit().await?;
@@ -381,9 +391,9 @@ impl AuthStore {
         email: &str,
         code: &str,
     ) -> Result<AuthenticatedSession, PersistenceError> {
-        let mut transaction = self.pool.begin().await?;
+        let transaction = self.pool.begin().await?;
 
-        let Some(code_row) = sqlx::query_as::<_, VerificationCodeRow>(
+        let Some(code_row) = crate::query::query_as::<VerificationCodeRow>(
             "SELECT id, email, code_hash, failed_attempts
              FROM verification_codes
              WHERE email = $1
@@ -394,7 +404,7 @@ impl AuthStore {
              FOR UPDATE",
         )
         .bind(email)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         else {
             return Err(PersistenceError::InvalidCode);
@@ -409,7 +419,7 @@ impl AuthStore {
             == 1;
         if !matches {
             let failed_attempts = code_row.failed_attempts.saturating_add(1);
-            sqlx::query(
+            crate::query::query(
                 "UPDATE verification_codes
                  SET failed_attempts = $2,
                      used_at = CASE WHEN $2 >= $3 THEN CURRENT_TIMESTAMP ELSE used_at END
@@ -418,63 +428,63 @@ impl AuthStore {
             .bind(code_row.id)
             .bind(failed_attempts)
             .bind(VERIFICATION_CODE_MAX_ATTEMPTS)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
             transaction.commit().await?;
             return Err(PersistenceError::InvalidCode);
         }
 
-        let consumed = sqlx::query(
+        let consumed = crate::query::query(
             "UPDATE verification_codes
              SET used_at = CURRENT_TIMESTAMP
              WHERE id = $1 AND used_at IS NULL",
         )
         .bind(code_row.id)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         if consumed.rows_affected() != 1 {
             return Err(PersistenceError::InvalidCode);
         }
 
         let user_id = random_hex(16);
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO users (id, email)
              VALUES ($1, $2)
              ON CONFLICT (email) DO NOTHING",
         )
         .bind(&user_id)
         .bind(email)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
 
-        let user_row = sqlx::query_as::<_, UserRow>(
+        let user_row = crate::query::query_as::<UserRow>(
             "SELECT id, email, role FROM users WHERE email = $1 FOR UPDATE",
         )
         .bind(email)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
         let mut user = user_row.into_domain()?;
 
-        let owner_claimed = sqlx::query(
+        let owner_claimed = crate::query::query(
             "UPDATE instance_settings
              SET owner_user_id = $1
              WHERE id = 1 AND owner_user_id IS NULL",
         )
         .bind(&user.id)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?
         .rows_affected()
             == 1;
         if owner_claimed {
-            sqlx::query("UPDATE users SET role = 'Owner' WHERE id = $1")
+            crate::query::query("UPDATE users SET role = 'Owner' WHERE id = $1")
                 .bind(&user.id)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
             user.role = Role::Owner;
         }
 
         let token = random_hex(32);
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO sessions (id, user_id, token_hash, expires_at)
              VALUES ($1, $2, $3, CURRENT_TIMESTAMP
                  + ($4::double precision * INTERVAL '1 second'))",
@@ -483,7 +493,7 @@ impl AuthStore {
         .bind(&user.id)
         .bind(hash_secret(token.as_bytes()))
         .bind(SESSION_TTL_SECONDS)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
 
         transaction.commit().await?;
@@ -494,7 +504,7 @@ impl AuthStore {
         &self,
         token: &str,
     ) -> Result<Option<UserRecord>, PersistenceError> {
-        let row = sqlx::query_as::<_, UserRow>(
+        let row = crate::query::query_as::<UserRow>(
             "SELECT users.id, users.email, users.role
              FROM sessions
              INNER JOIN users ON users.id = sessions.user_id
@@ -509,20 +519,21 @@ impl AuthStore {
     }
 
     pub async fn list_users(&self) -> Result<Vec<UserRecord>, PersistenceError> {
-        let rows = sqlx::query_as::<_, UserRow>(
-            "SELECT id, email, role FROM users ORDER BY email ASC, id ASC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(UserRow::into_domain).collect()
+        let rows = entities::users::Entity::find()
+            .order_by_asc(entities::users::Column::Email)
+            .order_by_asc(entities::users::Column::Id)
+            .all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| UserRow::from(row).into_domain())
+            .collect()
     }
 
     pub async fn user_by_id(&self, user_id: &str) -> Result<Option<UserRecord>, PersistenceError> {
-        let row = sqlx::query_as::<_, UserRow>("SELECT id, email, role FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(&self.pool)
+        let row = entities::users::Entity::find_by_id(user_id.to_owned())
+            .one(&self.pool)
             .await?;
-        row.map(UserRow::into_domain).transpose()
+        row.map(UserRow::from).map(UserRow::into_domain).transpose()
     }
 
     pub async fn update_user_role(
@@ -530,21 +541,22 @@ impl AuthStore {
         user_id: &str,
         role: Role,
     ) -> Result<Option<UserRecord>, PersistenceError> {
-        let row = sqlx::query_as::<_, UserRow>(
-            "UPDATE users
-             SET role = $2
-             WHERE id = $1
-             RETURNING id, email, role",
-        )
-        .bind(user_id)
-        .bind(persisted_role(role))
-        .fetch_optional(&self.pool)
-        .await?;
-        row.map(UserRow::into_domain).transpose()
+        let mut rows = entities::users::Entity::update_many()
+            .col_expr(
+                entities::users::Column::Role,
+                Expr::value(persisted_role(role)),
+            )
+            .filter(entities::users::Column::Id.eq(user_id))
+            .exec_with_returning(&self.pool)
+            .await?;
+        rows.pop()
+            .map(UserRow::from)
+            .map(UserRow::into_domain)
+            .transpose()
     }
 
     pub async fn invalidate_session(&self, token: &str) -> Result<(), PersistenceError> {
-        sqlx::query(
+        crate::query::query(
             "UPDATE sessions
              SET invalidated_at = CURRENT_TIMESTAMP
              WHERE token_hash = $1 AND invalidated_at IS NULL",
@@ -556,7 +568,7 @@ impl AuthStore {
     }
 }
 
-#[derive(FromRow)]
+#[derive(FromQueryResult)]
 struct VerificationCodeRow {
     id: i64,
     email: String,
@@ -564,7 +576,7 @@ struct VerificationCodeRow {
     failed_attempts: i32,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct UserRow {
     id: String,
     email: String,
@@ -577,6 +589,16 @@ fn persisted_role(role: Role) -> &'static str {
         Role::Admin => "Admin",
         Role::RequirementManager => "RequirementManager",
         Role::Requester => "Requester",
+    }
+}
+
+impl From<entities::users::Model> for UserRow {
+    fn from(row: entities::users::Model) -> Self {
+        Self {
+            id: row.id,
+            email: row.email,
+            role: row.role,
+        }
     }
 }
 
@@ -676,6 +698,26 @@ mod tests {
             .get_or_init(|| tokio::sync::Mutex::new(()))
             .lock()
             .await
+    }
+
+    async fn connect_test_database(url: &str, max_connections: u32) -> DatabaseConnection {
+        let mut options = ConnectOptions::new(url);
+        options.max_connections(max_connections);
+        Database::connect(options)
+            .await
+            .expect("connect test database")
+    }
+
+    #[derive(FromQueryResult)]
+    struct CodeHashRow {
+        id: i64,
+        code_hash: Vec<u8>,
+    }
+
+    #[derive(FromQueryResult)]
+    struct VerificationAttemptRow {
+        failed_attempts: i32,
+        consumed: bool,
     }
 
     #[test]
@@ -786,11 +828,7 @@ mod tests {
             return;
         };
         let _database_test_guard = database_test_lock().await;
-        let pool = PoolOptions::new()
-            .max_connections(8)
-            .connect(&database_url)
-            .await
-            .expect("connect test database");
+        let pool = connect_test_database(&database_url, 8).await;
         run_migrations(&pool).await.expect("run migrations");
 
         let key = test_otp_key();
@@ -806,23 +844,25 @@ mod tests {
             .await
             .expect("issue second code");
 
-        let first: (i64, Vec<u8>) =
-            sqlx::query_as("SELECT id, code_hash FROM verification_codes WHERE email = $1")
-                .bind(&first_email)
-                .fetch_one(&pool)
-                .await
-                .expect("read first digest");
-        let second: (i64, Vec<u8>) =
-            sqlx::query_as("SELECT id, code_hash FROM verification_codes WHERE email = $1")
-                .bind(&second_email)
-                .fetch_one(&pool)
-                .await
-                .expect("read second digest");
-        assert_ne!(first.0, second.0);
-        assert_eq!(first.1.len(), OTP_HMAC_MAC_LENGTH);
-        assert_eq!(second.1.len(), OTP_HMAC_MAC_LENGTH);
-        assert_ne!(first.1, second.1);
-        assert_ne!(first.1, hash_secret(b"123456"));
+        let first = crate::query::query_as::<CodeHashRow>(
+            "SELECT id, code_hash FROM verification_codes WHERE email = $1",
+        )
+        .bind(&first_email)
+        .fetch_one(&pool)
+        .await
+        .expect("read first digest");
+        let second = crate::query::query_as::<CodeHashRow>(
+            "SELECT id, code_hash FROM verification_codes WHERE email = $1",
+        )
+        .bind(&second_email)
+        .fetch_one(&pool)
+        .await
+        .expect("read second digest");
+        assert_ne!(first.id, second.id);
+        assert_eq!(first.code_hash.len(), OTP_HMAC_MAC_LENGTH);
+        assert_eq!(second.code_hash.len(), OTP_HMAC_MAC_LENGTH);
+        assert_ne!(first.code_hash, second.code_hash);
+        assert_ne!(first.code_hash, hash_secret(b"123456"));
 
         let rotated_key =
             OtpKey::from_hex("101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f")
@@ -845,20 +885,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_active_codes_are_consumed_before_keyed_verification() {
+    async fn legacy_digest_never_uses_unkeyed_verification_fallback() {
         let Ok(database_url) = std::env::var("NORTH_TEST_DATABASE_URL") else {
             return;
         };
         let _database_test_guard = database_test_lock().await;
-        let pool = PoolOptions::new()
-            .max_connections(4)
-            .connect(&database_url)
-            .await
-            .expect("connect test database");
+        let pool = connect_test_database(&database_url, 4).await;
         run_migrations(&pool).await.expect("run migrations");
 
         let email = format!("otp-legacy-{}@example.com", random_hex(8));
-        sqlx::query(
+        // Simulate an unsupported pre-keyed digest; verification must reject it.
+        crate::query::query(
             "INSERT INTO verification_codes (email, code_hash, expires_at)
              VALUES ($1, $2, CURRENT_TIMESTAMP + INTERVAL '10 minutes')",
         )
@@ -867,13 +904,6 @@ mod tests {
         .execute(&pool)
         .await
         .expect("insert legacy code");
-        sqlx::query(include_str!(
-            "../../../migrations/0019_otp_hmac_hardening.sql"
-        ))
-        .execute(&pool)
-        .await
-        .expect("apply legacy invalidation");
-
         let store = AuthStore::new(pool, test_otp_key());
         assert!(matches!(
             store.verify_code(&email, "123456").await,
@@ -887,15 +917,11 @@ mod tests {
             return;
         };
         let _database_test_guard = database_test_lock().await;
-        let pool = PoolOptions::new()
-            .max_connections(8)
-            .connect(&database_url)
-            .await
-            .expect("connect test database");
+        let pool = connect_test_database(&database_url, 8).await;
         run_migrations(&pool).await.expect("run migrations");
 
         // NORTH_TEST_DATABASE_URL must point at an isolated test database.
-        sqlx::query("DELETE FROM instance_settings")
+        crate::query::query("DELETE FROM instance_settings")
             .execute(&pool)
             .await
             .expect("clear instance settings");
@@ -908,16 +934,16 @@ mod tests {
             "daemon_setup_requests",
             "daemon_registrations",
         ] {
-            sqlx::query(&format!("DELETE FROM {table}"))
+            crate::query::query(format!("DELETE FROM {table}"))
                 .execute(&pool)
                 .await
                 .expect("clear daemon runtime rows");
         }
-        sqlx::query("DELETE FROM users")
+        crate::query::query("DELETE FROM users")
             .execute(&pool)
             .await
             .expect("clear users");
-        sqlx::query("INSERT INTO instance_settings (id) VALUES (1)")
+        crate::query::query("INSERT INTO instance_settings (id) VALUES (1)")
             .execute(&pool)
             .await
             .expect("restore singleton settings");
@@ -954,7 +980,7 @@ mod tests {
         );
 
         let owner_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'Owner'")
+            crate::query::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'Owner'")
                 .fetch_one(&pool)
                 .await
                 .expect("count owners");
@@ -967,11 +993,7 @@ mod tests {
             return;
         };
         let _database_test_guard = database_test_lock().await;
-        let pool = PoolOptions::new()
-            .max_connections(8)
-            .connect(&database_url)
-            .await
-            .expect("connect test database");
+        let pool = connect_test_database(&database_url, 8).await;
         run_migrations(&pool).await.expect("run migrations");
         let store = AuthStore::new(pool.clone(), test_otp_key());
         let email = format!("verification-attempts-{}@example.com", random_hex(8));
@@ -984,7 +1006,7 @@ mod tests {
             store.verify_code(&email, "000000").await,
             Err(PersistenceError::InvalidCode)
         ));
-        let failed_attempts: i32 = sqlx::query_scalar(
+        let failed_attempts: i32 = crate::query::query_scalar(
             "SELECT failed_attempts FROM verification_codes
              WHERE email = $1 ORDER BY id DESC LIMIT 1",
         )
@@ -1009,8 +1031,8 @@ mod tests {
             ));
         }
 
-        let (failed_attempts, consumed): (i32, bool) = sqlx::query_as(
-            "SELECT failed_attempts, used_at IS NOT NULL
+        let attempt = crate::query::query_as::<VerificationAttemptRow>(
+            "SELECT failed_attempts, used_at IS NOT NULL AS consumed
              FROM verification_codes
              WHERE email = $1 ORDER BY id DESC LIMIT 1",
         )
@@ -1018,14 +1040,14 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("read consumed code");
-        assert_eq!(failed_attempts, VERIFICATION_CODE_MAX_ATTEMPTS);
-        assert!(consumed);
+        assert_eq!(attempt.failed_attempts, VERIFICATION_CODE_MAX_ATTEMPTS);
+        assert!(attempt.consumed);
         assert!(matches!(
             store.verify_code(&email, "123456").await,
             Err(PersistenceError::InvalidCode)
         ));
 
-        sqlx::query(
+        crate::query::query(
             "UPDATE verification_codes
              SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes'
              WHERE email = $1",
@@ -1043,7 +1065,7 @@ mod tests {
             .await
             .expect("verify fresh code");
         assert_eq!(session.user.email, email);
-        let fresh_attempts: i32 = sqlx::query_scalar(
+        let fresh_attempts: i32 = crate::query::query_scalar(
             "SELECT failed_attempts FROM verification_codes
              WHERE email = $1 ORDER BY id DESC LIMIT 1",
         )
@@ -1058,7 +1080,7 @@ mod tests {
             .issue_code(&superseded_email, "777777")
             .await
             .expect("issue superseded code");
-        sqlx::query(
+        crate::query::query(
             "UPDATE verification_codes\n             SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes'\n             WHERE email = $1",
         )
         .bind(&superseded_email)

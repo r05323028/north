@@ -1,10 +1,14 @@
+#[allow(dead_code)]
+mod support;
+use support::TestDatabaseOptions;
+
 use axum::{
     body::{to_bytes, Body},
     extract::ConnectInfo,
     http::{header, Method, Request, StatusCode},
 };
 use futures_util::future::join_all;
-use north_persistence::{AuthStore, PersistenceError, PoolOptions};
+use north_persistence::{AuthStore, PersistenceError};
 use north_server::{auth_router, AuthState, LogCodeDelivery, PublicEndpointConfig};
 use serde_json::Value;
 use std::{
@@ -23,7 +27,7 @@ static DATABASE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static KEY_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 async fn database() -> (
-    north_persistence::PgPool,
+    north_persistence::DatabaseConnection,
     tokio::sync::MutexGuard<'static, ()>,
 ) {
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
@@ -32,12 +36,12 @@ async fn database() -> (
         .get_or_init(|| Mutex::new(()))
         .lock()
         .await;
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(16)
         .connect(&database_url)
         .await
         .expect("connect test database");
-    north_server::run_migrations(&pool)
+    north_persistence::run_migrations(&pool)
         .await
         .expect("run migrations");
     (pool, guard)
@@ -143,7 +147,7 @@ async fn setup_quota_is_keyed_and_concurrency_safe() {
         3,
         "pending quota must serialize count-and-insert"
     );
-    sqlx::query(
+    support::query(
         "UPDATE daemon_setup_requests
          SET approved_at = CURRENT_TIMESTAMP
          WHERE label = $1",
@@ -153,7 +157,7 @@ async fn setup_quota_is_keyed_and_concurrency_safe() {
     .await
     .expect("mark setup approved");
 
-    let before_rejection: i64 = sqlx::query_scalar(
+    let before_rejection: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM daemon_setup_requests
          WHERE client_network_key = $1::cidr
            AND claimed_at IS NULL
@@ -170,7 +174,7 @@ async fn setup_quota_is_keyed_and_concurrency_safe() {
             .await,
         Err(PersistenceError::RateLimited)
     ));
-    let after_rejection: i64 = sqlx::query_scalar(
+    let after_rejection: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM daemon_setup_requests
          WHERE client_network_key = $1::cidr
            AND claimed_at IS NULL
@@ -188,7 +192,7 @@ async fn setup_quota_is_keyed_and_concurrency_safe() {
         .await
         .expect("different CIDR must have an independent quota");
 
-    sqlx::query(
+    support::query(
         "UPDATE daemon_setup_requests
          SET claimed_at = CURRENT_TIMESTAMP
          WHERE label = $1",
@@ -202,7 +206,7 @@ async fn setup_quota_is_keyed_and_concurrency_safe() {
         .await
         .expect("claimed setup must not count");
 
-    sqlx::query(
+    support::query(
         "UPDATE daemon_setup_requests
          SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'
          WHERE label = $1",
@@ -216,7 +220,7 @@ async fn setup_quota_is_keyed_and_concurrency_safe() {
         .await
         .expect("expired setup must not count");
 
-    let non_null_keys: i64 = sqlx::query_scalar(
+    let non_null_keys: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM daemon_setup_requests
          WHERE client_network_key IS NOT NULL
            AND label LIKE $1",
@@ -286,7 +290,7 @@ async fn public_http_429_is_generic_and_endpoint_buckets_are_isolated() {
         serde_json::json!({"error": "rate_limited"})
     );
     let rejected_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM verification_codes WHERE email = $1")
+        support::query_scalar("SELECT COUNT(*) FROM verification_codes WHERE email = $1")
             .bind(&rejected_email)
             .fetch_one(&pool)
             .await
@@ -378,7 +382,7 @@ async fn email_cooldown_consumes_client_bucket() {
     );
 
     let issued: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM verification_codes WHERE email = $1")
+        support::query_scalar("SELECT COUNT(*) FROM verification_codes WHERE email = $1")
             .bind(&email)
             .fetch_one(&pool)
             .await
@@ -458,7 +462,7 @@ async fn pending_setup_quota_consumes_client_bucket() {
         serde_json::json!({"error": "rate_limited"})
     );
 
-    let created: i64 = sqlx::query_scalar(
+    let created: i64 = support::query_scalar(
         "SELECT COUNT(*)
          FROM daemon_setup_requests
          WHERE label LIKE $1
@@ -547,7 +551,7 @@ async fn malformed_setup_requests_are_generic_and_do_not_consume_client_bucket()
     assert_eq!(response.status(), StatusCode::OK);
 
     let created: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
+        support::query_scalar("SELECT COUNT(*) FROM daemon_setup_requests WHERE label LIKE $1")
             .bind(format!("{label_prefix}-%"))
             .fetch_one(&pool)
             .await

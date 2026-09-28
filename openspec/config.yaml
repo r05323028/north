@@ -5,14 +5,14 @@ context: |
   with an AI agent to turn ambiguous requests into structured,
   reviewable requirements.
 
-  Stack (fixed for 0.1.0): Next.js (App Router, TypeScript, Tailwind
+  Current stack: Next.js (App Router, TypeScript, Tailwind
   CSS, shadcn/ui) frontend; Rust backend server + local Rust daemon;
-  relational database (versioned SQL in migrations/); host git on the
-  daemon machine for repository access. Monorepo layout: apps/web,
-  crates/north-{domain,server,daemon,protocol,persistence},
-  tests/architecture (boundary enforcement), docs/, migrations/,
-  openspec/. Repository layout: `crates/` is reserved for production
-  components; structural validation belongs under `tests/`.
+  PostgreSQL database uses SeaORM entities and compiled Rust migrations in
+  `crates/north-persistence`; host git stays on daemon machine. Monorepo
+  layout: apps/web, crates/north-{domain,server,daemon,protocol,persistence},
+  tests/architecture (boundary enforcement), docs/, openspec/. `crates/` is
+  reserved for production components; structural validation belongs under
+  `tests/`.
 
   Hard boundaries (enforced by tests/architecture; never bypass):
   - north-domain is pure business logic: no HTTP, DB, runtime,

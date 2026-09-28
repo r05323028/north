@@ -1,6 +1,6 @@
 use crate::{AuthStore, PersistenceError};
+use sea_orm::{DatabaseTransaction, FromQueryResult, TransactionTrait};
 use serde_json::Value;
-use sqlx::{FromRow, Postgres, Transaction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventReceiptOutcome {
@@ -38,7 +38,7 @@ pub struct EventReceiptRequest<'a> {
     pub rejection_reason: Option<&'a str>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct EventReceiptRow {
     event_id: String,
     session_id: String,
@@ -48,7 +48,7 @@ struct EventReceiptRow {
     rejection_reason: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct SessionDeliveryRow {
     event_ack_through_seq: i64,
     event_ack_sparse: Vec<i64>,
@@ -70,7 +70,7 @@ impl AuthStore {
         let sequence =
             i64::try_from(server_command_seq).map_err(|_| PersistenceError::InvalidSessionState)?;
         let mut transaction = self.pool.begin().await?;
-        let outbox = sqlx::query_as::<_, CommandReceiptRow>(
+        let outbox = crate::query::query_as::<CommandReceiptRow>(
             "SELECT session_id, server_command_seq, payload, payload_digest,
                     command_identity_digest, acknowledged_at IS NOT NULL AS acknowledged
              FROM server_command_outbox
@@ -78,7 +78,7 @@ impl AuthStore {
              FOR UPDATE",
         )
         .bind(command_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?;
         let watermark = if let Some(row) = outbox {
             if row.session_id != session_id || row.server_command_seq != sequence {
@@ -94,25 +94,25 @@ impl AuthStore {
                 ));
             }
             if !row.acknowledged {
-                sqlx::query(
+                crate::query::query(
                     "UPDATE server_command_outbox
                      SET acknowledged_at = CURRENT_TIMESTAMP
                      WHERE command_id = $1",
                 )
                 .bind(command_id)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
             }
             advance_command_watermark(&mut transaction, session_id).await?
         } else {
-            let Some(tombstone) = sqlx::query_as::<_, CommandTombstoneReceiptRow>(
+            let Some(tombstone) = crate::query::query_as::<CommandTombstoneReceiptRow>(
                 "SELECT session_id, server_command_seq
                  FROM server_command_tombstones
                  WHERE command_id = $1
                  FOR UPDATE",
             )
             .bind(command_id)
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&transaction)
             .await?
             else {
                 return Err(PersistenceError::ProtocolIntegrity(
@@ -124,12 +124,12 @@ impl AuthStore {
                     "command ACK identity conflicts with tombstone".into(),
                 ));
             }
-            let watermark: i64 = sqlx::query_scalar(
+            let watermark: i64 = crate::query::query_scalar(
                 "SELECT command_ack_through_seq
                  FROM execution_sessions WHERE id = $1 FOR UPDATE",
             )
             .bind(session_id)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&transaction)
             .await?;
             u64::try_from(watermark).map_err(|_| PersistenceError::InvalidSessionState)?
         };
@@ -143,7 +143,7 @@ impl AuthStore {
         &self,
         daemon_id: &str,
     ) -> Result<Vec<crate::PinnedCommand>, PersistenceError> {
-        let rows = sqlx::query_as::<_, PinnedCommandRow>(
+        let rows = crate::query::query_as::<PinnedCommandRow>(
             "SELECT command_id, session_id, daemon_id, server_command_seq, payload,
                     payload_digest, command_identity_digest
              FROM server_command_outbox
@@ -230,21 +230,21 @@ impl AuthStore {
         let sequence =
             i64::try_from(daemon_event_seq).map_err(|_| PersistenceError::InvalidSessionState)?;
         let mut transaction = self.pool.begin().await?;
-        let session = sqlx::query_as::<_, SessionDeliveryRow>(
+        let session = crate::query::query_as::<SessionDeliveryRow>(
             "SELECT event_ack_through_seq, event_ack_sparse
              FROM execution_sessions
              WHERE id = $1
              FOR UPDATE",
         )
         .bind(session_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         .ok_or(PersistenceError::InvalidSessionState)?;
-        let readiness_event_exists: bool = sqlx::query_scalar(
+        let readiness_event_exists: bool = crate::query::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM readiness_assessments WHERE event_id = $1)",
         )
         .bind(event_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
         if readiness_event_exists {
             return Err(PersistenceError::ProtocolIntegrity(
@@ -252,7 +252,7 @@ impl AuthStore {
             ));
         }
 
-        if let Some(row) = sqlx::query_as::<_, EventReceiptRow>(
+        if let Some(row) = crate::query::query_as::<EventReceiptRow>(
             "SELECT event_id, session_id, daemon_event_seq, payload_digest,
                     outcome, rejection_reason
              FROM server_event_dedupe
@@ -260,7 +260,7 @@ impl AuthStore {
              FOR UPDATE",
         )
         .bind(event_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         {
             if row.session_id != session_id
@@ -275,7 +275,7 @@ impl AuthStore {
             return event_receipt_from_row(row, true);
         }
 
-        if let Some(row) = sqlx::query_as::<_, EventReceiptRow>(
+        if let Some(row) = crate::query::query_as::<EventReceiptRow>(
             "SELECT event_id, session_id, daemon_event_seq, payload_digest,
                     outcome, rejection_reason
              FROM server_event_dedupe
@@ -284,7 +284,7 @@ impl AuthStore {
         )
         .bind(session_id)
         .bind(sequence)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         {
             return Err(PersistenceError::ProtocolIntegrity(format!(
@@ -314,7 +314,7 @@ impl AuthStore {
             ));
         }
 
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO server_event_dedupe
                 (event_id, session_id, daemon_event_seq, payload_digest, payload,
                  outcome, rejection_reason)
@@ -327,7 +327,7 @@ impl AuthStore {
         .bind(payload)
         .bind(outcome.as_str())
         .bind(rejection_reason)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         advance_event_watermark(&mut transaction, session_id, sequence).await?;
         transaction.commit().await?;
@@ -343,19 +343,19 @@ impl AuthStore {
 }
 
 async fn compact_server_commands_in_transaction(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
 ) -> Result<u64, PersistenceError> {
-    let watermark: i64 = sqlx::query_scalar(
+    let watermark: i64 = crate::query::query_scalar(
         "SELECT command_ack_through_seq
          FROM execution_sessions
          WHERE id = $1
          FOR UPDATE",
     )
     .bind(session_id)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?;
-    sqlx::query(
+    crate::query::query(
         "INSERT INTO server_command_tombstones
             (command_id, session_id, daemon_id, server_command_seq, payload,
              payload_digest, command_identity_digest, acknowledged_at)
@@ -370,9 +370,9 @@ async fn compact_server_commands_in_transaction(
     )
     .bind(session_id)
     .bind(watermark)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
-    let deleted = sqlx::query(
+    let deleted = crate::query::query(
         "DELETE FROM server_command_outbox
          WHERE session_id = $1
            AND server_command_seq <= $2
@@ -380,24 +380,24 @@ async fn compact_server_commands_in_transaction(
     )
     .bind(session_id)
     .bind(watermark)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(deleted.rows_affected())
 }
 
 async fn advance_event_watermark(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
     sequence: i64,
 ) -> Result<(), PersistenceError> {
-    let mut cursor = sqlx::query_as::<_, EventCursorRow>(
+    let mut cursor = crate::query::query_as::<EventCursorRow>(
         "SELECT event_ack_through_seq, event_ack_sparse
          FROM execution_sessions
          WHERE id = $1
          FOR UPDATE",
     )
     .bind(session_id)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?;
     cursor.event_ack_through_seq = cursor.event_ack_through_seq.max(sequence);
     loop {
@@ -415,7 +415,7 @@ async fn advance_event_watermark(
     cursor
         .event_ack_sparse
         .retain(|value| *value > cursor.event_ack_through_seq);
-    sqlx::query(
+    crate::query::query(
         "UPDATE execution_sessions
          SET event_ack_through_seq = $2, event_ack_sparse = $3
          WHERE id = $1",
@@ -423,31 +423,31 @@ async fn advance_event_watermark(
     .bind(session_id)
     .bind(cursor.event_ack_through_seq)
     .bind(cursor.event_ack_sparse)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(())
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct EventCursorRow {
     event_ack_through_seq: i64,
     event_ack_sparse: Vec<i64>,
 }
 
 async fn advance_command_watermark(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
 ) -> Result<u64, PersistenceError> {
-    let current: i64 = sqlx::query_scalar(
+    let current: i64 = crate::query::query_scalar(
         "SELECT command_ack_through_seq
          FROM execution_sessions
          WHERE id = $1
          FOR UPDATE",
     )
     .bind(session_id)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?;
-    let first_unacknowledged: Option<i64> = sqlx::query_scalar(
+    let first_unacknowledged: Option<i64> = crate::query::query_scalar(
         "SELECT MIN(server_command_seq)
          FROM server_command_outbox
          WHERE session_id = $1
@@ -456,23 +456,23 @@ async fn advance_command_watermark(
     )
     .bind(session_id)
     .bind(current)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?;
-    let maximum: i64 = sqlx::query_scalar(
+    let maximum: i64 = crate::query::query_scalar(
         "SELECT COALESCE(MAX(server_command_seq), 0)
          FROM server_command_outbox WHERE session_id = $1",
     )
     .bind(session_id)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?;
     let watermark = first_unacknowledged
         .map(|sequence| sequence.saturating_sub(1))
         .unwrap_or(maximum)
         .max(current);
-    sqlx::query("UPDATE execution_sessions SET command_ack_through_seq = $2 WHERE id = $1")
+    crate::query::query("UPDATE execution_sessions SET command_ack_through_seq = $2 WHERE id = $1")
         .bind(session_id)
         .bind(watermark)
-        .execute(&mut **transaction)
+        .execute(&*transaction)
         .await?;
     u64::try_from(watermark).map_err(|_| PersistenceError::InvalidSessionState)
 }
@@ -503,13 +503,13 @@ fn event_receipt_from_row(
     })
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct CommandTombstoneReceiptRow {
     session_id: String,
     server_command_seq: i64,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct CommandReceiptRow {
     session_id: String,
     server_command_seq: i64,
@@ -519,7 +519,7 @@ struct CommandReceiptRow {
     acknowledged: bool,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct PinnedCommandRow {
     command_id: String,
     session_id: String,

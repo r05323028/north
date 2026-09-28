@@ -4,8 +4,10 @@ use crate::{
 };
 use north_domain::status::RequirementStatus;
 use rand::{rng, Rng};
+use sea_orm::{
+    DatabaseConnection, DatabaseTransaction, DbErr, FromQueryResult, SqlErr, TransactionTrait,
+};
 use serde_json::Value;
-use sqlx::{FromRow, Postgres, Transaction};
 use std::{error::Error, fmt};
 
 pub const MAX_CONTEXT_MESSAGES: usize = 50;
@@ -109,7 +111,7 @@ pub struct ClarificationCommandResult {
 
 #[derive(Debug)]
 pub enum ClarificationError {
-    Database(sqlx::Error),
+    Database(DbErr),
     RequirementNotFound,
     MessageNotFound,
     InvalidMessage,
@@ -149,8 +151,8 @@ impl Error for ClarificationError {
     }
 }
 
-impl From<sqlx::Error> for ClarificationError {
-    fn from(error: sqlx::Error) -> Self {
+impl From<DbErr> for ClarificationError {
+    fn from(error: DbErr) -> Self {
         Self::Database(error)
     }
 }
@@ -221,7 +223,7 @@ fn requirement_error(error: crate::requirements::RequirementError) -> Clarificat
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct RunRow {
     id: String,
     requirement_id: String,
@@ -242,7 +244,7 @@ struct RunRow {
     cancel_command_id: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct MessageBodyRow {
     body: String,
 }
@@ -336,15 +338,15 @@ impl AuthStore {
             return Err(ClarificationError::InvalidContext);
         }
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        crate::query::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(format!("clarification-slot:{requirement_id}"))
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
         let row = lock_requirement(&mut transaction, requirement_id)
             .await
             .map_err(requirement_error)?;
         let requirement = row.to_domain().map_err(requirement_error)?;
-        let message_exists: bool = sqlx::query_scalar(
+        let message_exists: bool = crate::query::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM messages
                  JOIN conversations ON conversations.id = messages.conversation_id
@@ -355,13 +357,13 @@ impl AuthStore {
         )
         .bind(requirement_id)
         .bind(start_message_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
         if !message_exists {
             return Err(ClarificationError::MessageNotFound);
         }
 
-        let occupant = sqlx::query_as::<_, RunRow>(
+        let occupant = crate::query::query_as::<RunRow>(
             "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
                     next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                     COALESCE((
@@ -384,7 +386,7 @@ impl AuthStore {
              FOR UPDATE",
         )
         .bind(requirement_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?;
         let mut payload_builder = Some(build_payload);
         if let Some(occupant) = occupant {
@@ -405,11 +407,11 @@ impl AuthStore {
                 };
                 let command_id = crate::random_hex(16);
                 let sequence = next_command_sequence(&mut transaction, &run.run_id).await?;
-                let start_context: Value = sqlx::query_scalar(
+                let start_context: Value = crate::query::query_scalar(
                     "SELECT start_context FROM execution_sessions WHERE id = $1",
                 )
                 .bind(&run.run_id)
-                .fetch_one(&mut *transaction)
+                .fetch_one(&transaction)
                 .await?;
                 let payload = payload_builder
                     .take()
@@ -440,7 +442,7 @@ impl AuthStore {
                     "session.start",
                 )
                 .await?;
-                sqlx::query(
+                crate::query::query(
                     "UPDATE execution_sessions
                      SET daemon_id = $2, start_command_id = $3,
                          attempt_count = 1, current_attempt_id = $4,
@@ -452,7 +454,7 @@ impl AuthStore {
                 .bind(&daemon_id)
                 .bind(&command_id)
                 .bind(&attempt_id)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
                 command_id
             } else {
@@ -473,7 +475,7 @@ impl AuthStore {
             });
         }
 
-        let terminal_same_start: bool = sqlx::query_scalar(
+        let terminal_same_start: bool = crate::query::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM execution_sessions
                  WHERE requirement_id = $1
@@ -483,7 +485,7 @@ impl AuthStore {
         )
         .bind(requirement_id)
         .bind(start_message_id)
-        .fetch_one(&mut *transaction)
+        .fetch_one(&transaction)
         .await?;
         if terminal_same_start {
             return Err(ClarificationError::RunNotEligible);
@@ -504,7 +506,7 @@ impl AuthStore {
             update_requirement(&mut transaction, &transitioned, expected_state_version)
                 .await
                 .map_err(requirement_error)?;
-            sqlx::query(
+            crate::query::query(
                 "INSERT INTO transition_audit
                     (requirement_id, actor_id, transition, from_status, to_status, state_version)
                  VALUES ($1, $2, 'begin_discussion', 'Draft', 'Discussing', $3)",
@@ -515,19 +517,19 @@ impl AuthStore {
                 i64::try_from(transitioned.state_version())
                     .map_err(|_| ClarificationError::InvalidSessionState)?,
             )
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
         }
 
         for repository_id in repository_ids {
-            let exists: bool = sqlx::query_scalar(
+            let exists: bool = crate::query::query_scalar(
                 "SELECT EXISTS (
                      SELECT 1 FROM repositories
                      WHERE id = $1 AND disabled_at IS NULL
                  )",
             )
             .bind(repository_id)
-            .fetch_one(&mut *transaction)
+            .fetch_one(&transaction)
             .await?;
             if !exists {
                 return Err(ClarificationError::InvalidContext);
@@ -551,7 +553,7 @@ impl AuthStore {
         } else {
             (None, None)
         };
-        sqlx::query(
+        crate::query::query(
             "INSERT INTO execution_sessions
                 (id, daemon_id, requirement_id, state, start_message_id,
                  start_context, start_command_id, repository_ids,
@@ -562,14 +564,14 @@ impl AuthStore {
         .bind(daemon_id.as_deref())
         .bind(requirement_id)
         .bind(start_message_id)
-        .bind(context)
+        .bind(context.clone())
         .bind(start_command_id.as_deref())
-        .bind(repository_ids)
+        .bind(repository_ids.to_vec())
         .bind(
             i64::try_from(DEFAULT_MAX_ATTEMPTS)
                 .map_err(|_| ClarificationError::InvalidSessionState)?,
         )
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         if let Some((daemon_id, payload)) = command {
             let command_id = start_command_id
@@ -594,14 +596,14 @@ impl AuthStore {
                 "session.start",
             )
             .await?;
-            sqlx::query(
+            crate::query::query(
                 "UPDATE execution_sessions
                  SET attempt_count = 1, current_attempt_id = $2
                  WHERE id = $1",
             )
             .bind(&run_id)
             .bind(&attempt_id)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
         }
         let run = run_row(&mut transaction, &run_id).await?.into_run()?;
@@ -617,7 +619,7 @@ impl AuthStore {
         &self,
         requirement_id: &str,
     ) -> Result<Option<ClarificationRun>, ClarificationError> {
-        let row = sqlx::query_as::<_, RunRow>(
+        let row = crate::query::query_as::<RunRow>(
             "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
                     next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                     COALESCE((
@@ -663,7 +665,7 @@ impl AuthStore {
         F: FnOnce(&str, &str, &str, u64, &str, &str) -> Result<String, PersistenceError> + Send,
     {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query_as::<_, RunRow>(
+        let row = crate::query::query_as::<RunRow>(
             "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
                     next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                     COALESCE((
@@ -683,7 +685,7 @@ impl AuthStore {
         )
         .bind(run_id)
         .bind(requirement_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         .ok_or(ClarificationError::RunNotFound)?;
         let run = row.into_run()?;
@@ -697,7 +699,7 @@ impl AuthStore {
         if run.start_message_id == message_id {
             return Err(ClarificationError::InvalidMessage);
         }
-        let message = sqlx::query_as::<_, MessageBodyRow>(
+        let message = crate::query::query_as::<MessageBodyRow>(
             "SELECT messages.body
              FROM messages
              JOIN conversations ON conversations.id = messages.conversation_id
@@ -707,11 +709,16 @@ impl AuthStore {
         )
         .bind(message_id)
         .bind(requirement_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         .ok_or(ClarificationError::MessageNotFound)?;
         let content_digest = crate::payload_digest(&message.body);
-        let existing: Option<(String, String)> = sqlx::query_as(
+        #[derive(FromQueryResult)]
+        struct MessageCommandMapRow {
+            command_id: String,
+            content_digest: String,
+        }
+        let existing = crate::query::query_as::<MessageCommandMapRow>(
             "SELECT command_id, content_digest
              FROM server_message_command_map
              WHERE session_id = $1 AND message_id = $2
@@ -719,13 +726,13 @@ impl AuthStore {
         )
         .bind(run_id)
         .bind(message_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?;
-        let command_id = if let Some((command_id, existing_digest)) = existing {
-            if existing_digest != content_digest {
+        let command_id = if let Some(existing) = existing {
+            if existing.content_digest != content_digest {
                 return Err(ClarificationError::CommandConflict);
             }
-            command_id
+            existing.command_id
         } else {
             let command_id = crate::random_hex(16);
             let sequence = next_command_sequence(&mut transaction, run_id).await?;
@@ -742,7 +749,7 @@ impl AuthStore {
                 &message.body,
             )
             .map_err(|_| ClarificationError::InvalidContext)?;
-            sqlx::query(
+            crate::query::query(
                 "INSERT INTO server_message_command_map
                     (session_id, message_id, command_id, content_digest)
                  VALUES ($1, $2, $3, $4)",
@@ -751,7 +758,7 @@ impl AuthStore {
             .bind(message_id)
             .bind(&command_id)
             .bind(&content_digest)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
             insert_command(
                 &mut transaction,
@@ -779,11 +786,11 @@ impl AuthStore {
         F: FnOnce(&str, &str, &str, u64) -> Result<String, PersistenceError> + Send,
     {
         let mut transaction = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+        crate::query::query("SELECT pg_advisory_xact_lock(hashtext($1))")
             .bind(format!("clarification-slot:{requirement_id}"))
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
-        let row = sqlx::query_as::<_, RunRow>(
+        let row = crate::query::query_as::<RunRow>(
             "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
                     next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                     COALESCE((
@@ -803,7 +810,7 @@ impl AuthStore {
         )
         .bind(run_id)
         .bind(requirement_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         .ok_or(ClarificationError::RunNotFound)?;
         let current = row.into_run()?;
@@ -817,7 +824,7 @@ impl AuthStore {
                 command_id: String::new(),
             });
         }
-        sqlx::query(
+        crate::query::query(
             "UPDATE execution_sessions
              SET cancel_requested = TRUE,
                  state = CASE WHEN current_attempt_id IS NULL THEN 'Failed' ELSE state END,
@@ -829,7 +836,7 @@ impl AuthStore {
              WHERE id = $1",
         )
         .bind(run_id)
-        .execute(&mut *transaction)
+        .execute(&transaction)
         .await?;
         let current = run_row(&mut transaction, run_id).await?.into_run()?;
         if current.current_attempt_id.is_none() {
@@ -862,7 +869,7 @@ impl AuthStore {
                 &payload,
             )
             .await?;
-            sqlx::query(
+            crate::query::query(
                 "UPDATE execution_sessions
                  SET cancel_command_id = $2,
                      updated_at = CURRENT_TIMESTAMP,
@@ -871,7 +878,7 @@ impl AuthStore {
             )
             .bind(run_id)
             .bind(&command_id)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
             command_id
         };
@@ -889,7 +896,7 @@ impl AuthStore {
         if limit == 0 || limit > 100 || offset > i64::MAX as u64 {
             return Err(ClarificationError::InvalidContext);
         }
-        let rows = sqlx::query_as::<_, ActivityRow>(
+        let rows = crate::query::query_as::<ActivityRow>(
             "SELECT activities.id, activities.event_id, activities.session_id,
                     activities.activity, activities.created_at::text AS created_at
              FROM clarification_activities AS activities
@@ -917,7 +924,7 @@ impl AuthStore {
         &self,
         requirement_id: &str,
     ) -> Result<Option<ReadinessView>, ClarificationError> {
-        let row = sqlx::query_as::<_, ReadinessRow>(
+        let row = crate::query::query_as::<ReadinessRow>(
             "SELECT id, event_id, session_id, daemon_event_seq,
                     event_requirement_id, requirement_id, requirement_revision,
                     verdict, blockers, assumptions, repositories_reviewed,
@@ -963,26 +970,26 @@ impl AuthStore {
         let sequence =
             i64::try_from(daemon_event_seq).map_err(|_| ClarificationEventError::Integrity)?;
         let mut transaction = self.pool.begin().await?;
-        let session = sqlx::query_as::<_, ProjectionSessionRow>(
+        let session = crate::query::query_as::<ProjectionSessionRow>(
             "SELECT event_ack_through_seq, event_ack_sparse,
                     start_message_id, state, daemon_id, runtime_id,
                     current_attempt_id, attempt_count, max_attempts, cancel_requested
              FROM execution_sessions WHERE id = $1 FOR UPDATE",
         )
         .bind(session_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         .ok_or(ClarificationEventError::NotClarificationSession)?;
         if session.start_message_id.is_none() {
             return Err(ClarificationEventError::NotClarificationSession);
         }
-        if let Some(existing) = sqlx::query_as::<_, EventReceiptRow>(
+        if let Some(existing) = crate::query::query_as::<EventReceiptRow>(
             "SELECT event_id, session_id, daemon_event_seq, payload_digest,
                     outcome, rejection_reason
              FROM server_event_dedupe WHERE event_id = $1 FOR UPDATE",
         )
         .bind(event_id)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         {
             if existing.session_id != session_id
@@ -1012,13 +1019,13 @@ impl AuthStore {
         if sequence <= session.event_ack_through_seq {
             return Err(ClarificationEventError::Integrity);
         }
-        if let Some(existing) = sqlx::query_scalar::<_, String>(
+        if let Some(existing) = crate::query::query_scalar::<String>(
             "SELECT event_id FROM server_event_dedupe
              WHERE session_id = $1 AND daemon_event_seq = $2",
         )
         .bind(session_id)
         .bind(sequence)
-        .fetch_optional(&mut *transaction)
+        .fetch_optional(&transaction)
         .await?
         {
             return Err(ClarificationEventError::SequenceConflict(existing));
@@ -1078,7 +1085,7 @@ impl AuthStore {
         }
         match event {
             ClarificationEvent::SessionStarted { runtime_id } => {
-                sqlx::query(
+                crate::query::query(
                     "UPDATE execution_sessions
                      SET state = 'Running', runtime_id = $2,
                          next_retry_at = NULL, failure_class = NULL,
@@ -1090,23 +1097,23 @@ impl AuthStore {
                 )
                 .bind(session_id)
                 .bind(runtime_id)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
             }
             ClarificationEvent::AgentMessage {
                 message_id,
                 content,
             } => {
-                let conversation_id: String = sqlx::query_scalar(
+                let conversation_id: String = crate::query::query_scalar(
                     "SELECT conversations.id
                      FROM conversations JOIN execution_sessions
                        ON execution_sessions.requirement_id = conversations.requirement_id
                      WHERE execution_sessions.id = $1",
                 )
                 .bind(session_id)
-                .fetch_one(&mut *transaction)
+                .fetch_one(&transaction)
                 .await?;
-                sqlx::query(
+                crate::query::query(
                     "INSERT INTO messages
                         (id, conversation_id, author_user_id, kind, body, source_event_id)
                      VALUES ($1, $2, NULL, 'agent', $3, $4)",
@@ -1115,12 +1122,10 @@ impl AuthStore {
                 .bind(conversation_id)
                 .bind(content)
                 .bind(event_id)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await
                 .map_err(|error| {
-                    if matches!(&error, sqlx::Error::Database(database)
-                        if database.code().as_deref() == Some("23505"))
-                    {
+                    if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
                         ClarificationEventError::Integrity
                     } else {
                         ClarificationEventError::Projection
@@ -1129,7 +1134,7 @@ impl AuthStore {
                 touch_session(&mut transaction, session_id).await?;
             }
             ClarificationEvent::Activity { activity } => {
-                sqlx::query(
+                crate::query::query(
                     "INSERT INTO clarification_activities
                         (event_id, session_id, activity, expires_at)
                      VALUES ($1, $2, $3,
@@ -1140,7 +1145,7 @@ impl AuthStore {
                 .bind(session_id)
                 .bind(activity)
                 .bind(self.retention.retention_seconds())
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
                 touch_session(&mut transaction, session_id).await?;
             }
@@ -1149,19 +1154,19 @@ impl AuthStore {
                     .current_attempt_id
                     .as_deref()
                     .ok_or(ClarificationEventError::Projection)?;
-                let closed = sqlx::query(
+                let closed = crate::query::query(
                     "UPDATE execution_attempts
                      SET outcome = 'completed', closed_at = CURRENT_TIMESTAMP
                      WHERE id = $1 AND session_id = $2 AND outcome IS NULL",
                 )
                 .bind(attempt_id)
                 .bind(session_id)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
                 if closed.rows_affected() != 1 {
                     return Err(ClarificationEventError::Projection);
                 }
-                sqlx::query(
+                crate::query::query(
                     "UPDATE execution_sessions
                      SET state = 'Completed', terminal_summary = $2,
                          current_attempt_id = NULL, next_retry_at = NULL,
@@ -1172,7 +1177,7 @@ impl AuthStore {
                 )
                 .bind(session_id)
                 .bind(summary)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
             }
             ClarificationEvent::Failed { reason, .. } => {
@@ -1187,14 +1192,14 @@ impl AuthStore {
                 } else {
                     "runtime_failure"
                 };
-                let owner_valid = sqlx::query_scalar::<_, bool>(
+                let owner_valid = crate::query::query_scalar::<bool>(
                     "SELECT EXISTS (
                          SELECT 1 FROM daemon_registrations
                          WHERE daemon_id = $1 AND revoked_at IS NULL
                      )",
                 )
                 .bind(session.daemon_id.as_deref())
-                .fetch_optional(&mut *transaction)
+                .fetch_optional(&transaction)
                 .await?
                 .unwrap_or(false);
                 let (state, retry_delay, final_class) = if session.cancel_requested {
@@ -1212,7 +1217,7 @@ impl AuthStore {
                         safe_class,
                     )
                 };
-                let closed = sqlx::query(
+                let closed = crate::query::query(
                     "UPDATE execution_attempts
                      SET outcome = 'failed', failure_event_id = $2,
                          failure_class = $3, failure_reason = $4,
@@ -1224,12 +1229,12 @@ impl AuthStore {
                 .bind(final_class)
                 .bind(final_class)
                 .bind(session_id)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
                 if closed.rows_affected() != 1 {
                     return Err(ClarificationEventError::Projection);
                 }
-                sqlx::query(
+                crate::query::query(
                     "UPDATE execution_sessions
                      SET state = $2, runtime_id = NULL,
                          current_attempt_id = NULL, next_retry_at = CASE
@@ -1247,7 +1252,7 @@ impl AuthStore {
                 .bind(retry_delay.map(|seconds| seconds as f64))
                 .bind(final_class)
                 .bind(final_class)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
             }
         }
@@ -1283,7 +1288,7 @@ pub struct RetryWork {
     pub command: Option<crate::PinnedCommand>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct DueRetryRow {
     id: String,
     requirement_id: Option<String>,
@@ -1310,7 +1315,7 @@ impl AuthStore {
         let mut transaction = self.pool.begin().await?;
         // PostgreSQL row locks coordinate claims across independent pools and
         // server instances; SKIP LOCKED makes competing workers skip locked rows.
-        let rows = sqlx::query_as::<_, DueRetryRow>(
+        let rows = crate::query::query_as::<DueRetryRow>(
             "SELECT id, requirement_id, daemon_id, attempt_count, max_attempts,
                     cancel_requested
              FROM execution_sessions
@@ -1322,7 +1327,7 @@ impl AuthStore {
              FOR UPDATE SKIP LOCKED",
         )
         .bind(limit)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&transaction)
         .await?;
         let mut work = Vec::with_capacity(rows.len());
         for row in rows {
@@ -1333,14 +1338,14 @@ impl AuthStore {
                 Some("retry_exhausted")
             } else {
                 let owner_valid = if let Some(daemon_id) = row.daemon_id.as_deref() {
-                    sqlx::query_scalar::<_, bool>(
+                    crate::query::query_scalar::<bool>(
                         "SELECT revoked_at IS NULL
                          FROM daemon_registrations
                          WHERE daemon_id = $1
                          FOR UPDATE",
                     )
                     .bind(daemon_id)
-                    .fetch_optional(&mut *transaction)
+                    .fetch_optional(&transaction)
                     .await?
                     .unwrap_or(false)
                 } else {
@@ -1349,7 +1354,7 @@ impl AuthStore {
                 (!owner_valid).then_some("owner_unavailable")
             };
             if let Some(class) = terminal_class {
-                sqlx::query(
+                crate::query::query(
                     "UPDATE execution_sessions
                      SET state = 'Failed', next_retry_at = NULL,
                          current_attempt_id = NULL, failure_class = $2,
@@ -1359,7 +1364,7 @@ impl AuthStore {
                 )
                 .bind(&row.id)
                 .bind(class)
-                .execute(&mut *transaction)
+                .execute(&transaction)
                 .await?;
                 work.push(RetryWork {
                     requirement_id,
@@ -1401,7 +1406,7 @@ impl AuthStore {
                 "session.resume",
             )
             .await?;
-            sqlx::query(
+            crate::query::query(
                 "UPDATE execution_sessions
                  SET state = 'Running', attempt_count = $2,
                      current_attempt_id = $3, next_retry_at = NULL,
@@ -1413,7 +1418,7 @@ impl AuthStore {
             .bind(&row.id)
             .bind(row.attempt_count + 1)
             .bind(&attempt_id)
-            .execute(&mut *transaction)
+            .execute(&transaction)
             .await?;
             work.push(RetryWork {
                 requirement_id,
@@ -1450,16 +1455,16 @@ pub enum ClarificationEventError {
     SequenceConflict(String),
     NotClarificationSession,
     Projection,
-    Database(sqlx::Error),
+    Database(DbErr),
 }
 
-impl From<sqlx::Error> for ClarificationEventError {
-    fn from(error: sqlx::Error) -> Self {
+impl From<DbErr> for ClarificationEventError {
+    fn from(error: DbErr) -> Self {
         Self::Database(error)
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct ProjectionSessionRow {
     event_ack_through_seq: i64,
     event_ack_sparse: Vec<i64>,
@@ -1473,7 +1478,7 @@ struct ProjectionSessionRow {
     cancel_requested: bool,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct EventReceiptRow {
     event_id: String,
     session_id: String,
@@ -1510,7 +1515,7 @@ pub struct ClarificationActivity {
     pub created_at: String,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct ActivityRow {
     id: i64,
     event_id: String,
@@ -1551,7 +1556,7 @@ pub struct ReadinessView {
     pub created_at: String,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromQueryResult)]
 struct ReadinessRow {
     id: String,
     event_id: String,
@@ -1602,10 +1607,10 @@ impl TryFrom<ReadinessRow> for ReadinessView {
 }
 
 async fn run_row(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     run_id: &str,
 ) -> Result<RunRow, ClarificationError> {
-    Ok(sqlx::query_as::<_, RunRow>(
+    Ok(crate::query::query_as::<RunRow>(
         "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
                     next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                 COALESCE((
@@ -1622,16 +1627,16 @@ async fn run_row(
          FROM execution_sessions WHERE id = $1 FOR UPDATE",
     )
     .bind(run_id)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?)
 }
 
 async fn run_row_for_requirement(
-    pool: &sqlx::PgPool,
+    pool: &DatabaseConnection,
     requirement_id: &str,
     run_id: &str,
 ) -> Result<Option<RunRow>, ClarificationError> {
-    Ok(sqlx::query_as::<_, RunRow>(
+    Ok(crate::query::query_as::<RunRow>(
         "SELECT id, requirement_id, start_message_id, daemon_id, state, runtime_id, attempt_count,
                     next_retry_at::text AS next_retry_at, failure_class AS failure_reason, current_attempt_id,
                 COALESCE((
@@ -1655,10 +1660,15 @@ async fn run_row_for_requirement(
 }
 
 async fn choose_eligible_daemon(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     required_capabilities: &[String],
 ) -> Result<Option<String>, ClarificationError> {
-    let rows = sqlx::query_as::<_, (String, String)>(
+    #[derive(FromQueryResult)]
+    struct EligibleDaemonRow {
+        daemon_id: String,
+        capabilities: String,
+    }
+    let rows = crate::query::query_as::<EligibleDaemonRow>(
         "SELECT daemon_id, capabilities
          FROM daemon_registrations
          WHERE revoked_at IS NULL
@@ -1667,22 +1677,22 @@ async fn choose_eligible_daemon(
            AND protocol_version = '0.1'
          ORDER BY daemon_id ASC FOR UPDATE",
     )
-    .fetch_all(&mut **transaction)
+    .fetch_all(&*transaction)
     .await?;
-    Ok(rows.into_iter().find_map(|(daemon_id, capabilities)| {
-        let capabilities = serde_json::from_str::<Vec<String>>(&capabilities).ok()?;
+    Ok(rows.into_iter().find_map(|row| {
+        let capabilities = serde_json::from_str::<Vec<String>>(&row.capabilities).ok()?;
         required_capabilities
             .iter()
             .all(|required| capabilities.iter().any(|capability| capability == required))
-            .then_some(daemon_id)
+            .then_some(row.daemon_id)
     }))
 }
 
 async fn next_command_sequence(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
 ) -> Result<u64, ClarificationError> {
-    let next: i64 = sqlx::query_scalar(
+    let next: i64 = crate::query::query_scalar(
         "SELECT GREATEST(
             COALESCE((SELECT MAX(server_command_seq) FROM server_command_outbox WHERE session_id = $1), 0),
             COALESCE((SELECT MAX(server_command_seq) FROM server_command_tombstones WHERE session_id = $1), 0),
@@ -1690,7 +1700,7 @@ async fn next_command_sequence(
          ) + 1",
     )
     .bind(session_id)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?;
     u64::try_from(next).map_err(|_| ClarificationError::InvalidSessionState)
 }
@@ -1719,7 +1729,7 @@ fn retry_delay_seconds(attempt_count: i64) -> i64 {
 }
 
 async fn insert_execution_attempt(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     attempt_id: &str,
     session_id: &str,
     attempt_number: u64,
@@ -1729,7 +1739,7 @@ async fn insert_execution_attempt(
     if !matches!(command_kind, "session.start" | "session.resume") {
         return Err(ClarificationError::InvalidSessionState);
     }
-    sqlx::query(
+    crate::query::query(
         "INSERT INTO execution_attempts
             (id, session_id, attempt_number, command_id, command_kind)
          VALUES ($1, $2, $3, $4, $5)",
@@ -1739,13 +1749,13 @@ async fn insert_execution_attempt(
     .bind(i64::try_from(attempt_number).map_err(|_| ClarificationError::InvalidSessionState)?)
     .bind(command_id)
     .bind(command_kind)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(())
 }
 
 async fn insert_command(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     command_id: &str,
     session_id: &str,
     daemon_id: &str,
@@ -1754,7 +1764,7 @@ async fn insert_command(
 ) -> Result<(), ClarificationError> {
     let payload_digest = crate::payload_digest(payload);
     let command_identity_digest = crate::command_identity_digest(payload);
-    sqlx::query(
+    crate::query::query(
         "INSERT INTO server_command_outbox
             (command_id, session_id, daemon_id, server_command_seq, payload,
              payload_digest, command_identity_digest)
@@ -1767,7 +1777,7 @@ async fn insert_command(
     .bind(payload)
     .bind(payload_digest)
     .bind(command_identity_digest)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(())
 }
@@ -1783,10 +1793,10 @@ struct EventDedupe<'a> {
 }
 
 async fn insert_generic_event_dedupe(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     dedupe: EventDedupe<'_>,
 ) -> Result<(), ClarificationEventError> {
-    sqlx::query(
+    crate::query::query(
         "INSERT INTO server_event_dedupe
             (event_id, session_id, daemon_event_seq, payload_digest, payload,
              outcome, rejection_reason)
@@ -1799,38 +1809,44 @@ async fn insert_generic_event_dedupe(
     .bind(dedupe.payload)
     .bind(dedupe.outcome)
     .bind(dedupe.rejection_reason)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(())
 }
 
 async fn touch_session(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
 ) -> Result<(), ClarificationEventError> {
-    sqlx::query(
+    crate::query::query(
         "UPDATE execution_sessions
          SET updated_at = CURRENT_TIMESTAMP, last_activity_at = CURRENT_TIMESTAMP
          WHERE id = $1",
     )
     .bind(session_id)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(())
 }
 
 async fn advance_event_watermark(
-    transaction: &mut Transaction<'_, Postgres>,
+    transaction: &mut DatabaseTransaction,
     session_id: &str,
     sequence: i64,
 ) -> Result<(), ClarificationEventError> {
-    let (mut through, mut sparse): (i64, Vec<i64>) = sqlx::query_as(
+    #[derive(FromQueryResult)]
+    struct EventAckState {
+        event_ack_through_seq: i64,
+        event_ack_sparse: Vec<i64>,
+    }
+    let state = crate::query::query_as::<EventAckState>(
         "SELECT event_ack_through_seq, event_ack_sparse
          FROM execution_sessions WHERE id = $1 FOR UPDATE",
     )
     .bind(session_id)
-    .fetch_one(&mut **transaction)
+    .fetch_one(&*transaction)
     .await?;
+    let (mut through, mut sparse) = (state.event_ack_through_seq, state.event_ack_sparse);
     if sequence > through {
         if sequence == through + 1 {
             through = sequence;
@@ -1847,7 +1863,7 @@ async fn advance_event_watermark(
             sparse.sort_unstable();
         }
     }
-    sqlx::query(
+    crate::query::query(
         "UPDATE execution_sessions
          SET event_ack_through_seq = $2, event_ack_sparse = $3
          WHERE id = $1",
@@ -1855,7 +1871,7 @@ async fn advance_event_watermark(
     .bind(session_id)
     .bind(through)
     .bind(sparse)
-    .execute(&mut **transaction)
+    .execute(&*transaction)
     .await?;
     Ok(())
 }

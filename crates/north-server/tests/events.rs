@@ -1,3 +1,7 @@
+#[allow(dead_code)]
+mod support;
+use support::TestDatabaseOptions;
+
 use axum::{
     body::Body,
     extract::Extension,
@@ -5,7 +9,7 @@ use axum::{
     Router,
 };
 use north_domain::{requirement::RequirementEdit, role::Role, status::RequirementStatus};
-use north_persistence::{AuthStore, PoolOptions, RequirementTransition, UserRecord};
+use north_persistence::{AuthStore, RequirementTransition, UserRecord};
 use north_protocol::{
     Event, EventAckStatus, EventEnvelope, ReadinessVerdictWire, RequirementAssessed, SCHEMA_VERSION,
 };
@@ -31,9 +35,9 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-async fn test_pool() -> Result<north_persistence::PgPool, Box<dyn std::error::Error>> {
+async fn test_pool() -> Result<north_persistence::DatabaseConnection, Box<dyn std::error::Error>> {
     let database_url = std::env::var("NORTH_TEST_DATABASE_URL")?;
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await?;
@@ -42,12 +46,12 @@ async fn test_pool() -> Result<north_persistence::PgPool, Box<dyn std::error::Er
 }
 
 async fn setup_user(
-    pool: &north_persistence::PgPool,
+    pool: &north_persistence::DatabaseConnection,
     prefix: &str,
 ) -> Result<UserRecord, Box<dyn std::error::Error>> {
     let id = unique(prefix);
     let email = format!("{id}@example.com");
-    sqlx::query("INSERT INTO users (id, email, role) VALUES ($1, $2, $3)")
+    support::query("INSERT INTO users (id, email, role) VALUES ($1, $2, $3)")
         .bind(&id)
         .bind(&email)
         .bind("Requester")
@@ -227,7 +231,7 @@ async fn accepted_readiness_publishes_once_and_duplicate_or_rejected_events_are_
         )
         .await?;
     let session_id = unique("event-readiness-session");
-    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+    support::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
         .bind(&session_id)
         .bind(&requirement.id)
         .execute(&pool)
@@ -286,12 +290,12 @@ async fn accepted_readiness_publishes_once_and_duplicate_or_rejected_events_are_
     assert_eq!(current.status, RequirementStatus::Ready);
     assert_eq!(current.state_version, 4);
     let assessment_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
             .bind(&envelope.event_id)
             .fetch_one(&pool)
             .await?;
     assert_eq!(assessment_count, 1);
-    let ready_transition_count: i64 = sqlx::query_scalar(
+    let ready_transition_count: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM transition_audit
          WHERE requirement_id = $1 AND transition = 'mark_ready'",
     )

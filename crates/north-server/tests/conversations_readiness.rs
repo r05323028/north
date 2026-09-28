@@ -4,7 +4,7 @@ use axum::{
     Router,
 };
 use north_domain::role::Role;
-use north_persistence::{AuthStore, PoolOptions};
+use north_persistence::AuthStore;
 use north_protocol::{
     EventAckStatus, ReadinessVerdictWire, RequirementAssessed, ReviewedRepositoryWire,
 };
@@ -17,6 +17,7 @@ use tower::ServiceExt;
 
 #[allow(dead_code)]
 mod support;
+use support::TestDatabaseOptions;
 
 fn unique(prefix: &str) -> String {
     let nanos = SystemTime::now()
@@ -26,7 +27,7 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-fn app(pool: north_persistence::PgPool, id: &str, role: Role) -> Router {
+fn app(pool: north_persistence::DatabaseConnection, id: &str, role: Role) -> Router {
     requirements::router()
         .with_state(AuthState::with_log_delivery(AuthStore::new(
             pool,
@@ -64,12 +65,12 @@ async fn json_body(response: axum::response::Response) -> Value {
 }
 
 async fn setup_user_with_role(
-    pool: &north_persistence::PgPool,
+    pool: &north_persistence::DatabaseConnection,
     prefix: &str,
     role: &str,
 ) -> String {
     let id = unique(prefix);
-    sqlx::query("INSERT INTO users (id, email, role) VALUES ($1, $2, $3)")
+    support::query("INSERT INTO users (id, email, role) VALUES ($1, $2, $3)")
         .bind(&id)
         .bind(format!("{id}@example.com"))
         .bind(role)
@@ -79,7 +80,7 @@ async fn setup_user_with_role(
     id
 }
 
-async fn setup_user(pool: &north_persistence::PgPool, prefix: &str) -> String {
+async fn setup_user(pool: &north_persistence::DatabaseConnection, prefix: &str) -> String {
     setup_user_with_role(pool, prefix, "Requester").await
 }
 
@@ -92,7 +93,7 @@ async fn conversation_pruning_preserves_structured_requirement() {
             "NORTH_TEST_DATABASE_URL is required for conversation/readiness integration tests"
         ),
     };
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -167,7 +168,7 @@ async fn conversation_pruning_preserves_structured_requirement() {
     assert_eq!(prepared_body["state_version"], 3);
 
     let assessment_session_id = unique("conversation-assessment-session");
-    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+    support::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
         .bind(&assessment_session_id)
         .bind(&requirement_id)
         .execute(&pool)
@@ -264,7 +265,7 @@ async fn conversation_pruning_preserves_structured_requirement() {
     )
     .await;
     let before = json_body(before).await;
-    sqlx::query(
+    support::query(
         "DELETE FROM messages
          WHERE conversation_id = (SELECT id FROM conversations WHERE requirement_id = $1)",
     )
@@ -281,12 +282,12 @@ async fn conversation_pruning_preserves_structured_requirement() {
     .await;
     assert_eq!(before, json_body(after).await);
 
-    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
+    support::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
         .bind(&assessment_session_id)
         .execute(&pool)
         .await
         .expect("cleanup event tombstones");
-    sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
+    support::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(&assessment_session_id)
         .execute(&pool)
         .await
@@ -302,7 +303,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
             "NORTH_TEST_DATABASE_URL is required for conversation/readiness integration tests"
         ),
     };
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -311,7 +312,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
         .await
         .expect("run migrations");
     let user_id = setup_user(&pool, "readiness-user").await;
-    sqlx::query(
+    support::query(
         "INSERT INTO repositories (id, name, name_normalized, url, description)
          VALUES ('00000000-0000-4000-8000-000000000001', 'North', 'north', 'https://example.test/north.git', '')
          ON CONFLICT (id) DO NOTHING",
@@ -359,7 +360,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
     assert_eq!(edited_body["state_version"], 3);
 
     let assessment_session_id = unique("assessment-session");
-    sqlx::query(
+    support::query(
         "INSERT INTO execution_sessions (id, requirement_id, repository_ids)
          VALUES ($1, $2, ARRAY['00000000-0000-4000-8000-000000000001']::TEXT[])",
     )
@@ -476,21 +477,22 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
             north_persistence::ReadinessError::EventIdentityConflict
         ))
     ));
-    let assessment_total: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE requirement_id = $1")
-            .bind(&requirement_id)
-            .fetch_one(&pool)
-            .await
-            .expect("count conflict assessments");
+    let assessment_total: i64 = support::query_scalar(
+        "SELECT COUNT(*) FROM readiness_assessments WHERE requirement_id = $1",
+    )
+    .bind(&requirement_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count conflict assessments");
     assert_eq!(assessment_total, 1);
     let assessment_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM readiness_assessments WHERE event_id = $1")
             .bind(&assessment_event_id)
             .fetch_one(&pool)
             .await
             .expect("count assessments");
     assert_eq!(assessment_count, 1);
-    let (outcome, assessed_revision): (String, i64) = sqlx::query_as(
+    let (outcome, assessed_revision): (String, i64) = support::query_tuple(
         "SELECT outcome, requirement_revision
          FROM readiness_assessments WHERE event_id = $1",
     )
@@ -500,7 +502,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
     .expect("read assessment");
     assert_eq!(outcome, "accepted");
     assert_eq!(assessed_revision, 2);
-    let ready_audits: i64 = sqlx::query_scalar(
+    let ready_audits: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM transition_audit
          WHERE requirement_id = $1 AND transition = 'mark_ready'",
     )
@@ -510,12 +512,12 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
     .expect("count readiness audits");
     assert_eq!(ready_audits, 1);
     let immutable_update =
-        sqlx::query("UPDATE readiness_assessments SET outcome = 'rejected' WHERE event_id = $1")
+        support::query("UPDATE readiness_assessments SET outcome = 'rejected' WHERE event_id = $1")
             .bind(&assessment_event_id)
             .execute(&pool)
             .await;
     assert!(immutable_update.is_err());
-    let immutable_delete = sqlx::query("DELETE FROM readiness_assessments WHERE event_id = $1")
+    let immutable_delete = support::query("DELETE FROM readiness_assessments WHERE event_id = $1")
         .bind(&assessment_event_id)
         .execute(&pool)
         .await;
@@ -557,7 +559,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
         .reason
         .as_deref()
         .is_some_and(|reason| reason.starts_with("stale_assessment:")));
-    let (stale_outcome, stale_revision): (String, i64) = sqlx::query_as(
+    let (stale_outcome, stale_revision): (String, i64) = support::query_tuple(
         "SELECT outcome, requirement_revision
          FROM readiness_assessments WHERE event_id = $1",
     )
@@ -664,7 +666,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
     assert_eq!(current["status"], "discussing");
     assert_eq!(current["revision"], 4);
     assert_eq!(current["state_version"], 6);
-    let ready_audits_after_stale: i64 = sqlx::query_scalar(
+    let ready_audits_after_stale: i64 = support::query_scalar(
         "SELECT COUNT(*) FROM transition_audit
          WHERE requirement_id = $1 AND transition = 'mark_ready'",
     )
@@ -682,12 +684,12 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
     .await;
     assert_eq!(stale_packet.status(), StatusCode::CONFLICT);
 
-    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
+    support::query("DELETE FROM server_event_dedupe WHERE session_id = $1")
         .bind(&assessment_session_id)
         .execute(&pool)
         .await
         .expect("cleanup event tombstones");
-    sqlx::query("DELETE FROM execution_sessions WHERE id = $1")
+    support::query("DELETE FROM execution_sessions WHERE id = $1")
         .bind(&assessment_session_id)
         .execute(&pool)
         .await
@@ -699,7 +701,7 @@ async fn readiness_ingestion_is_revision_bound_and_deduplicated() {
 async fn stale_review_cannot_decide_replaced_readiness_assessment() {
     let database_url = std::env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for review race integration tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -748,7 +750,7 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
     assert_eq!(edited["state_version"], 3);
 
     let session_a = unique("review-session-a");
-    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+    support::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
         .bind(&session_a)
         .bind(&requirement_id)
         .execute(&pool)
@@ -772,7 +774,7 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
     .await
     .expect("commit assessment A");
     assert_eq!(ack_a.status, EventAckStatus::Accepted);
-    let assessment_a_generation: i64 = sqlx::query_scalar(
+    let assessment_a_generation: i64 = support::query_scalar(
         "SELECT accepted_state_version FROM readiness_assessments WHERE event_id = $1",
     )
     .bind(&ack_a.event_id)
@@ -833,7 +835,7 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
     assert_eq!(changes["state_version"], 5);
 
     let session_b = unique("review-session-b");
-    sqlx::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
+    support::query("INSERT INTO execution_sessions (id, requirement_id) VALUES ($1, $2)")
         .bind(&session_b)
         .bind(&requirement_id)
         .execute(&pool)
@@ -853,7 +855,7 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
     .await
     .expect("commit assessment B");
     assert_eq!(ack_b.status, EventAckStatus::Accepted);
-    let assessment_b_generation: i64 = sqlx::query_scalar(
+    let assessment_b_generation: i64 = support::query_scalar(
         "SELECT accepted_state_version FROM readiness_assessments WHERE event_id = $1",
     )
     .bind(&ack_b.event_id)
@@ -916,7 +918,7 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
     assert_eq!(before_accept.revision, packet_a_revision);
     assert_eq!(before_accept.state_version, packet_b_state_version);
     let audit_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM transition_audit WHERE requirement_id = $1")
+        support::query_scalar("SELECT COUNT(*) FROM transition_audit WHERE requirement_id = $1")
             .bind(&requirement_id)
             .fetch_one(&pool)
             .await
@@ -938,34 +940,35 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
     assert_eq!(accepted["status"], "accepted");
     assert_eq!(accepted["revision"], packet_a_revision);
     assert_eq!(accepted["state_version"], 7);
-    let (audit_assessment_id, audit_state_version): (Option<String>, Option<i64>) = sqlx::query_as(
-        "SELECT assessment_id, state_version
+    let (audit_assessment_id, audit_state_version): (Option<String>, Option<i64>) =
+        support::query_tuple(
+            "SELECT assessment_id, state_version
              FROM transition_audit
              WHERE requirement_id = $1 AND transition = 'accept'
              ORDER BY id DESC LIMIT 1",
-    )
-    .bind(&requirement_id)
-    .fetch_one(&pool)
-    .await
-    .expect("read review audit provenance");
+        )
+        .bind(&requirement_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read review audit provenance");
     assert_eq!(
         audit_assessment_id.as_deref(),
         Some(assessment_b_id.as_str())
     );
     assert_eq!(audit_state_version, Some(7));
-    sqlx::query("DELETE FROM server_event_dedupe WHERE session_id IN ($1, $2)")
+    support::query("DELETE FROM server_event_dedupe WHERE session_id IN ($1, $2)")
         .bind(&session_a)
         .bind(&session_b)
         .execute(&pool)
         .await
         .expect("cleanup event tombstones");
-    sqlx::query("DELETE FROM execution_sessions WHERE id IN ($1, $2)")
+    support::query("DELETE FROM execution_sessions WHERE id IN ($1, $2)")
         .bind(&session_a)
         .bind(&session_b)
         .execute(&pool)
         .await
         .expect("cleanup review sessions");
-    let requirement_delete = sqlx::query("DELETE FROM requirements WHERE id = $1")
+    let requirement_delete = support::query("DELETE FROM requirements WHERE id = $1")
         .bind(&requirement_id)
         .execute(&pool)
         .await;
@@ -977,7 +980,7 @@ async fn stale_review_cannot_decide_replaced_readiness_assessment() {
 async fn workspace_users_can_collaborate_without_requirement_acl() {
     let database_url = std::env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for workspace policy tests");
-    let pool = PoolOptions::new()
+    let pool = TestDatabaseOptions::new()
         .max_connections(8)
         .connect(&database_url)
         .await
@@ -1052,12 +1055,12 @@ async fn workspace_users_can_collaborate_without_requirement_acl() {
     assert_eq!(edited["revision"], 2);
     assert_eq!(edited["state_version"], 3);
 
-    sqlx::query("DELETE FROM requirements WHERE id = $1")
+    support::query("DELETE FROM requirements WHERE id = $1")
         .bind(&requirement_id)
         .execute(&pool)
         .await
         .expect("cleanup workspace requirement");
-    sqlx::query("DELETE FROM users WHERE id IN ($1, $2)")
+    support::query("DELETE FROM users WHERE id IN ($1, $2)")
         .bind(&creator_id)
         .bind(&collaborator_id)
         .execute(&pool)
