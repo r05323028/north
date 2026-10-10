@@ -60,6 +60,8 @@ The 0.1.0 release qualification SHALL include one deterministic production-shape
 - **WHEN** the qualification daemon sends an assessment for a different Requirement, an old revision, or a duplicate event
 - **THEN** the server rejects or deduplicates it under existing protocol/readiness rules without promoting or double-mutating the Requirement, and the qualification records that negative boundary
 
+
+
 ### Requirement: Browser SSE remains notification-only in assembled coverage
 
 The release qualification SHALL exercise the browser against an assembled server-backed environment and SHALL prove that authenticated SSE notifications are only identity/category hints. After relevant notifications, duplicate notifications, missed notifications followed by reconnect, browser focus, or visibility recovery, the browser SHALL refetch canonical HTTP state for the affected Requirement/workspace. The browser SHALL never treat SSE payloads as authoritative Requirement, conversation, readiness, activity, run, or review-packet state and SHALL never open a WebSocket.
@@ -81,12 +83,12 @@ The release qualification SHALL exercise the browser against an assembled server
 
 ### Requirement: Fresh installation and startup are qualified
 
-A release qualification run SHALL apply the checked-in initial-schema baseline to an empty PostgreSQL database and SHALL verify that the server starts only after migrations and mandatory configuration succeed. It SHALL exercise a production-shaped `DATABASE_URL` and a valid `NORTH_OTP_HMAC_KEY`, and SHALL assert clear safe failure before serving routes when PostgreSQL is unavailable, the key is missing or invalid, or migration application fails. Databases stamped by the unreleased pre-0.1.0 history are unsupported: startup SHALL NOT reset or rewrite them, and the operator documentation SHALL require manual recreation before first-release use. After 0.1.0, applied migrations SHALL remain immutable and new migrations SHALL follow the existing head. Startup and failure output SHALL not disclose the OTP key or other credentials.
+A release qualification run SHALL start the packaged server directly against an empty PostgreSQL database, without a preceding `north-server migrate` command, and SHALL verify that guarded pending migrations commit before listener bind. It SHALL qualify the optional migration CLI separately and verify that startup follows only checked-in versioned migrations. It SHALL exercise a production-shaped `DATABASE_URL` and a valid `NORTH_OTP_HMAC_KEY`, and SHALL assert clear safe failure before serving routes when PostgreSQL is unavailable, the key is missing or invalid, or migration application fails. Databases stamped by the unreleased pre-0.1.0 history are unsupported: startup SHALL NOT reset or rewrite them, and the operator documentation SHALL require manual recreation before first-release use. After 0.1.0, applied migrations SHALL remain immutable and new migrations SHALL follow the existing head. Startup and failure output SHALL not disclose the OTP key or other credentials.
 
 #### Scenario: Empty database reaches current migration head
 
 - **WHEN** a fresh PostgreSQL database is given to the built release
-- **THEN** the single initial-schema migration applies, the recorded head matches the repository baseline, and a basic authenticated HTTP workflow can start without manual schema edits
+- **THEN** the packaged server applies all checked-in migrations, verifies and commits the current head before listener bind, and serves a basic authenticated HTTP workflow without manual schema edits or a prior CLI migration step
 
 #### Scenario: Pre-release database is not reset automatically
 
@@ -134,7 +136,7 @@ The main-merge release process SHALL build the server/web package and OCI inputs
 #### Scenario: Packaged stack passes smoke
 
 - **WHEN** maintainers run the named 0.1.0 smoke command on the built artifacts with PostgreSQL and required configuration
-- **THEN** the smoke runs `north-server migrate` explicitly before normal startup, the server verifies the current migration head and serves authenticated HTTP without applying DDL during startup, the web artifact reaches canonical state through the supported same-origin deployment path, SSE streams without buffering, the daemon/runtime boundary connects through the supported authenticated WSS path, and the smoke run records a deterministic qualification result
+- **THEN** the packaged server starts directly against a fresh database, applies and commits pending migrations before listener bind, and serves authenticated HTTP; the optional `north-server migrate` CLI is qualified separately, the web artifact reaches canonical state through the supported same-origin deployment path, SSE streams without buffering, the daemon/runtime boundary connects through the supported authenticated WSS path, and the smoke run records a deterministic qualification result
 
 #### Scenario: Same-origin proxy preserves both live transports
 
@@ -230,12 +232,12 @@ Main and tag build/preflight/qualification paths SHALL carry exact package/OCI i
 
 ### Requirement: Compose deployment preserves North's supported topology
 
-The provided `docker-compose.yaml` SHALL run PostgreSQL 16 with a named persistent data volume, plus the `north-server` and `north-web` release images. On a fresh database, release qualification and operator instructions SHALL run `north-server migrate` explicitly before normal server startup; normal startup SHALL verify current schema state without applying DDL. Compose SHALL use versioned images rather than building on operator machines, and SHALL NOT include the daemon or terminate/manage TLS. The server and web processes SHALL bind their container interfaces; published host ports SHALL default to loopback for the operator-managed same-host TLS proxy. The proxy SHALL route server-owned HTTP paths, SSE, and `/daemon/ws` to `north-server` and remaining paths to Next, preserving cookies, SSE streaming, and WebSocket upgrade. The daemon SHALL remain host-managed and connect outbound to the same public HTTPS origin. Compose SHALL require externally supplied database credentials and a stable valid `NORTH_OTP_HMAC_KEY`, without embedding secret values. `/healthz` SHALL be documented only as process/liveness, not database readiness.
+The provided `docker-compose.yaml` SHALL run PostgreSQL 16 with a named persistent data volume, plus the `north-server` and `north-web` release images. On a fresh database, normal server startup SHALL automatically apply pending checked-in migrations and commit before accepting traffic; operator instructions SHALL document the optional `north-server migrate` command as the same guarded migration path. Compose SHALL use versioned images rather than building on operator machines, and SHALL NOT include the daemon or terminate/manage TLS. The server and web processes SHALL bind their container interfaces; published host ports SHALL default to loopback for the operator-managed same-host TLS proxy. The proxy SHALL route server-owned HTTP paths, SSE, and `/daemon/ws` to `north-server` and remaining paths to Next, preserving cookies, SSE streaming, and WebSocket upgrade. The daemon SHALL remain host-managed and connect outbound to the same public HTTPS origin. Compose SHALL require externally supplied database credentials and a stable valid `NORTH_OTP_HMAC_KEY`, without embedding secret values. `/healthz` SHALL be documented only as process/liveness, not database readiness.
 
 #### Scenario: Compose starts supported services with persistent storage
 
 - **WHEN** an operator supplies valid runtime configuration and starts the documented Compose file
-- **THEN** PostgreSQL, server, and web use the documented versioned images; the operator or qualification command runs `north-server migrate` before normal startup verifies schema and accepts traffic; and PostgreSQL state survives container recreation while its named volume is retained
+- **THEN** PostgreSQL, server, and web use the documented versioned images; normal startup applies and commits pending migrations before accepting traffic, while `north-server migrate` remains an optional operator command; and PostgreSQL state survives container recreation while its named volume is retained
 
 #### Scenario: External proxy preserves browser and daemon routes
 
@@ -246,3 +248,14 @@ The provided `docker-compose.yaml` SHALL run PostgreSQL 16 with a named persiste
 
 - **WHEN** required database or OTP configuration is missing or invalid
 - **THEN** startup fails closed without substituting a default credential, and no secret value is present in the Compose file or image layers
+
+## ADDED Requirements
+
+### Requirement: Browser E2E proves supported Requirement create/read/edit flow
+
+The default Playwright requirement-board suite SHALL cover visible-UI Requirement creation, canonical detail read, and version-checked content edit. Creation SHALL start at revision/state_version 1. One accepted edit SHALL submit current expected_state_version and increment both tokens once. Edited fields SHALL survive canonical GET after reload. Route-mocked coverage proves browser behavior only, not server/database persistence; assembled release qualification remains that proof. Deletion is out of scope without an API contract.
+
+#### Scenario: Create and revise from the workspace
+
+- **WHEN** the Requester fixture creates a Draft through the Board, edits its content with expected_state_version 1, and reloads its detail route
+- **THEN** the browser renders canonical creation and edit responses, with revised fields and revision/state_version 2 after reload

@@ -1,4 +1,4 @@
-import path from "path";
+import path from "node:path";
 import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
@@ -11,7 +11,7 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "lcov"],
       reportsDirectory: "./coverage",
-      include: ["app/**", "components/**", "lib/**"],
+      include: ["app/**/*.{js,jsx,ts,tsx}", "components/**/*.{js,jsx,ts,tsx}", "lib/**/*.{js,jsx,ts,tsx}"],
     },
   },
   resolve: {

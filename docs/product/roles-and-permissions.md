@@ -50,3 +50,7 @@ Changes, Reopen, or other readiness/review mutations. Review actions render in
 the canonical `/requirements/[id]` workspace; the client uses the current
 review packet only for UX, while server role, lifecycle, assessment, and state
 version checks remain authoritative.
+
+## Personal page preferences
+
+Any authenticated role may read and update its own Requirement workspace preferences at `/auth/me/preferences/requirement-workspace`. The server derives the owner from the validated session; clients cannot select an owner. Admin and Owner privileges do not grant access to another user’s personal preferences. These values affect only presentation defaults, never Requirement visibility, collaboration, review permissions, or shared instance settings. Each future page defines its own editor and authorization policy.

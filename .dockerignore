@@ -1,0 +1,14 @@
+.git
+.codegraph
+graphify-out
+target
+dist
+**/node_modules
+**/.next
+**/coverage
+.env*
+**/.env*
+.npmrc*
+**/.npmrc*
+**/*.pem
+**/*.key

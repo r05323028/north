@@ -1,0 +1,17 @@
+---
+# Optional local source-build overlay; combine with docker-compose.yaml.
+# Images build from this checkout; no release package or tag required.
+services:
+  north-server:
+    image: north-server:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile.server.local
+
+  north-web:
+    image: north-web:local
+    pull_policy: never
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile.local

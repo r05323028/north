@@ -28,6 +28,7 @@ mod readiness;
 mod repositories;
 mod requirements;
 mod retention;
+mod user_preferences;
 
 pub use clarification::{
     ClarificationActivity, ClarificationCommandResult, ClarificationError, ClarificationEvent,
@@ -59,6 +60,7 @@ pub use retention::{
     RetentionConfig, RetentionConfigError, DEFAULT_RETENTION_BATCH_SIZE, DEFAULT_RETENTION_SECONDS,
     DEFAULT_RETENTION_SWEEP_SECONDS, MAX_RETENTION_BATCH_SIZE,
 };
+pub use user_preferences::{RequirementWorkspacePreferences, RequirementWorkspaceView};
 
 /// Verification codes remain usable for ten minutes.
 pub const VERIFICATION_CODE_TTL_SECONDS: i64 = 10 * 60;
@@ -192,6 +194,7 @@ pub enum PersistenceError {
     InvalidCommandPayload,
     InvalidSessionState,
     SessionRequirementMismatch,
+    InvalidUserPreferences,
     InvalidRepository(north_domain::repository::RepositoryError),
     RepositoryNotFound,
     RepositoryNameConflict,
@@ -222,6 +225,7 @@ impl fmt::Display for PersistenceError {
             Self::SessionRequirementMismatch => {
                 f.write_str("session is bound to another requirement")
             }
+            Self::InvalidUserPreferences => f.write_str("invalid user preferences"),
             Self::InvalidRepository(error) => write!(f, "invalid repository: {error:?}"),
             Self::RepositoryNotFound => f.write_str("repository not found"),
             Self::RepositoryNameConflict => f.write_str("repository name already exists"),
@@ -257,6 +261,7 @@ impl Error for PersistenceError {
             | Self::InvalidCommandPayload
             | Self::InvalidSessionState
             | Self::SessionRequirementMismatch
+            | Self::InvalidUserPreferences
             | Self::InvalidRepository(_)
             | Self::RepositoryNotFound
             | Self::RepositoryNameConflict

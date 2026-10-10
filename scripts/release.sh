@@ -141,7 +141,7 @@ output_root=${NORTH_RELEASE_OUTPUT_DIR:-$ROOT/dist/north-v$version}
 printf 'release.sh package: source=%s version=%s previous_version=%s version_changed=%s\n' \
     "$source_commit" "$version" "$previous_cargo_version" "$version_changed"
 
-if ! rustup target list --installed | grep -Fx "$target" >/dev/null; then
+if [[ "$target" != "x86_64-unknown-linux-gnu" ]] && ! rustup target list --installed | grep -Fx "$target" >/dev/null; then
     printf 'release.sh package: Rust target is not installed: %s\n' "$target" >&2
     exit 2
 fi
@@ -590,13 +590,21 @@ release_compose_start() {
     run_bounded 300 docker compose --project-name "$release_compose_project" \
         --file "$release_compose_file" up --detach --wait postgres
     release_log "PASS compose-database-ready"
-    run_bounded 60 docker compose --project-name "$release_compose_project" \
-        --file "$release_compose_file" run --rm --no-deps north-server migrate
-    release_log "PASS compose-image-migration-command"
     release_log "qualification evidence=oci-compose"
     run_bounded 300 docker compose --project-name "$release_compose_project" \
         --file "$release_compose_file" up --detach --wait
     release_log "PASS compose-runtime-started project=$release_compose_project"
+    compose_migration_head=$(run_bounded 30 docker compose \
+        --project-name "$release_compose_project" --file "$release_compose_file" \
+        exec --no-TTY postgres psql --no-psqlrc --set ON_ERROR_STOP=1 \
+        --tuples-only --no-align --username "$POSTGRES_USER" \
+        --dbname "$POSTGRES_DB" \
+        --command 'SELECT version FROM seaql_migrations ORDER BY version DESC LIMIT 1;')
+    if [[ "$compose_migration_head" != "m0003_user_requirement_preferences" ]]; then
+        release_log "OWNER-ACTION Compose startup did not reach current migration head value=$compose_migration_head"
+        exit 1
+    fi
+    release_log "PASS compose-image-startup-migration head=$compose_migration_head"
 
     local invalid_key="not-a-valid-otp-key"
     local startup_log="$RELEASE_TMPDIR/logs/oci-invalid-otp.log"
@@ -701,15 +709,12 @@ NODE
     release_log "PASS packaged-invalid-OTP-before-listen-redacted"
 }
 
-release_log "qualification evidence=packaged-migration-command"
-run_bounded 60 env -u NORTH_OTP_HMAC_KEY DATABASE_URL="$NORTH_TEST_DATABASE_URL" \
-    "$server_bin" migrate
-release_log "PASS packaged-migration-command"
-
-release_log "qualification evidence=fresh-install-migration"
-run_bounded 900 env NORTH_TEST_DATABASE_URL="$NORTH_TEST_DATABASE_URL" \
+release_log "qualification evidence=package-fresh-install-migration-and-cli"
+run_bounded 900 env \
+    NORTH_TEST_DATABASE_URL="$NORTH_TEST_DATABASE_URL" \
+    NORTH_TEST_RELEASE_SERVER_BINARY="$server_bin" \
     cargo test --locked -p north-server --test fresh_install -- --ignored
-release_log "PASS fresh-install-migration parity"
+release_log "PASS package-startup-migration optional-cli and migration-failure coverage"
 release_check_invalid_otp_startup
 
 if [[ -n "$oci_dir" ]]; then

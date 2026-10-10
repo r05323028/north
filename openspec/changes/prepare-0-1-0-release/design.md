@@ -32,19 +32,19 @@ The existing `server-runtime` capability owns the server process and migration c
 
 ## Decisions
 
-### 1. Package existing server process without changing migration policy
+### 1. Package existing server process with guarded startup migrations
 
 The existing `north-server` binary is the release server entrypoint. It will:
 
 1. require `DATABASE_URL` and a valid `NORTH_OTP_HMAC_KEY`;
 2. read `NORTH_BIND_ADDR` with its documented loopback default;
-3. expose `north-server migrate` as the explicit SeaORM migration operation;
-4. verify the current migration head during normal startup without applying schema changes; and
+3. apply only pending checked-in SeaORM migrations through the shared guarded runner before app construction or listener bind;
+4. retain `north-server migrate` as an optional CLI using the same PostgreSQL transaction-scoped advisory lock; and
 5. expose safe `GET /healthz` and serve the existing authenticated Axum router with bounded graceful shutdown.
 
-Release qualification and Compose SHALL run `north-server migrate` before normal server startup on a fresh database. The process reuses `build_app` and existing persistence/router setup; no alternate server path is added. It logs only safe failure classes and never logs the OTP key, database URL credentials, cookies, codes, or daemon credentials. Configuration, database, or schema-verification failure exits before the listener accepts traffic. Test runs use an ephemeral bind port and isolated HOME/XDG state/config directories.
+Release qualification and Compose SHALL start the packaged server directly against a fresh database and verify that migrations commit before traffic; the explicit CLI is qualified separately. Preflight, migration execution, and verification use the locked transaction, and commit failure prevents listener bind. The server role therefore needs schema DDL privileges. The process reuses `build_app` and existing persistence/router setup; no alternate server path is added. It logs only safe failure classes and never logs the OTP key, database URL credentials, cookies, codes, or daemon credentials. Test runs use an ephemeral bind port and isolated HOME/XDG state/config directories.
 
-**Alternative rejected:** using an integration-test-only router as the release artifact leaves no supported server process to package or smoke-test. Automatically mutating schema during ordinary startup conflicts with the existing explicit-migration contract.
+**Alternative rejected:** entity-first schema synchronization, reset, or drop paths. Automatic application of reviewed, versioned migrations is supported because the shared preflight, transaction, and lock preserve fail-closed behavior; it does not replace reviewed migrations with schema sync.
 
 ### 2. Keep browser same-origin through an operator proxy
 
@@ -65,6 +65,8 @@ The release web artifact uses the existing Next application in production mode. 
 **Alternative rejected:** adding a Rust static-file server or a second browser API namespace would duplicate Next routing and create a new product delivery path. Next rewrites alone do not provide the required daemon WebSocket deployment contract.
 
 ### 3. Compose qualification from real boundaries
+
+The release Compose file remains image-only for qualification and operator use. The opt-in `docker-compose.build.yaml` is a local-source build path: it overrides release image refs with local tags, disables registry pulls, builds `north-server` from the workspace, and builds the Next.js standalone output from `apps/web`. Separate local Dockerfiles and `.dockerignore` files keep this workflow isolated from release packaging and exclude secrets/caches from contexts. Local builds need no prepared release package, SemVer tag, or GitHub release; existing release Dockerfiles remain package-backed.
 
 Create a release qualification harness under the existing validation/tooling surfaces, not under `crates/`. It will launch or connect to:
 
@@ -104,17 +106,18 @@ The existing structural `browser_never_opens_websockets` test remains a second, 
 
 ### 5. Fresh-install and startup qualification
 
-The pre-0.1.0 history is consolidated by `consolidate-pre-release-migrations`. Add/retain an ignored PostgreSQL integration test or release harness command with an isolated database/schema that starts empty, invokes `north-server migrate` through the existing SeaORM runner, and asserts the single baseline head and required tables. Normal server startup verifies that head and does not apply DDL. Historical upgrade evidence for unpublished schemas is intentionally removed; after publication, keep the baseline immutable and append later migrations.
+The pre-0.1.0 history is consolidated by `consolidate-pre-release-migrations`. Add/retain an ignored PostgreSQL integration test or release harness command with an isolated database/schema that starts empty, starts the packaged server to exercise automatic migration and asserts the single baseline head and required tables; qualify the optional `north-server migrate` command separately if deployment tooling uses it. Normal server startup applies pending guarded migrations and verifies that head before app construction and listener binding. Historical upgrade evidence for unpublished schemas is intentionally removed; after publication, keep the baseline immutable and append later migrations.
 
-Test the explicit migration command on a fresh database and on migration failure. Run the built server under a matrix of:
+Qualify the optional explicit migration command on a fresh database, current head, and migration failure when deployment tooling uses it. Run the built server under a matrix of:
 
-- current migration head + valid `DATABASE_URL` + valid 64-character hex `NORTH_OTP_HMAC_KEY`;
+- fresh empty schema + valid `DATABASE_URL` + valid 64-character hex `NORTH_OTP_HMAC_KEY`; migrations must commit before listener bind, then the server must serve;
+- current migration head + valid configuration; startup must be idempotent and serve;
 - missing key;
 - malformed/short/non-hex key;
 - unavailable PostgreSQL; and
-- missing or behind schema.
+- insufficient DDL privileges, partial/legacy/unknown schema, or migration failure.
 
-The valid case must serve `/healthz` as a process/liveness signal and a basic authenticated request. Failure cases must exit before accepting routes and must be checked for secret-free output. The qualification command records `NORTH_TEST_DATABASE_URL` prerequisites explicitly instead of silently skipping; operator docs must not treat `/healthz` as continuous database readiness.
+Both valid cases must serve `/healthz` as a process/liveness signal and a basic authenticated request. Failure cases must exit before accepting routes and must be checked for secret-free output. The qualification command records `NORTH_TEST_DATABASE_URL` prerequisites explicitly instead of silently skipping; operator docs must not treat `/healthz` as continuous database readiness.
 
 ### 6. Package one immutable release input
 
@@ -151,9 +154,9 @@ Workflow artifacts are internal and expire after 14 days. Package checksums, CLI
 
 ### 8. OCI images and Compose deployment
 
-Publish no OCI image tags after a main merge. Only a strict `vX.Y.Z` tag publishes `north-server` and `north-web` SemVer refs to GHCR from freshly built and qualified tag archives. A strict `vX.Y.Z` tag builds and qualifies fresh server/web OCI images from that tag; initial-release eligibility uses the complete currently fetched strict tag-ref set, while subsequent releases require an exact first-parent version bump. SemVer GHCR refs point to tag-built digests and can differ from main SHA-image digests. CLI release archives contain `north` and `north-daemon`, never `north-server`; the server remains inside the backend OCI image. `Dockerfile.server` and `apps/web/Dockerfile` package outputs from `scripts/release.sh package`; they do not compile Rust or rebuild Next independently. The server image contains the packaged `north-server` binary in a non-root, glibc-compatible runtime with CA roots (glibc 2.31 minimum). `north-server migrate` uses the existing SeaORM migration runner; ordinary server startup verifies schema state without applying DDL. The web image contains the existing Next standalone output and runs on Node 22. Both images target Linux x86_64 only for 0.1.0.
+Publish no OCI image tags after a main merge. Only a strict `vX.Y.Z` tag publishes `north-server` and `north-web` SemVer refs to GHCR from freshly built and qualified tag archives. A strict `vX.Y.Z` tag builds and qualifies fresh server/web OCI images from that tag; initial-release eligibility uses the complete currently fetched strict tag-ref set, while subsequent releases require an exact first-parent version bump. SemVer GHCR refs point to tag-built digests and can differ from main SHA-image digests. CLI release archives contain `north` and `north-daemon`, never `north-server`; the server remains inside the backend OCI image. `Dockerfile.server` and `apps/web/Dockerfile` package outputs from `scripts/release.sh package`; they do not compile Rust or rebuild Next independently. The server image contains the packaged `north-server` binary in a non-root, glibc-compatible runtime with CA roots (glibc 2.31 minimum). `north-server migrate` and normal startup use the same guarded SeaORM migration runner; normal startup applies pending migrations and commits before listener bind. The web image contains the existing Next standalone output and runs on Node 22. Both images target Linux x86_64 only for 0.1.0.
 
-`docker-compose.yaml` pulls exact supplied SemVer image refs or digest pins for operators; CI Compose loads qualified OCI archives locally without GHCR access and runs PostgreSQL 16, `north-server`, and `north-web`. On a fresh database, run `docker compose run --rm north-server migrate` before normal `docker compose up`; startup verifies schema state and does not apply DDL. PostgreSQL data lives in a named volume. Compose does not build images on operator machines and does not include a TLS proxy or daemon. The server listens on `0.0.0.0:8080` inside its container; Next listens on `0.0.0.0:3000`. Publish these ports on host loopback for a same-host operator-managed TLS proxy. The proxy routes server-owned paths and `/daemon/ws` to `north-server`, all other paths to Next, preserves cookies and WebSocket upgrade, and streams `/events` without buffering. The host-managed daemon connects to the same public HTTPS origin. No browser API origin is configured at image build time; browser paths remain relative and same-origin.
+`docker-compose.yaml` pulls exact supplied SemVer image refs or digest pins for operators; CI Compose loads qualified OCI archives locally without GHCR access and runs PostgreSQL 16, `north-server`, and `north-web`. On a fresh database, normal `docker compose up` applies and commits checked-in migrations before the server binds; `docker compose run --rm north-server migrate` remains an optional preflight using the same guarded path. PostgreSQL data lives in a named volume. Compose does not build images on operator machines and does not include a TLS proxy or daemon. The server listens on `0.0.0.0:8080` inside its container; Next listens on `0.0.0.0:3000`. Publish these ports on host loopback for a same-host operator-managed TLS proxy. The proxy routes server-owned paths and `/daemon/ws` to `north-server`, all other paths to Next, preserves cookies and WebSocket upgrade, and streams `/events` without buffering. The host-managed daemon connects to the same public HTTPS origin. No browser API origin is configured at image build time; browser paths remain relative and same-origin.
 
 Compose requires operators to supply `DATABASE_URL`, PostgreSQL credentials, and a stable 64-character hexadecimal `NORTH_OTP_HMAC_KEY`; no secret values are baked into images or committed Compose defaults. The current server reads these values from environment variables, not Docker secret files; file-based secret support is outside this delivery scope. `/healthz` remains a process/liveness signal, not database readiness. The operator runbook documents persistent-volume backup/restore and key preservation.
 
@@ -174,6 +177,8 @@ Add `docs/deployment/self-hosted.md` with required PostgreSQL, proxy, web, serve
 Add `docs/development/release-checklist.md` with maintainer checks for clean main/tag, strict specs, `validate.sh` profiles, PostgreSQL qualification, Playwright/browser transport evidence, internal artifact/version/checksum review, OCI image digests, and post-publication verification. Each check must distinguish pass, not-run, and owner action.
 
 Update testing/CI/invariant/architecture docs only where the shipped executable topology or evidence status changes. Existing deferred statuses remain unchanged.
+
+The default CI Playwright requirement-board suite separately proves the browser contract for creating, canonically reading, and version-editing a Requirement across reload. Its mocked routes do not prove server/database persistence; the assembled release suite remains that proof.
 
 ## Risks / Trade-offs
 

@@ -32,10 +32,10 @@ Never added as placeholders just to justify the layer name.
 
 ### Smoke
 
-The built/deployed system starts and serves essential surfaces: packaged
-`north-server migrate` applies schema, normal server startup verifies it without
-DDL, health endpoint responds, and web reaches the server. Shallow and fast by
-design.
+The built/deployed system starts and serves essential surfaces: packaged server
+startup applies pending versioned migrations before binding (the explicit
+`north-server migrate` command remains optional), health endpoint responds, and
+web reaches the server. Shallow and fast by design.
 
 Classification rules: do not promote integration tests to E2E because Docker
 is involved; do not call a test smoke merely because it is quick.
@@ -70,7 +70,7 @@ member so `cargo test --workspace` executes it.
 | Unit (release tooling) | Implemented — Node tests for artifact/OCI verification, no-publish main checks, and tag-built SemVer-only GHCR publication; included in `./scripts/validate.sh fast` |
 | Unit (north CLI) | Implemented — `cargo test -p north-daemon --bin north --test cli_lifecycle` verifies CLI behavior and local daemon lifecycle safety |
 | Integration | Implemented — PostgreSQL-backed requirements, conversations, readiness, daemon lifecycle, public endpoint abuse controls, repository lifecycle/citation, durable coordination, runtime activity retention, post-commit browser notification coverage, and fresh-install baseline; execute with `NORTH_TEST_DATABASE_URL` |
-| E2E | Partial — Playwright web-boundary coverage includes Board/List/create/direct workspace, SSE invalidation, and human review; assembled server-backed suite passed locally against exact synthetic Linux/amd64 artifacts, while hosted protected-main/tag evidence remains NOT RUN |
+| E2E | Partial — Playwright web-boundary coverage includes Board/List/create/read/versioned edit/reload/direct workspace, SSE invalidation, and human review; assembled server-backed suite passed locally against exact synthetic Linux/amd64 artifacts, while hosted protected-main/tag evidence remains NOT RUN |
 | Smoke | Implemented — `./scripts/validate.sh smoke` requires `NORTH_RELEASE_ARTIFACT_DIR` and never falls back to workspace binaries; isolated PostgreSQL and persistent trusted TLS identity are required. Set `NORTH_RELEASE_OCI_DIR` and `NORTH_RELEASE_IMAGE_OWNER` to include exact OCI/Compose qualification. Local Linux/amd64 synthetic-artifact smoke passed; hosted protected-main/tag artifact smoke remains NOT RUN |
 
 Human-review browser integration, including Review Packet loading, stale repair,
@@ -140,6 +140,12 @@ fork them casually. Frontend unit tests use Vitest (`npm test`) and run through
 Playwright (`npm run test:e2e`) and run in merge-gate job `web-e2e` on
 `ubuntu-latest`; this mocked-route suite does not prove assembled server/browser
 behavior. Install its browser locally with `npx playwright install chromium`.
+Assembled release E2E targets the North proxy and runs with
+`cd apps/web && npm run test:e2e:release`. Set `NORTH_RELEASE_BASE_URL` and
+provide either `NORTH_RELEASE_STORAGE_STATE` or `NORTH_RELEASE_OTP_CODE` (with
+optional `NORTH_RELEASE_EMAIL`) in the local environment. Keep storage state and
+OTP values out of source control and command logs. The release preference test
+restores the user's prior preference row after verifying save and reload.
 Coverage generation/upload remains CI-specific (`npm run test:coverage`).
 
 ## Human documentation site (`web/`)
@@ -155,13 +161,19 @@ Ready-only Review Packet loading, non-Ready packet skipping, stale response
 suppression, stable-ID deduplication, requester persistence-before-intent,
 explicit run identity, cancellation and structured-edit conflicts, typed review
 payloads, role gates, stale review repair, feedback preservation, and
-identity-bound acknowledgement. Playwright coverage proves direct workspace
-load, canonical panes, durable message POST, initial start without duplicate
-dispatch, active run dispatch, explicit cancellation URLs, reload-safe same-start
-retry, awaiting/cancellation-pending states, 503 unavailability, 409 edit
-reconciliation, human review decisions, Reopen, stale acknowledgement, and
-SSE/focus repair. Mocked Playwright coverage does not prove assembled
-server/browser behavior; run assembled E2E and smoke qualification for each
+identity-bound acknowledgement. Playwright coverage also proves Board-to-workspace
+create → canonical detail read → expected_state_version edit → canonical GET
+after reload with one revision/state_version increment. A reusable
+preference-editor flow lives in `apps/web/e2e/preference-editor-flow.ts`. Its
+Requirement-workspace adapter saves defaults, reloads, verifies view/List-control
+restoration, and confirms search stays transient. It proves direct
+workspace load, canonical panes, durable message POST, initial
+start without duplicate dispatch, active run dispatch, explicit cancellation URLs,
+reload-safe same-start retry, awaiting/cancellation-pending states, 503
+unavailability, 409 edit reconciliation, human review decisions, Reopen, stale
+acknowledgement, and SSE/focus repair. Mocked Playwright coverage does not
+prove assembled server/browser behavior; run assembled E2E and smoke
+qualification for each
 release candidate and record results against its tag, source SHA, and artifact.
 Smoke requires an extracted artifact and `NORTH_TEST_DATABASE_URL`; missing
 artifact/database input exits with an error. Missing or invalid persistent TLS

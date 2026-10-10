@@ -10,8 +10,9 @@ Release qualification needs one reproducible proof that these existing subsystem
 
 - Add one production-shaped golden-path qualification covering an authenticated browser/client, North HTTP/SSE, a real server-to-daemon protocol connection, clarification conversation projections, a server-validated readiness assessment, and a human review transition.
 - Replace mocked-only SSE confidence with assembled server-backed browser coverage proving SSE is notification-only, canonical HTTP state is refetched after relevant events, reconnect/focus repairs recover state, and the browser never opens WebSockets.
+- Extend default CI Playwright coverage with a Requirement create → canonical read → version-checked edit → reload flow; keep route-mocked browser evidence distinct from assembled server/database proof.
 - Add fresh-install migration qualification and production-like startup probes for `DATABASE_URL`, `NORTH_OTP_HMAC_KEY`, migration failure, PostgreSQL failure, and safe missing/invalid configuration errors.
-- Package the existing `north-server` process, explicit `north-server migrate` operation, schema-verifying startup, and `/healthz` contract for release qualification; do not add automatic schema mutation to normal startup.
+- Package the existing `north-server` process with guarded automatic application of pending versioned migrations before listener bind; keep `north-server migrate` as an optional operator command using the same locked path, and qualify both startup and `/healthz` behavior.
 - Add `north` CLI with `setup` and `daemon start|stop|status`; bundle and supervise existing `north-daemon`, reuse its HTTPS device-approval flow, and report backend connection state without exposing credentials. Do not add Requirement-management commands or PAT/OAuth auth.
 - Keep `north-server` in the backend OCI image; CLI archives contain only `north` and `north-daemon`.
 - On protected-main pushes, run CI, build one Linux x86_64 server package and OCI set from the exact commit, qualify those inputs, and retain artifacts internally; never publish OCI images to GHCR from main.
@@ -27,6 +28,8 @@ Release qualification needs one reproducible proof that these existing subsystem
 - Require at least one approving review in protected-main rules and verify release tags resolve to the expected full source SHA through GitHub's Git API.
 
 ## Capabilities
+
+- `compose-image-build-fallback`: optional local-source build overlay with local image tags; release Compose remains image-only and release Dockerfiles remain package-backed.
 
 ### New Capabilities
 

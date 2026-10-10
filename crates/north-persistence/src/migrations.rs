@@ -1,4 +1,4 @@
-use sea_orm::DatabaseConnection;
+use sea_orm::{ConnectionTrait, DatabaseConnection, TransactionTrait};
 use sea_orm_migration::{prelude::*, MigratorTrait};
 use std::{error::Error, fmt};
 
@@ -6,6 +6,10 @@ use std::{error::Error, fmt};
 mod m0001_initial_schema;
 #[path = "m0002_requirement_board_positions.rs"]
 mod m0002_requirement_board_positions;
+#[path = "m0003_user_preferences.rs"]
+mod m0003_user_preferences;
+
+const MIGRATION_LOCK_KEY: &str = "north:seaorm:schema-migrations";
 
 pub struct Migrator;
 
@@ -15,6 +19,7 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m0001_initial_schema::Migration),
             Box::new(m0002_requirement_board_positions::Migration),
+            Box::new(m0003_user_preferences::Migration),
         ]
     }
 }
@@ -50,17 +55,31 @@ impl fmt::Display for MigrationError {
 
 impl Error for MigrationError {}
 
-/// Apply pending migrations after rejecting unsupported pre-release databases.
+/// Apply pending migrations under one database-scoped lock and transaction.
 pub async fn apply(database: &DatabaseConnection) -> Result<(), MigrationError> {
-    preflight(database).await?;
-    Migrator::up(database, None)
+    let transaction = database
+        .begin()
         .await
         .map_err(|_| MigrationError::MigrationExecutionFailed)?;
-    verify(database).await
+    crate::query::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(MIGRATION_LOCK_KEY)
+        .execute(&transaction)
+        .await
+        .map_err(|_| MigrationError::MigrationExecutionFailed)?;
+
+    preflight(&transaction).await?;
+    Migrator::up(&transaction, None)
+        .await
+        .map_err(|_| MigrationError::MigrationExecutionFailed)?;
+    verify(&transaction).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| MigrationError::MigrationExecutionFailed)
 }
 
 /// Verify migration state and required tables without issuing DDL.
-pub async fn verify(database: &DatabaseConnection) -> Result<(), MigrationError> {
+pub async fn verify<C: ConnectionTrait>(database: &C) -> Result<(), MigrationError> {
     reject_sqlx_history(database).await?;
     let has_migration_table: bool =
         crate::query::query_scalar("SELECT to_regclass('seaql_migrations') IS NOT NULL")
@@ -90,20 +109,20 @@ pub async fn verify(database: &DatabaseConnection) -> Result<(), MigrationError>
              'execution_sessions', 'server_command_outbox', 'repositories',
              'server_command_tombstones', 'server_message_command_map',
              'server_event_dedupe', 'clarification_activities', 'execution_attempts',
-             'requirement_board_positions'
+             'requirement_board_positions', 'user_requirement_preferences'
          ]::text[]) AS expected(name)
          WHERE to_regclass(expected.name) IS NOT NULL",
     )
     .fetch_one(database)
     .await
     .map_err(|_| MigrationError::DatabaseInspectionFailed)?;
-    if application_tables != 20 {
+    if application_tables != 21 {
         return Err(MigrationError::IncompleteSchema);
     }
     Ok(())
 }
 
-async fn preflight(database: &DatabaseConnection) -> Result<(), MigrationError> {
+async fn preflight<C: ConnectionTrait>(database: &C) -> Result<(), MigrationError> {
     reject_sqlx_history(database).await?;
     let has_migration_table: bool =
         crate::query::query_scalar("SELECT to_regclass('seaql_migrations') IS NOT NULL")
@@ -123,7 +142,7 @@ async fn preflight(database: &DatabaseConnection) -> Result<(), MigrationError> 
              'execution_sessions', 'server_command_outbox', 'repositories',
              'server_command_tombstones', 'server_message_command_map',
              'server_event_dedupe', 'clarification_activities', 'execution_attempts',
-             'requirement_board_positions'
+             'requirement_board_positions', 'user_requirement_preferences'
          ]::text[]) AS existing(name)
          WHERE to_regclass(existing.name) IS NOT NULL",
     )
@@ -136,7 +155,7 @@ async fn preflight(database: &DatabaseConnection) -> Result<(), MigrationError> 
     Ok(())
 }
 
-async fn reject_sqlx_history(database: &DatabaseConnection) -> Result<(), MigrationError> {
+async fn reject_sqlx_history<C: ConnectionTrait>(database: &C) -> Result<(), MigrationError> {
     let has_sqlx_history: bool =
         crate::query::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
             .fetch_one(database)

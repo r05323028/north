@@ -170,7 +170,11 @@ describe("RequirementListView", () => {
     });
 
     const html = renderToStaticMarkup(
-      <RequirementList onCreateAction={() => undefined} />,
+      <RequirementList
+        onCreateAction={() => undefined}
+        onPreferencesChange={() => undefined}
+        preferences={{ status: "", creator: "", sort: "updated" }}
+      />,
     );
 
     expect(html).toContain("Login flow");

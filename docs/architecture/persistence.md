@@ -2,8 +2,11 @@
 
 PostgreSQL is the relational source of truth for durable product and server
 reliability state. `north-persistence` owns SeaORM entities and versioned Rust
-migrations. Operators run packaged `north-server migrate` explicitly; normal
-server startup verifies the migration head and performs no schema DDL or sync.
+migrations. Server startup applies pending checked-in migrations before binding;
+packaged `north-server migrate` remains available as an optional operator command.
+Both paths share guarded preflight, verification, and a PostgreSQL transaction-
+scoped advisory lock. Entity-first schema sync and automatic reset stay disabled.
+The configured server database role needs DDL privileges for pending migrations.
 
 Production access uses SeaORM connections and transactions. Entities model table
 shape and straightforward queries; bound SeaORM statements preserve PostgreSQL-
@@ -15,11 +18,17 @@ versioned Rust migrations, with PostgreSQL-specific DDL kept in those migrations
 
 | Class | Examples | Rules |
 | --- | --- | --- |
-| Durable business | users, roles, requirements (+revisions and board positions), readiness assessments, conversations, messages, configured repositories, human review decisions | never TTL-deleted; deletion is a product decision |
+| Durable business | users, roles, requirements (+revisions and board positions), readiness assessments, conversations, messages, configured repositories, human review decisions, personal Requirement workspace preferences | never TTL-deleted; deletion is a product decision |
 | Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, execution attempts, server command outbox, event dedupe/rejection records, sequence watermarks, keyed setup quota | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
-The compiled SeaORM baseline migration, `crates/north-persistence/src/m0001_initial_schema.rs`, creates the unpublished base schema from an empty database: requirements, conversations and readiness evidence; daemon/session and durable delivery state; repositories, retry attempts, retention metadata, setup quota keys, and keyed OTP storage. The append-only `m0002_requirement_board_positions` migration adds durable board ranks and backfills existing Requirements by status, creation time, and id; on fresh installs its backfill has no pre-existing rows. Pre-0.1.0 SQLx-stamped or partial North databases are unsupported and the migration command rejects them with manual-recreation guidance. North never resets them automatically. After publication, applied migrations are immutable and later versions append in Rust.
+The compiled SeaORM baseline migration, `crates/north-persistence/src/m0001_initial_schema.rs`, creates the unpublished base schema from an empty database: requirements, conversations and readiness evidence; daemon/session and durable delivery state; repositories, retry attempts, retention metadata, setup quota keys, and keyed OTP storage. The append-only `m0002_requirement_board_positions` migration adds durable board ranks and backfills existing Requirements by status, creation time, and id; on fresh installs its backfill has no pre-existing rows. The append-only `m0003_user_requirement_preferences` migration adds constrained personal Requirement workspace defaults; rollback never drops the table or saved preferences. Pre-0.1.0 SQLx-stamped or partial North databases are unsupported and the migration command rejects them with manual-recreation guidance. North never resets them automatically. After publication, applied migrations are immutable and later versions append in Rust.
 
+
+## Personal Requirement workspace preferences
+
+`user_requirement_preferences` stores one typed row per user for the Requirement workspace: default view and List status, creator, and sort. Missing rows mean board view, all statuses, all creators, and `updated` sort. Search is transient. This table is durable business data, outside the ephemeral retention allowlist.
+
+Authenticated GET/PUT derives `user_id` from the validated session. Every role may manage its own preferences; Admin and Owner do not gain access to another user’s values. Other pages add their own typed fields and authorization policy rather than sharing a generic preference store.
 
 ## Requirement board positions
 

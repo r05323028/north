@@ -18,38 +18,51 @@ import {
 import { useRequirementCollection } from "@/lib/use-requirement-collection";
 import type { RequirementCollectionState } from "@/lib/use-requirement-collection";
 
+export type RequirementListPreferences = {
+        status: RequirementStatus | "";
+        creator: string;
+        sort: RequirementSort;
+};
+
 export function RequirementList({
         onCreateAction,
+        preferences,
+        onPreferencesChange,
 }: {
         onCreateAction: () => void;
+        preferences: RequirementListPreferences;
+        onPreferencesChange: (value: RequirementListPreferences) => void;
 }) {
         const [search, setSearch] = useState("");
-        const [status, setStatus] = useState<RequirementStatus | "">("");
-        const [creator, setCreator] = useState("");
-        const [sort, setSort] = useState<RequirementSort>("updated");
         const query = useMemo<RequirementQuery>(
                 () => ({
                         search: search || undefined,
-                        status: status || undefined,
-                        created_by: creator || undefined,
-                        sort,
+                        status: preferences.status || undefined,
+                        created_by: preferences.creator || undefined,
+                        sort: preferences.sort,
                 }),
-                [creator, search, sort, status],
+                [preferences.creator, preferences.sort, preferences.status, search],
         );
         const collection = useRequirementCollection(query);
 
         return (
                 <RequirementListView
                         {...collection}
-                        creator={creator}
+                        creator={preferences.creator}
                         onCreateAction={onCreateAction}
-                        onCreatorChange={setCreator}
+                        onCreatorChange={(creator) =>
+                                onPreferencesChange({ ...preferences, creator })
+                        }
                         onSearchChange={setSearch}
-                        onSortChange={setSort}
-                        onStatusChange={setStatus}
+                        onSortChange={(sort) =>
+                                onPreferencesChange({ ...preferences, sort })
+                        }
+                        onStatusChange={(status) =>
+                                onPreferencesChange({ ...preferences, status })
+                        }
                         search={search}
-                        sort={sort}
-                        status={status}
+                        sort={preferences.sort}
+                        status={preferences.status}
                 />
         );
 }

@@ -61,6 +61,7 @@ database_integration() {
   cargo test -p north-server --test retry_authority -- --ignored
   cargo test -p north-server --test retention -- --ignored
   cargo test -p north-server --test fresh_install -- --ignored
+  cargo test -p north-server --test user_preferences_persistence -- --ignored
   cargo test -p north-server --test repositories -- --ignored
   cargo test -p north-server --test protocol_delivery -- --ignored
   cargo test -p north-transport-integration --test websocket

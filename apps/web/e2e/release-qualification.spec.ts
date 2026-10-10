@@ -1,5 +1,9 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
+import type { RequirementWorkspacePreferences } from "../lib/api/requirement-workspace-preferences";
+import { exercisePreferenceEditor } from "./preference-editor-flow";
+import { requirementWorkspacePreferenceAdapter } from "./requirement-workspace-preference-adapter";
+
 const otpCode = process.env.NORTH_RELEASE_OTP_CODE;
 const email =
   process.env.NORTH_RELEASE_EMAIL ??
@@ -269,5 +273,34 @@ test.describe("assembled release qualification", () => {
       page.getByRole("heading", { name: `${title} canonical` }),
     ).toHaveCount(0);
     expect(websocketSeen).toBe(false);
+  });
+
+  test("Requirement workspace preferences save and restore after reload", async ({
+    page,
+  }) => {
+    const path = "/auth/me/preferences/requirement-workspace";
+    const originalResponse = await page.request.get(path);
+    expect(originalResponse.ok()).toBe(true);
+    const original = (await originalResponse.json()) as RequirementWorkspacePreferences;
+    const preferences: RequirementWorkspacePreferences = {
+      default_view: "list",
+      list_status: "ready",
+      list_created_by: `preference-e2e-${process.pid}`,
+      list_sort: "updated_asc",
+    };
+
+    try {
+      await exercisePreferenceEditor(
+        page,
+        requirementWorkspacePreferenceAdapter,
+        preferences,
+      );
+      const persisted = await page.request.get(path);
+      expect(persisted.ok()).toBe(true);
+      expect(await persisted.json()).toEqual(preferences);
+    } finally {
+      const restored = await page.request.put(path, { data: original });
+      expect(restored.ok()).toBe(true);
+    }
   });
 });

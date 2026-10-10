@@ -16,6 +16,7 @@ pub mod repositories;
 pub mod requirements;
 pub mod roles;
 pub mod transport;
+mod user_preferences;
 
 /// Convert wire readiness evidence through the server-owned domain boundary.
 pub fn readiness_assessment_from_wire(

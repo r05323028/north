@@ -1161,8 +1161,20 @@ fn server_binary_reuses_library_startup_boundary() {
         .nth(1)
         .and_then(|body| body.split("async fn healthz()").next())
         .expect("normal server startup is present");
-    assert!(startup.contains("north_persistence::verify_migrations("));
-    assert!(!startup.contains("run_migrations("));
+    let migration = startup
+        .find("north_persistence::run_migrations(")
+        .expect("normal startup applies pending migrations");
+    let build = startup
+        .find("north_server::build_app(")
+        .expect("normal startup reuses the library router");
+    let bind = startup
+        .find("TcpListener::bind(")
+        .expect("listener bind follows startup work");
+    assert!(
+        migration < build && build < bind,
+        "migrations must commit before app construction and listener bind"
+    );
+    assert!(!startup.contains("verify_migrations("));
 
     for forbidden in ["auth_router(", "sqlx::query"] {
         assert!(

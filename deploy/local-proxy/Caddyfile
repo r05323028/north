@@ -1,0 +1,44 @@
+:80 {
+	route {
+		@requirement_document {
+			path_regexp ^/requirements/[^/]+$
+			method GET HEAD
+			header Sec-Fetch-Dest document
+		}
+		reverse_proxy @requirement_document north-web:3000
+
+		@requirement_html {
+			path_regexp ^/requirements/[^/]+$
+			method GET HEAD
+			header Accept *text/html*
+		}
+		reverse_proxy @requirement_html north-web:3000
+
+		@requirement_rsc {
+			path_regexp ^/requirements/[^/]+$
+			method GET HEAD
+			header RSC 1
+		}
+		reverse_proxy @requirement_rsc north-web:3000
+
+		@requirement_prefetch {
+			path_regexp ^/requirements/[^/]+$
+			method GET HEAD
+			header Next-Router-Prefetch *
+		}
+		reverse_proxy @requirement_prefetch north-web:3000
+
+		@requirement_segment_prefetch {
+			path_regexp ^/requirements/[^/]+$
+			method GET HEAD
+			header Next-Router-Segment-Prefetch *
+		}
+		reverse_proxy @requirement_segment_prefetch north-web:3000
+
+		@server_paths {
+			path /auth /auth/* /requirements /requirements/* /events /daemon /daemon/* /daemons /daemons/* /users /users/* /repositories /repositories/*
+		}
+		reverse_proxy @server_paths north-server:8080
+		reverse_proxy north-web:3000
+	}
+}

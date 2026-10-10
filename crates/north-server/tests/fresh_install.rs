@@ -2,9 +2,10 @@
 mod support;
 
 use north_persistence::{DatabaseConnection, MigrationError};
-use sea_orm::{ConnectionTrait, FromQueryResult};
+use sea_orm::{ConnectionTrait, FromQueryResult, TransactionTrait};
 use std::{
     env,
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
     process::Output,
     sync::OnceLock,
@@ -86,8 +87,13 @@ async fn assert_schema_database_url(database_url: &str, schema: &str) {
     let _ = database.close().await;
 }
 
+fn north_server_binary() -> std::ffi::OsString {
+    env::var_os("NORTH_TEST_RELEASE_SERVER_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_north-server").into())
+}
+
 async fn run_migrate_command(database_url: &str) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_north-server"));
+    let mut command = Command::new(north_server_binary());
     command
         .arg("migrate")
         .current_dir(env::temp_dir())
@@ -344,6 +350,23 @@ async fn compiled_migration_matches_former_postgres_catalog() {
         .map(|column| column.column_name.as_str())
         .collect();
     assert_eq!(board_columns, vec!["rank", "requirement_id"]);
+    let preference_columns: Vec<_> = seaorm_catalog
+        .columns
+        .iter()
+        .filter(|column| column.table_name == "user_requirement_preferences")
+        .map(|column| column.column_name.as_str())
+        .collect();
+    assert_eq!(
+        preference_columns,
+        vec![
+            "default_view",
+            "list_created_by",
+            "list_sort",
+            "list_status",
+            "updated_at",
+            "user_id"
+        ]
+    );
     seaorm_catalog
         .columns
         .retain(|column| column.table_name != "requirement_board_positions");
@@ -356,6 +379,18 @@ async fn compiled_migration_matches_former_postgres_catalog() {
     seaorm_catalog
         .triggers
         .retain(|trigger| trigger.table_name != "requirement_board_positions");
+    seaorm_catalog
+        .columns
+        .retain(|column| column.table_name != "user_requirement_preferences");
+    seaorm_catalog
+        .constraints
+        .retain(|constraint| constraint.table_name != "user_requirement_preferences");
+    seaorm_catalog
+        .indexes
+        .retain(|index| index.table_name != "user_requirement_preferences");
+    seaorm_catalog
+        .triggers
+        .retain(|trigger| trigger.table_name != "user_requirement_preferences");
     assert_eq!(
         seaorm_catalog, legacy_catalog,
         "m0001 schema differs from former baseline"
@@ -426,12 +461,17 @@ async fn fresh_install_repeat_up_and_readiness_preserve_data() {
             .fetch_all(&database)
             .await
             .expect("read SeaORM migration head");
+    let expected_versions = [
+        "m0001_initial_schema",
+        "m0002_requirement_board_positions",
+        "m0003_user_requirement_preferences",
+    ];
     assert_eq!(
         applied
             .iter()
             .map(|row| row.version.as_str())
             .collect::<Vec<_>>(),
-        ["m0001_initial_schema", "m0002_requirement_board_positions"]
+        expected_versions
     );
 
     for table in [
@@ -455,6 +495,7 @@ async fn fresh_install_repeat_up_and_readiness_preserve_data() {
         "execution_attempts",
         "clarification_activities",
         "requirement_board_positions",
+        "user_requirement_preferences",
     ] {
         let exists: bool = support::query_scalar("SELECT to_regclass($1) IS NOT NULL")
             .bind(table)
@@ -485,15 +526,49 @@ async fn fresh_install_repeat_up_and_readiness_preserve_data() {
         .execute(&database)
         .await
         .expect("insert preservation sentinel");
+    support::query(
+        "INSERT INTO user_requirement_preferences
+         (user_id, default_view, list_status, list_created_by, list_sort)
+         VALUES ($1, 'list', 'ready', 'Migration Test', 'updated_asc')",
+    )
+    .bind(&user_id)
+    .execute(&database)
+    .await
+    .expect("insert preference preservation sentinel");
+
     north_persistence::run_migrations(&database)
         .await
         .expect("repeat migration is idempotent");
+    north_persistence::verify_migrations(&database)
+        .await
+        .expect("repeat migration preserves current history");
+    let applied_after: Vec<MigrationRow> =
+        support::query_as("SELECT version FROM seaql_migrations ORDER BY version")
+            .fetch_all(&database)
+            .await
+            .expect("read repeated migration history");
+    assert_eq!(
+        applied_after
+            .iter()
+            .map(|row| row.version.as_str())
+            .collect::<Vec<_>>(),
+        expected_versions
+    );
+
     let preserved_email: String = support::query_scalar("SELECT email FROM users WHERE id = $1")
         .bind(&user_id)
         .fetch_one(&database)
         .await
         .expect("read preservation sentinel");
     assert_eq!(preserved_email, email);
+    let preserved_view: String = support::query_scalar(
+        "SELECT default_view FROM user_requirement_preferences WHERE user_id = $1",
+    )
+    .bind(&user_id)
+    .fetch_one(&database)
+    .await
+    .expect("read preference preservation sentinel");
+    assert_eq!(preserved_view, "list");
 
     drop_isolated_schema(&schema, &admin, database).await;
 }
@@ -642,7 +717,203 @@ async fn migrate_command_runs_fresh_and_current_without_otp_or_http() {
 
 #[tokio::test]
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
-async fn server_startup_rejects_pending_schema_without_ddl_or_listener() {
+async fn server_startup_migrates_fresh_schema_before_listening() {
+    const TEST_OTP_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let _guard = database_test_lock().await;
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for startup tests");
+    let (schema, admin, database) = isolated_schema(&database_url).await;
+    let command_url = schema_database_url(&database_url, &schema);
+    assert_schema_database_url(&command_url, &schema).await;
+    let reservation = TcpListener::bind(("127.0.0.1", 0)).expect("reserve server port");
+    let address = reservation.local_addr().expect("read server port");
+    drop(reservation);
+
+    let mut command = Command::new(north_server_binary());
+    command
+        .current_dir(env::temp_dir())
+        .env("DATABASE_URL", &command_url)
+        .env("NORTH_BIND_ADDR", address.to_string())
+        .env(north_persistence::OTP_HMAC_KEY_ENV, TEST_OTP_KEY)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut process = command.spawn().expect("spawn north-server");
+    let listener_ready = timeout(Duration::from_secs(30), async {
+        loop {
+            if process.try_wait().expect("poll server process").is_some() {
+                return false;
+            }
+            if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("server startup should finish before timeout");
+    assert!(
+        listener_ready,
+        "server exited before binding after migration"
+    );
+
+    north_persistence::verify_migrations(&database)
+        .await
+        .expect("startup commits all migrations before binding");
+    let applied: i64 = support::query_scalar("SELECT COUNT(*)::bigint FROM seaql_migrations")
+        .fetch_one(&database)
+        .await
+        .expect("read startup migration head");
+    assert_eq!(applied, 3);
+
+    let mut health = TcpStream::connect(address).expect("connect to migrated server");
+    health
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set health response timeout");
+    health
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("request health endpoint");
+    let mut response = Vec::new();
+    health
+        .read_to_end(&mut response)
+        .expect("read health response");
+    assert!(
+        response.starts_with(b"HTTP/1.1 200") || response.starts_with(b"HTTP/1.0 200"),
+        "health endpoint failed after fresh startup: {}",
+        String::from_utf8_lossy(&response)
+    );
+
+    process.kill().await.expect("stop north-server");
+    let _ = process.wait().await;
+    drop_isolated_schema(&schema, &admin, database).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn migration_runner_waits_for_existing_advisory_lock() {
+    let _guard = database_test_lock().await;
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for migration lock tests");
+    let (schema, admin, database) = isolated_schema(&database_url).await;
+    let command_url = schema_database_url(&database_url, &schema);
+    let contender = support::database(&command_url, 1)
+        .await
+        .expect("connect migration contender");
+    let contender_pid: i32 = support::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&contender)
+        .await
+        .expect("read contender process id");
+    let blocker = database.begin().await.expect("begin blocking transaction");
+    support::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind("north:seaorm:schema-migrations")
+        .execute(&blocker)
+        .await
+        .expect("hold migration advisory lock");
+
+    let contender_for_task = contender.clone();
+    let mut migration =
+        tokio::spawn(async move { north_persistence::run_migrations(&contender_for_task).await });
+    let observed_lock_wait = timeout(Duration::from_secs(10), async {
+        loop {
+            if migration.is_finished() {
+                return false;
+            }
+            let waiting: Option<bool> = support::query_scalar(
+                "SELECT COALESCE(wait_event_type = 'Lock', false)
+                 FROM pg_stat_activity WHERE pid = $1",
+            )
+            .bind(contender_pid)
+            .fetch_optional(&admin)
+            .await
+            .expect("inspect migration lock wait");
+            if waiting == Some(true) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    blocker
+        .commit()
+        .await
+        .expect("release migration advisory lock");
+    let result = timeout(Duration::from_secs(30), &mut migration)
+        .await
+        .expect("contending migration should finish")
+        .expect("join migration task");
+    let verification = north_persistence::verify_migrations(&contender).await;
+    let _ = contender.close().await;
+    drop_isolated_schema(&schema, &admin, database).await;
+
+    assert!(
+        observed_lock_wait,
+        "migration runner did not wait on advisory lock"
+    );
+    result.expect("migration succeeds after lock is released");
+    verification.expect("verify serialized migration head");
+}
+
+#[tokio::test]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn migration_failure_rolls_back_schema_and_history() {
+    use sea_orm_migration::MigratorTrait;
+
+    let _guard = database_test_lock().await;
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for migration rollback tests");
+    let (schema, admin, database) = isolated_schema(&database_url).await;
+
+    north_persistence::migrations::Migrator::install(&database)
+        .await
+        .expect("create migration history table for failure injection");
+    support::query(
+        "CREATE FUNCTION fail_after_first_migration() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+             IF EXISTS (SELECT 1 FROM seaql_migrations) THEN
+                 RAISE EXCEPTION 'forced migration-history failure';
+             END IF;
+             RETURN NEW;
+         END
+         $$",
+    )
+    .execute(&database)
+    .await
+    .expect("install migration history failure trigger function");
+    support::query(
+        "CREATE TRIGGER fail_after_first_migration
+         BEFORE INSERT ON seaql_migrations
+         FOR EACH ROW EXECUTE FUNCTION fail_after_first_migration()",
+    )
+    .execute(&database)
+    .await
+    .expect("install migration history failure trigger");
+
+    let result = north_persistence::run_migrations(&database).await;
+    assert!(
+        matches!(result, Err(MigrationError::MigrationExecutionFailed)),
+        "injected migration-history failure must fail startup migration"
+    );
+    let users_table: bool = support::query_scalar("SELECT to_regclass('users') IS NOT NULL")
+        .fetch_one(&database)
+        .await
+        .expect("check application DDL rollback");
+    let migration_count: i64 =
+        support::query_scalar("SELECT COUNT(*)::bigint FROM seaql_migrations")
+            .fetch_one(&database)
+            .await
+            .expect("check migration-history rollback");
+    assert!(!users_table, "first migration DDL must roll back too");
+    assert_eq!(migration_count, 0, "migration history must roll back");
+
+    drop_isolated_schema(&schema, &admin, database).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn server_startup_without_ddl_privilege_fails_before_listening() {
     const TEST_OTP_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     let _guard = database_test_lock().await;
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
@@ -706,7 +977,7 @@ async fn server_startup_rejects_pending_schema_without_ddl_or_listener() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve server port");
         listener.local_addr().expect("read server port")
     };
-    let mut command = Command::new(env!("CARGO_BIN_EXE_north-server"));
+    let mut command = Command::new(north_server_binary());
     command
         .env("DATABASE_URL", &command_url)
         .env("NORTH_BIND_ADDR", address.to_string())

@@ -22,7 +22,7 @@ impl StartupFailure {
         match self {
             Self::Configuration => "configuration",
             Self::Database => "database connection",
-            Self::Migration => "migration (run `north-server migrate` if schema is behind)",
+            Self::Migration => "migration",
             Self::ServerState => "server state",
             Self::Bind => "bind",
             Self::Serve => "server",
@@ -112,7 +112,7 @@ async fn run() -> Result<(), StartupFailure> {
     let database = connect_database(&database_url)
         .await
         .map_err(|_| StartupFailure::Database)?;
-    north_persistence::verify_migrations(&database)
+    north_persistence::run_migrations(&database)
         .await
         .map_err(|_| StartupFailure::Migration)?;
 

@@ -1,0 +1,14 @@
+# Optional local same-origin proxy; keep release Compose image-only.
+services:
+  north-proxy:
+    image: caddy:2-alpine
+    depends_on:
+      north-server:
+        condition: service_started
+      north-web:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${NORTH_PROXY_HOST_PORT:-3000}:80"
+    volumes:
+      - ./deploy/local-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped

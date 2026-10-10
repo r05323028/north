@@ -77,7 +77,7 @@ Specified with the owning change named. Documentation alone is not enforcement.
 
 | Invariant | Status | Enforcement |
 | --- | --- | --- |
-| Schema migration is explicit; startup verifies current SeaORM head without DDL | Enforced | packaged `north-server migrate`, read-only `verify_migrations`, command tests, and fresh-schema preflight proofs |
+| Startup and explicit CLI apply guarded versioned migrations before serving; both serialize with a PostgreSQL advisory lock; no schema sync/reset | Enforced | shared migration runner, transaction-scoped lock, startup/CLI tests, and fail-closed schema preflight |
 | Ephemeral runtime data never sole source of truth; TTL GC touches the allowlisted ephemeral class only | Enforced | baseline expiry column, named bounded `FOR UPDATE SKIP LOCKED` sweep, and retention sweep tests; the TTL allowlist is exactly `clarification_activities`, with setup-row retention and outbox compaction separately classified by the (file, table) deletion firewall |
 | Durable vs ephemeral class split | Enforced | docs/architecture/persistence.md classification plus amnesia integration proof that purging all activity telemetry leaves every canonical projection unchanged |
 | Durable command/event sequence watermarks survive daemon restart and safe command compaction | Enforced | server execution-session watermarks and daemon Journal persisted high-water/tombstone state |

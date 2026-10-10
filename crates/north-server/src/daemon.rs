@@ -1222,7 +1222,9 @@ fn store_error(error: PersistenceError) -> DaemonHttpError {
         PersistenceError::RateLimited => DaemonHttpError::RateLimited {
             retry_after: north_persistence::DAEMON_SETUP_TTL_SECONDS as u64,
         },
-        PersistenceError::Database(_) => DaemonHttpError::Internal,
+        PersistenceError::Database(_) | PersistenceError::InvalidUserPreferences => {
+            DaemonHttpError::Internal
+        }
         PersistenceError::InvalidRepository(_) => DaemonHttpError::BadRequest,
         PersistenceError::RepositoryNotFound => DaemonHttpError::NotFound,
         PersistenceError::RepositoryNameConflict | PersistenceError::RepositoryUrlImmutable => {

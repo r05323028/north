@@ -39,6 +39,18 @@ entity!(requirement_board_positions, "requirement_board_positions", primary #[se
     rank: i64,
 });
 
+entity!(user_requirement_preferences, "user_requirement_preferences", primary #[sea_orm(column_type = "Text")] user_id: String => false; {
+    #[sea_orm(column_type = "Text")]
+    default_view: String,
+    #[sea_orm(column_type = "Text")]
+    list_status: Option<String>,
+    #[sea_orm(column_type = "Text")]
+    list_created_by: Option<String>,
+    #[sea_orm(column_type = "Text")]
+    list_sort: String,
+    updated_at: TimeDateTimeWithTimeZone,
+});
+
 entity!(verification_codes, "verification_codes", primary id: i64 => true; {
     #[sea_orm(column_type = "Text")]
     email: String,
@@ -348,6 +360,7 @@ mod tests {
     fn entity_schema_matches_baseline_table_and_column_names() {
         assert_entity!(super::users::Entity, "users"; "id", "email", "role", "created_at");
         assert_entity!(super::requirement_board_positions::Entity, "requirement_board_positions"; "requirement_id", "rank");
+        assert_entity!(super::user_requirement_preferences::Entity, "user_requirement_preferences"; "user_id", "default_view", "list_status", "list_created_by", "list_sort", "updated_at");
         assert_entity!(super::verification_codes::Entity, "verification_codes"; "id", "code_hash", "failed_attempts");
         assert_entity!(super::sessions::Entity, "sessions"; "id", "user_id", "token_hash", "invalidated_at");
         assert_entity!(super::instance_settings::Entity, "instance_settings"; "id", "owner_user_id");

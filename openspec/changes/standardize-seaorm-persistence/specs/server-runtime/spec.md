@@ -4,12 +4,12 @@
 
 ### Requirement: Server starts only after mandatory configuration and migrations succeed
 
-The North server process SHALL require `DATABASE_URL` and a valid 64-character hexadecimal `NORTH_OTP_HMAC_KEY`. It MAY accept `NORTH_BIND_ADDR`; when absent it SHALL bind its documented loopback default. Before accepting HTTP traffic, it SHALL validate configuration, connect to PostgreSQL, and verify that all checked-in SeaORM migrations are applied. Normal server startup SHALL NOT apply migrations, synchronize entities, or otherwise mutate the schema. It SHALL use the same server router and domain ownership rules as library/integration execution; it SHALL NOT expose an unkeyed OTP path or a second business-state implementation.
+The North server process SHALL require `DATABASE_URL` and a valid 64-character hexadecimal `NORTH_OTP_HMAC_KEY`. It MAY accept `NORTH_BIND_ADDR`; when absent it SHALL bind its documented loopback default. Before accepting HTTP traffic, it SHALL validate configuration, connect to PostgreSQL, run the guarded versioned migration path, verify and commit the current SeaORM head, then build the app and bind. The migration path SHALL serialize with the explicit CLI through a PostgreSQL transaction-scoped advisory lock. It SHALL apply only checked-in migrations; normal startup SHALL NOT synchronize entities, reset, or drop schema. The server database role therefore SHALL have the DDL privileges needed by pending migrations. The process SHALL NOT expose an unkeyed OTP path or a second business-state implementation.
 
 #### Scenario: Valid production-shaped startup
 
-- **WHEN** the process receives a reachable PostgreSQL URL at the current migration head, a valid OTP HMAC key, and an optional bind address
-- **THEN** it validates configuration, verifies schema readiness without applying DDL, binds the requested address, and serves the existing authenticated HTTP routes
+- **WHEN** the process receives a reachable PostgreSQL URL at an empty, pending, or current supported schema, a valid OTP HMAC key, and an optional bind address
+- **THEN** it validates configuration, applies only pending migrations under the shared lock, verifies and commits the current head, then binds and serves the existing authenticated HTTP routes
 
 #### Scenario: Missing or malformed OTP key fails closed
 
@@ -18,16 +18,16 @@ The North server process SHALL require `DATABASE_URL` and a valid 64-character h
 
 #### Scenario: Database or migration failure fails before listen
 
-- **WHEN** `DATABASE_URL` is missing, PostgreSQL is unavailable, the schema is absent or behind, or database schema state is incompatible
-- **THEN** the process exits non-successfully before serving authenticated routes, reports the failure class without database credentials, directs operators to the explicit migration command when appropriate, and leaves no partially started listener
+- **WHEN** `DATABASE_URL` is missing, PostgreSQL is unavailable, migration preflight rejects the schema, migration execution or commit fails, or the database role lacks required DDL privileges
+- **THEN** the process exits non-successfully before serving authenticated routes, reports the failure class without database credentials, and leaves no partially started listener
 
 ### Requirement: Server exposes safe operational readiness
 
-After mandatory startup completes, the server SHALL expose an unauthenticated `GET /healthz` endpoint for process/liveness checks. A successful response SHALL be non-secret and SHALL mean that configuration, database connection, and current migration state were verified for that process; it SHALL NOT mean that the server applied migrations or promise continuous PostgreSQL availability. The endpoint SHALL NOT expose OTP keys, database credentials, session cookies, daemon credentials, verification codes, or arbitrary database contents.
+After mandatory startup completes, the server SHALL expose an unauthenticated `GET /healthz` endpoint for process/liveness checks. A successful response SHALL be non-secret and SHALL mean configuration and database connection succeeded and the current migration head was verified and committed for that process; it SHALL NOT promise continuous PostgreSQL availability. The endpoint SHALL NOT expose OTP keys, database credentials, session cookies, daemon credentials, verification codes, or arbitrary database contents.
 
 #### Scenario: Health is unavailable before startup completes
 
-- **WHEN** configuration, database connection, or schema-state validation is still pending or has failed
+- **WHEN** configuration, database connection, migration, verification, or commit is still pending or has failed
 - **THEN** `GET /healthz` is not served as successful and the process does not accept normal authenticated traffic
 
 #### Scenario: Database loss after startup does not change health semantics
@@ -37,14 +37,12 @@ After mandatory startup completes, the server SHALL expose an unauthenticated `G
 
 #### Scenario: Healthy process returns safe response
 
-- **WHEN** startup completes successfully against the current migration head
+- **WHEN** startup completes successfully against a supported schema
 - **THEN** `GET /healthz` returns a successful, non-secret response suitable for a reverse-proxy probe and authenticated routes remain governed by existing session and role checks
-
-## ADDED Requirements
 
 ### Requirement: Server exposes an explicit migration command
 
-The packaged server SHALL expose `north-server migrate` as an explicit deployment operation. It SHALL apply only pending versioned SeaORM migrations, SHALL NOT expose an automatic reset or schema-sync operation, and SHALL exit non-successfully without changing application data when migration preflight or migration execution fails.
+The packaged server SHALL expose `north-server migrate` as an optional operator operation using the same guarded, serialized migration path as startup. It SHALL apply only pending versioned SeaORM migrations, SHALL NOT expose an automatic reset or schema-sync operation, and SHALL exit non-successfully without changing application data when migration preflight or execution fails.
 
 #### Scenario: Operator applies pending migrations explicitly
 

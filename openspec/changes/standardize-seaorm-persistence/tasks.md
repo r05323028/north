@@ -18,17 +18,18 @@
 - [x] 3.2 Convert integration-test database setup and fixtures to the SeaORM boundary, retaining raw statements only for PostgreSQL-specific SQL/constraint fixtures; verify no direct SQLx database access remains outside `north-persistence`.
 - [x] 3.3 Run `cargo test -p north-persistence` and affected `north-server` PostgreSQL integration tests with `NORTH_TEST_DATABASE_URL`; verify architecture checks still enforce the persistence boundary.
 
-## 4. Explicit migration and read-only startup
+## 4. Guarded startup migrations and CLI
 
 - [x] 4.1 Add packaged `north-server migrate` using the SeaORM migrator, with legacy/unknown-schema preflight and no listener; verify command behavior for fresh, current, and rejected databases using PostgreSQL integration tests.
-- [x] 4.2 Remove migration execution from `build_app` and make normal process startup verify current migration state before binding; verify startup refuses pending migrations and performs no DDL or data reset.
+- [x] 4.2 Apply pending guarded versioned migrations during normal process startup before app construction or listener binding; keep `build_app` side-effect-free and verify fresh-database startup, current-head no-op through the shared runner/CLI, DDL-privilege failure, and no listener on migration failure.
 - [x] 4.3 Verify `north-server migrate` does not require server-only OTP configuration, never starts HTTP, and reports success/failure without credentials; run command-level tests.
+- [x] 4.4 Serialize startup and CLI migration attempts with one PostgreSQL transaction-scoped advisory lock. Run preflight, migrations, and verification through the locked transaction; verify lock contention, commit-before-listen, and rollback/fail-closed behavior with PostgreSQL integration tests.
 
 ## 5. Packaging, docs, and obsolete-code removal
 
 - [x] 5.1 Embed compiled migrations in the packaged server and remove raw SQL migration assets from release packaging; verify the packaged binary can migrate an isolated database when run outside the checkout.
-- [x] 5.2 Update deployment, persistence, testing, invariant, release-qualification docs and environment/configuration guidance; verify docs accurately require explicit migration before server startup.
+- [x] 5.2 Update deployment, persistence, testing, invariant, and release-qualification docs to describe automatic startup migrations, required DDL privilege, shared lock, and optional explicit CLI.
 - [x] 5.3 Remove obsolete SQLx migration macros, raw migration files, and direct SQLx dependencies where no production/test code still uses them; verify dependency/reference searches show SeaORM as the only application database API.
-- [ ] 5.4 Run `./scripts/validate.sh fast`, architecture checks, strict OpenSpec validation, packaged release verification, and `./scripts/validate.sh ci` with `NORTH_TEST_DATABASE_URL`; record any unavailable PostgreSQL/release evidence as incomplete rather than passing.
+- [ ] 5.4 Run `./scripts/validate.sh fast`, architecture checks, strict OpenSpec validation, packaged release verification, `./scripts/validate.sh ci` with `NORTH_TEST_DATABASE_URL`, and required pre-push validation; record unavailable PostgreSQL/release evidence as incomplete rather than passing.
 
-Validation note: `./scripts/validate.sh fast`, `integration`, and `ci`, strict OpenSpec validation, and `./scripts/pre-push-validation.sh` completed successfully. Pre-push's `act` Rust job was skipped as unsupported on this Apple M-series self-hosted host. Release-mode `north-server`, copied alone to a temporary package directory, migrated an isolated PostgreSQL schema twice from outside the checkout. Full Linux artifact packaging/qualification remains unrun because this host has no `x86_64-unknown-linux-gnu` Rust target installed.
+Validation note: `./scripts/validate.sh fast`, `./scripts/validate.sh ci` with disposable PostgreSQL 16, strict OpenSpec, PostgreSQL startup/lock integration tests, and pre-push Act Rust parity passed after automatic startup migration was implemented. Exact packaged-release auto-migration qualification remains unrun; task 5.4 stays pending.

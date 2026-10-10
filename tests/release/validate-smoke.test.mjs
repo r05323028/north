@@ -6,6 +6,16 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
+test("Linux package uses pinned builder without requiring host Rust target", () => {
+  const releaseScript = readFileSync(`${root}/scripts/release.sh`, "utf8");
+  assert.ok(
+    releaseScript.includes(
+      'if [[ "$target" != "x86_64-unknown-linux-gnu" ]] && ! rustup target list --installed | grep -Fx "$target" >/dev/null; then',
+    ),
+    "Linux target is provided by the pinned builder, not host rustup",
+  );
+});
+
 test("release qualification forwards package version-change metadata to OCI verifier", () => {
   const releaseScript = readFileSync(`${root}/scripts/release.sh`, "utf8");
   assert.ok(
@@ -18,14 +28,27 @@ test("release qualification forwards package version-change metadata to OCI veri
   );
 });
 
-test("OCI server image migrates fresh Compose database before startup", () => {
+test("OCI server image migrates a fresh Compose database during startup", () => {
   const releaseScript = readFileSync(`${root}/scripts/release.sh`, "utf8");
-  const databaseStart = releaseScript.indexOf("up --detach --wait postgres");
-  const migration = releaseScript.indexOf("run --rm --no-deps north-server migrate");
-  const stackStart = releaseScript.indexOf(
-    'release_log "PASS compose-runtime-started project=$release_compose_project"',
-  );
-  assert.ok(databaseStart >= 0 && migration > databaseStart && stackStart > migration);
+  const composeStart = releaseScript.indexOf("release_compose_start() {");
+  const composeEnd = releaseScript.indexOf('\n}\n\nif [[ -n "$artifact_dir" ]]', composeStart);
+  assert.ok(composeStart >= 0 && composeEnd > composeStart);
+  const compose = releaseScript.slice(composeStart, composeEnd);
+  const databaseStart = compose.indexOf("up --detach --wait postgres");
+  const stackStart = compose.indexOf("up --detach --wait", databaseStart + 1);
+  assert.ok(databaseStart >= 0 && stackStart > databaseStart);
+  assert.doesNotMatch(compose.slice(databaseStart, stackStart), /north-server migrate/);
+  assert.ok(compose.includes("SELECT version FROM seaql_migrations"));
+  assert.ok(compose.includes("m0003_user_requirement_preferences"));
+});
+
+test("release qualification runs migration checks against extracted server binary", () => {
+  const releaseScript = readFileSync(`${root}/scripts/release.sh`, "utf8");
+  const migrationTest = readFileSync(`${root}/crates/north-server/tests/fresh_install.rs`, "utf8");
+  assert.ok(releaseScript.includes('NORTH_TEST_RELEASE_SERVER_BINARY="$server_bin"'));
+  assert.ok(migrationTest.includes('env::var_os("NORTH_TEST_RELEASE_SERVER_BINARY")'));
+  assert.ok(migrationTest.includes("async fn server_startup_migrates_fresh_schema_before_listening"));
+  assert.ok(migrationTest.includes("async fn server_startup_without_ddl_privilege_fails_before_listening"));
 });
 
 test("smoke refuses to fall back when release artifact is unset", () => {

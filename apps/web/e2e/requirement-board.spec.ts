@@ -196,11 +196,13 @@ test("List sends search, status, creator, and updated sort to server", async ({
     .toBe(true);
 });
 
-test("create uses canonical response and opens requirement workspace", async ({
+test("create, read, and revision-aware edit use canonical state", async ({
   page,
 }) => {
   const created = requirement("created-1", "draft", "Created requirement");
+  let current = created;
   let createBody: unknown;
+  let editBody: unknown;
   await page.route("**/requirements**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -212,7 +214,34 @@ test("create uses canonical response and opens requirement workspace", async ({
       createBody = JSON.parse(request.postData() ?? "{}");
       await route.fulfill({
         status: 201,
-        body: JSON.stringify(created),
+        body: JSON.stringify(current),
+        headers: jsonHeaders(),
+      });
+      return;
+    }
+    if (
+      request.method() === "PATCH" &&
+      url.pathname === "/requirements/created-1"
+    ) {
+      const body = JSON.parse(request.postData() ?? "{}") as Requirement & {
+        expected_state_version: number;
+      };
+      editBody = body;
+      expect(body.expected_state_version).toBe(current.state_version);
+      current = {
+        ...current,
+        title: body.title,
+        description: body.description,
+        summary: body.summary,
+        acceptance_criteria: body.acceptance_criteria,
+        assumptions: body.assumptions,
+        open_questions: body.open_questions,
+        revision: current.revision + 1,
+        state_version: current.state_version + 1,
+        updated_at: "2026-01-02T00:00:00Z",
+      };
+      await route.fulfill({
+        body: JSON.stringify(current),
         headers: jsonHeaders(),
       });
       return;
@@ -222,7 +251,7 @@ test("create uses canonical response and opens requirement workspace", async ({
       url.pathname === "/requirements/created-1"
     ) {
       await route.fulfill({
-        body: JSON.stringify(created),
+        body: JSON.stringify(current),
         headers: jsonHeaders(),
       });
       return;
@@ -292,7 +321,17 @@ test("create uses canonical response and opens requirement workspace", async ({
   await page.getByRole("button", { name: "New requirement" }).first().click();
   await page.getByLabel("Title").fill("Created requirement");
   await page.getByLabel("Description").fill("A canonical description.");
+  const createResponsePromise = page.waitForResponse((response) => {
+    const request = response.request();
+    return (
+      isApiFetch(request) &&
+      request.method() === "POST" &&
+      new URL(response.url()).pathname === "/requirements"
+    );
+  });
   await page.getByRole("button", { name: "Create requirement" }).click();
+  const createResponse = await createResponsePromise;
+  expect(createResponse.status()).toBe(201);
 
   await expect(
     page.getByRole("heading", { name: "Created requirement" }),
@@ -306,6 +345,86 @@ test("create uses canonical response and opens requirement workspace", async ({
     title: "Created requirement",
     description: "A canonical description.",
   });
+  expect(await createResponse.json()).toMatchObject({
+    id: "created-1",
+    title: "Created requirement",
+    description: created.description,
+    revision: 1,
+    state_version: 1,
+  });
+
+  const panel = page.getByTestId("live-requirement-panel");
+  const revisionValue = panel
+    .locator("dt")
+    .filter({ hasText: /^Revision$/ })
+    .locator("..")
+    .locator("dd");
+  const stateVersionValue = panel
+    .locator("dt")
+    .filter({ hasText: /^State version$/ })
+    .locator("..")
+    .locator("dd");
+  await expect(panel.getByText(created.description, { exact: true })).toBeVisible();
+  await expect(revisionValue).toHaveText("1");
+  await expect(stateVersionValue).toHaveText("1");
+
+  const revisedTitle = "Revised requirement";
+  const revisedDescription = "Revised canonical description.";
+  await page.getByRole("button", { name: "Edit requirement" }).click();
+  await page.getByLabel("Title").fill(revisedTitle);
+  await page.getByLabel("Description").fill(revisedDescription);
+  const editResponsePromise = page.waitForResponse((response) => {
+    const request = response.request();
+    return (
+      isApiFetch(request) &&
+      request.method() === "PATCH" &&
+      new URL(response.url()).pathname === "/requirements/created-1"
+    );
+  });
+  await page.getByRole("button", { name: "Save requirement" }).click();
+  const editResponse = await editResponsePromise;
+  expect(editResponse.status()).toBe(200);
+  expect(editBody).toMatchObject({
+    title: revisedTitle,
+    description: revisedDescription,
+    expected_state_version: 1,
+  });
+  expect(await editResponse.json()).toMatchObject({
+    id: "created-1",
+    title: revisedTitle,
+    description: revisedDescription,
+    revision: 2,
+    state_version: 2,
+  });
+  await expect(page.getByRole("heading", { name: revisedTitle })).toBeVisible();
+  await expect(panel.getByText(revisedDescription, { exact: true })).toBeVisible();
+  await expect(revisionValue).toHaveText("2");
+  await expect(stateVersionValue).toHaveText("2");
+
+  const reloadReadPromise = page.waitForResponse((response) => {
+    const request = response.request();
+    return (
+      isApiFetch(request) &&
+      request.method() === "GET" &&
+      new URL(response.url()).pathname === "/requirements/created-1"
+    );
+  });
+  await page.reload();
+  const reloadRead = await reloadReadPromise;
+  expect(reloadRead.status()).toBe(200);
+  expect(await reloadRead.json()).toMatchObject({
+    id: "created-1",
+    title: revisedTitle,
+    description: revisedDescription,
+    revision: 2,
+    state_version: 2,
+  });
+  await expect(page.getByRole("heading", { name: revisedTitle })).toBeVisible();
+  await expect(
+    page.getByTestId("live-requirement-panel").getByText(revisedDescription, {
+      exact: true,
+    }),
+  ).toBeVisible();
 });
 
 type WorkspaceMessage = {

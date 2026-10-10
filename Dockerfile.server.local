@@ -1,0 +1,20 @@
+FROM rust:bookworm AS build
+
+WORKDIR /north
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN cargo build --locked --release -p north-server
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build --chown=65534:65534 --chmod=0555 /north/target/release/north-server /usr/local/bin/north-server
+
+ENV NORTH_BIND_ADDR=0.0.0.0:8080
+EXPOSE 8080
+USER 65534:65534
+ENTRYPOINT ["/usr/local/bin/north-server"]

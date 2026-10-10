@@ -52,27 +52,29 @@ Requester. `/login` can also create an account. Codes follow the configured
 
 ## PostgreSQL and server
 
-Create an empty database and dedicated owner, then set `DATABASE_URL`. Run the
-packaged migration command before server startup. It applies compiled SeaORM
-migrations and exits; normal startup only verifies the current migration head
-and fails before binding if schema is absent or behind. Preflight rejects
-unpublished SQLx migration history and partial North schemas without changing
-them. Back up any needed data, then manually recreate the disposable database.
-North never drops or resets a database automatically.
+Create an empty database and dedicated database owner with schema DDL privileges,
+then set `DATABASE_URL`. Normal server startup automatically applies pending
+checked-in SeaORM migrations before app construction or listener binding and
+verifies the resulting head. The optional packaged `north-server migrate`
+command uses the same guarded path. Preflight rejects unpublished SQLx migration
+history and partial North schemas before changing them. Back up any needed data,
+then manually recreate the disposable database. North never drops or resets a
+database automatically.
 
 ```bash
 export DATABASE_URL='postgres://north:CHANGE_ME@127.0.0.1:5432/north'
 export NORTH_OTP_HMAC_KEY="$(openssl rand -hex 32)"
-./bin/north-server migrate # no OTP key required by this command
 export NORTH_BIND_ADDR='127.0.0.1:8080' # local-only; default is loopback
 ./bin/north-server
 ```
 
-After each compatible schema-changing release, run `north-server migrate`
-explicitly as one serialized deployment job per database. SeaORM's migration
-runner does not provide cross-process locking. Wait for success before starting
-or replacing server instances. First 0.1.0 use requires an empty baseline
-database; old pre-release databases are not upgradeable.
+`north-server migrate` remains optional for an explicit preflight or deployment
+job; normal startup runs the same guarded path. Both entry points acquire the
+same transaction-scoped PostgreSQL advisory lock, so concurrent migration work
+serializes. The server role needs DDL privileges for pending migrations. This
+lock serializes migration runners only; North still supports one server instance
+and does not provide multi-instance ownership. First 0.1.0 use requires an empty
+baseline database; old pre-release databases are not upgradeable.
 
 
 SeaORM's PostgreSQL connector defaults to `sslmode=prefer`: it tries TLS, then
@@ -100,9 +102,10 @@ Keep PostgreSQL backups and test restore before upgrades. Upgrade procedure:
 
 1. Back up database and daemon state.
 2. Stop old server and web processes; keep proxy route unchanged.
-3. Run `north-server migrate` with the same `DATABASE_URL` before starting a
-   compatible release. First 0.1.0 use requires the empty baseline database
-   described above; migration is never automatic at server startup.
+3. Start the compatible release. Normal startup applies pending versioned
+   migrations and binds only after successful commit. Optional `north-server
+   migrate` uses the same guarded lock/path but is not required. First 0.1.0 use
+   requires the empty baseline database described above.
 4. Verify `/healthz`, authenticated `/auth/me`, and web asset loading.
 5. Restart daemons if protocol or binary version requires it.
 6. Keep rollback binary, database backup, and release manifest until verification
@@ -270,6 +273,44 @@ Start and inspect the stack:
 docker compose --file docker-compose.yaml up --detach
 docker compose --file docker-compose.yaml ps
 ```
+
+### Local source-build overlay
+
+`docker-compose.yaml` remains image-only. Combine it with `docker-compose.build.yaml` to build server and web images from this checkout; no release package, SemVer tag, or GitHub publication required. Overlay replaces GHCR image refs with `north-server:local` and `north-web:local`, and never pulls those app images. Normal server startup applies all checked-in pending migrations before listener bind; the explicit `north-server migrate` command is optional. Keep `NORTH_SERVER_IMAGE` and `NORTH_WEB_IMAGE` set in `.env.example`/`.env`: base-file interpolation happens before Compose merges the overlay, though the overlay replaces those refs.
+
+```bash
+docker compose --file docker-compose.yaml --file docker-compose.build.yaml build
+docker compose --file docker-compose.yaml --file docker-compose.build.yaml up --detach postgres
+docker compose --file docker-compose.yaml --file docker-compose.build.yaml up --detach
+```
+
+After source changes, force a fresh local build with `docker compose --file docker-compose.yaml --file docker-compose.build.yaml up --detach --build`. Root and web `.dockerignore` files keep environment secrets and generated build caches out of Docker contexts.
+
+### Optional local same-origin proxy
+
+For local browser access, add `docker-compose.proxy.yaml` after the base file. The
+overlay runs Caddy on loopback and routes the browser origin to North server and
+Next.js. Compose appends port mappings, so set `NORTH_WEB_HOST_PORT` to a free
+port distinct from `NORTH_PROXY_HOST_PORT` (for example, `3001` and `3000`) to
+avoid a bind conflict. Keep that override on every Compose command using the
+proxy overlay; the base Compose default remains unchanged when the overlay is
+omitted.
+
+```bash
+NORTH_WEB_HOST_PORT=3001 docker compose \
+  --file docker-compose.yaml \
+  --file docker-compose.proxy.yaml up --detach
+
+# Source-built images: place build overlay before proxy overlay.
+NORTH_WEB_HOST_PORT=3001 docker compose \
+  --file docker-compose.yaml \
+  --file docker-compose.build.yaml \
+  --file docker-compose.proxy.yaml up --detach --build
+```
+
+Open `http://127.0.0.1:3000`; Next.js direct access remains at `:3001` for local
+debugging. The proxy is HTTP-only and loopback-bound; do not expose it publicly.
+Production continues to use the operator-managed TLS proxy described below.
 
 Compose runs PostgreSQL 16, server, and web only. PostgreSQL uses named volume
 `postgres_data`; `docker compose down` preserves it, while `down --volumes`

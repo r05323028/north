@@ -178,6 +178,7 @@ impl From<PersistenceError> for AuthHttpError {
             | PersistenceError::InvalidCommandPayload
             | PersistenceError::InvalidSessionState
             | PersistenceError::SessionRequirementMismatch
+            | PersistenceError::InvalidUserPreferences
             | PersistenceError::InvalidRepository(_)
             | PersistenceError::RepositoryNotFound
             | PersistenceError::RepositoryNameConflict
@@ -227,6 +228,7 @@ pub fn router(state: AuthState) -> Router {
         .merge(crate::daemon::public_router());
     let protected = Router::new()
         .route("/auth/logout", post(logout))
+        .merge(crate::user_preferences::router())
         .merge(crate::roles::router())
         .merge(crate::requirements::router())
         .merge(crate::clarification::router())

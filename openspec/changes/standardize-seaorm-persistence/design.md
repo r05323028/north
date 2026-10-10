@@ -26,13 +26,13 @@ See `proposal.md` for motivation and scope. `north-persistence` currently owns a
 
 4. **Replace raw migration assets with a Rust baseline.** The pre-release consolidation had left one final-schema SQL baseline. Replace it with a compiled SeaORM baseline under `north-persistence`; represent the final schema directly because old unpublished databases are not upgraded. Preserve the singleton settings seed, columns/defaults/FKs/checks/indexes/triggers, and application behavior. SeaORM emits PostgreSQL identity columns for former `BIGSERIAL` IDs; parity verifies attached sequences and generated-ID inserts. Explicit `Text` and `Text[]` entity types preserve those column types. Keep only DDL/data initialization required for an empty database; do not carry upgrade-only backfills into the new baseline.
 
-5. **Separate migrate from serve.** Add `north-server migrate`, backed by `Migrator::up`, which connects using `DATABASE_URL`, preflights database history, applies pending migrations, and exits without opening a listener. The normal server path validates configuration, connects, verifies there are no pending migrations, then builds the app and binds. It never calls `Migrator::up` or schema sync. Do not expose `fresh`, `reset`, or `down` commands. Deployment tooling runs one serialized migration job per database and waits for success before starting or replacing server instances; SeaORM's runner does not provide cross-process locking.
+5. **Apply pending migrations before serving under a shared lock.** Keep packaged `north-server migrate` and route it through the same guarded migration function as normal startup. Startup validates configuration, connects, then enters a PostgreSQL transaction-scoped advisory lock. Preflight, `Migrator::up`, and post-migration verification all use that transaction; commit must succeed before app construction or listener binding. Migration failure rolls back and releases the lock. The outer transaction makes the current migration batch atomic and serializes CLI/startup calls; current migrations use transaction-compatible PostgreSQL DDL. Do not expose `fresh`, `reset`, or `down` commands or enable entity-first schema sync. Future non-transactional DDL requires an explicit alternative that preserves cross-process locking.
 
 6. **Fail closed on unsupported old schemas.** Before applying the baseline, reject an existing SQLx migration ledger or North application tables without the SeaORM ledger; return a safe manual-recreation message before changing application schema/data. Never infer that an existing database is empty, drop schemas, or auto-convert migration ledgers. Future published SeaORM migrations are append-only.
 
 7. **Do not enable entity-first schema sync in production.** SeaORM's `schema-sync` discovers live schema and adds missing tables/columns/keys, but can drop indexes and runs as startup mutation. Use entity-derived schema statements only inside explicit, reviewed migrations; use versioned migrations for additive changes too.
 
-8. **Update release workflow and tests.** The package contains the compiled migrator in `north-server`; remove runtime SQL migration assets from artifacts. Release qualification creates an isolated database, runs the packaged migration command, then starts the server. Integration tests connect and execute through SeaORM; the legacy SQL baseline remains a test-only catalog oracle, and PostgreSQL-specific catalog/constraint fixtures stay as bound SeaORM statements. Test baseline parity, idempotent `up`, legacy-database rejection without mutation, startup refusal when behind, and representative concurrent transaction paths.
+8. **Update release workflow and tests.** The package contains the compiled migrator in `north-server`; remove runtime SQL migration assets from artifacts. Release qualification starts the packaged server against an empty isolated database and verifies that migration commits before traffic; it may qualify the explicit CLI separately. Integration tests connect and execute through SeaORM; the legacy SQL baseline remains a test-only catalog oracle, and PostgreSQL-specific catalog/constraint fixtures stay as bound SeaORM statements. Test baseline parity, idempotent `up`, automatic fresh-install startup, lock contention, legacy-database rejection without mutation, migration-failure startup refusal, and representative concurrent transaction paths.
 
 ## Risks / Trade-offs
 
@@ -40,14 +40,16 @@ See `proposal.md` for motivation and scope. `north-persistence` currently owns a
 - [Replacing direct SQLx across 69 production query sites may alter locking or transaction semantics] → Keep complex SQL on one SeaORM transaction/connection and run existing concurrency, retry, dedupe, and readiness suites.
 - [Old local databases cannot use the new migration ledger] → Detect before DDL, document manual recreation, and never reset automatically.
 - [Local validation may lack PostgreSQL] → Integration/CI profiles require `NORTH_TEST_DATABASE_URL`; use an isolated disposable database and never treat compilation as migration proof.
-- [Concurrent deployment jobs can race while applying pending migrations] → Serialize one migration command per database; add a PostgreSQL advisory lock only if deployment tooling cannot guarantee a singleton runner.
+- [Startup now requires schema DDL privileges] → Grant the configured server role the privileges needed by pending migrations; fail before app construction or binding when the role cannot apply them.
+- [Concurrent startup and CLI migration attempts] → Route both through the same PostgreSQL transaction-scoped advisory lock; never bypass the shared migration function.
+- [Future migration requires non-transactional DDL] → The current outer transaction makes the batch atomic; define a compatible lock/transaction strategy before adding such a migration.
 
 ## Migration Plan
 
 1. Add SeaORM entities and a Rust baseline migration; compare generated PostgreSQL schema with current baseline.
 2. Convert persistence APIs and test fixtures; remove direct SQLx use, SQLx migration macros, and root `.sql` migration files.
-3. Add migration preflight/`north-server migrate`; remove migration application from `build_app` and validate schema state before server listen.
-4. Update package/qualification scripts and operator docs. Fresh installations run `north-server migrate` before `north-server`.
+3. Add the shared guarded migration path and PostgreSQL transaction-scoped advisory lock; keep `build_app` side-effect-free and apply pending migrations before normal startup binds.
+4. Update package/qualification scripts and operator docs. Qualify packaged startup against an empty database; keep `north-server migrate` as an optional entry point to the same path.
 5. Existing pre-release SQLx databases are unsupported: operators stop server, preserve/export any needed data separately, then manually recreate database before first SeaORM migration. The command never drops or resets them.
 6. After public release, apply only reviewed forward SeaORM migrations; rollback is a deployment/application rollback with a compatible schema, not an automatic migration reset.
 
