@@ -9,16 +9,22 @@ content revision and one mutable Ready state generation, validated by server.
 
 ### Requirement: Assessments bind to a revision
 
-Every wire `requirement.assessed` SHALL record the requirement revision it
-targets, a typed verdict (`Ready` or `NeedsClarification`), blockers,
-assumptions, and `repositories_reviewed` entries carrying non-empty repository
-identity plus the inspected commit SHA. The server SHALL explicitly convert
-these transport values to the domain assessment; wire types SHALL remain
-domain-independent. Assessment matching SHALL use `requirement_revision`, not
-mutable `state_version`, `assessment_id`, or `accepted_state_version`; those
-identities are not inbound assessment concurrency tokens. Accepted readiness
-evidence creates/binds `assessment_id` and records the resulting Ready-generation
-`accepted_state_version`.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Every wire `requirement.assessed` SHALL record the requirement revision it
+  targets, a typed verdict (`Ready` or `NeedsClarification`), blockers,
+  assumptions, and `repositories_reviewed` entries carrying non-empty repository
+  identity plus the inspected commit SHA. The server SHALL explicitly convert
+  these transport values to the domain assessment; wire types SHALL remain
+  domain-independent. Assessment matching SHALL use `requirement_revision`, not
+  mutable `state_version`, `assessment_id`, or `accepted_state_version`; those
+  identities are not inbound assessment concurrency tokens. Accepted readiness
+  evidence creates/binds `assessment_id` and records the resulting Ready-generation
+  `accepted_state_version`.
 
 #### Scenario: Assessment cites its sources
 
@@ -27,15 +33,21 @@ evidence creates/binds `assessment_id` and records the resulting Ready-generatio
 
 ### Requirement: Server validates every gate before Ready
 
-A Discussing requirement SHALL enter Ready only when server-side validation
-applies the domain gates to a uniquely identified, sequence-valid assessment:
-revision equals current, verdict is Ready, blockers empty, and acceptance
-criteria exist. Any failed readiness gate SHALL leave status, revision, and
-`state_version` unchanged while recording a handled rejection. An event identity
-or per-session sequence conflict SHALL be rejected as a protocol error before
-evidence insertion; it SHALL not mutate Requirement state or emit an ACK.
-A successful promotion SHALL increment `state_version` exactly once in the same
-transaction; it SHALL NOT change `revision`.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  A Discussing requirement SHALL enter Ready only when server-side validation
+  applies the domain gates to a uniquely identified, sequence-valid assessment:
+  revision equals current, verdict is Ready, blockers empty, and acceptance
+  criteria exist. Any failed readiness gate SHALL leave status, revision, and
+  `state_version` unchanged while recording a handled rejection. An event identity
+  or per-session sequence conflict SHALL be rejected as a protocol error before
+  evidence insertion; it SHALL not mutate Requirement state or emit an ACK.
+  A successful promotion SHALL increment `state_version` exactly once in the same
+  transaction; it SHALL NOT change `revision`.
 
 #### Scenario: Stale event cannot promote
 
@@ -72,22 +84,28 @@ depend on agent or user memory.
 
 ### Requirement: Review packet projects Requirement plus assessment
 
-For a Ready requirement the system SHALL serve a concise packet that is a
-projection of TWO sources: goal/title, scope/description, summary, acceptance
-criteria, assumptions, and open questions from the canonical Requirement;
-blockers, assessment assumptions, and repositories-inspected commit SHAs from
-the latest accepted ReadinessAssessment bound to exactly that revision. The
-accepted evidence SHALL record the `state_version` created by its successful
-Ready promotion. The packet SHALL include `assessment_id`,
-`requirement_revision`, and `requirement_state_version`; persistence SHALL
-select accepted evidence for the exact current state generation, not timestamp
-order. Projection SHALL refuse any revision, state-generation, Ready-state, or
-assessment-identity mismatch so a stale packet is never reviewable or
-acceptable. Equality between `accepted_state_version` and the Requirement's
-current `state_version` is required only while that exact Ready generation is
-current and reviewable. A later human review transition increments the
-Requirement token without mutating historical assessment evidence. The packet
-SHALL NOT be stored as truth.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  For a Ready requirement the system SHALL serve a concise packet that is a
+  projection of TWO sources: goal/title, scope/description, summary, acceptance
+  criteria, assumptions, and open questions from the canonical Requirement;
+  blockers, assessment assumptions, and repositories-inspected commit SHAs from
+  the latest accepted ReadinessAssessment bound to exactly that revision. The
+  accepted evidence SHALL record the `state_version` created by its successful
+  Ready promotion. The packet SHALL include `assessment_id`,
+  `requirement_revision`, and `requirement_state_version`; persistence SHALL
+  select accepted evidence for the exact current state generation, not timestamp
+  order. Projection SHALL refuse any revision, state-generation, Ready-state, or
+  assessment-identity mismatch so a stale packet is never reviewable or
+  acceptable. Equality between `accepted_state_version` and the Requirement's
+  current `state_version` is required only while that exact Ready generation is
+  current and reviewable. A later human review transition increments the
+  Requirement token without mutating historical assessment evidence. The packet
+  SHALL NOT be stored as truth.
 
 #### Scenario: Reviewer skips the transcript
 
@@ -106,27 +124,33 @@ SHALL NOT be stored as truth.
 
 ### Requirement: Assessment ingestion acknowledges only a committed result
 
-For `requirement.assessed`, the server SHALL require the event session to be
-bound to the payload Requirement, validate event identity, deduplicate the event,
-and detect per-session sequence conflicts before loading/locking the current
-Requirement. Identity or sequence conflicts SHALL be protocol errors with no
-assessment row or event ACK. For a uniquely identified, sequence-valid event,
-the server SHALL load/lock the current Requirement, validate
-`requirement_revision` against its current revision, verify every cited
-`repository_id` identifies an existing durable configured-repository row and was
-valid for the session/run context, run domain readiness gates, persist immutable
-evidence with its accepted/rejected result, record the post-promotion
-`state_version` as `accepted_state_version` on accepted evidence, apply any valid
-transition and exactly one `state_version` increment, and commit as one
-transaction. `assessment_id` and `accepted_state_version` are created/bound by
-accepted readiness evidence, not supplied as inbound concurrency tokens. Only
-after commit SHALL it send `event_ack(status=accepted)` for a valid effect or
-`event_ack(status=rejected)` for a durable rejection. A stale/invalid event SHALL
-not change Requirement revision, state_version, or status; a duplicate of a
-committed event SHALL not repeat its effect or version increment. The
-`north-protocol` wire layer validates repository identity and complete Git
-SHA-1/SHA-256 fields; repository existence and session/run acceptability belong
-to server readiness persistence.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  For `requirement.assessed`, the server SHALL require the event session to be
+  bound to the payload Requirement, validate event identity, deduplicate the event,
+  and detect per-session sequence conflicts before loading/locking the current
+  Requirement. Identity or sequence conflicts SHALL be protocol errors with no
+  assessment row or event ACK. For a uniquely identified, sequence-valid event,
+  the server SHALL load/lock the current Requirement, validate
+  `requirement_revision` against its current revision, verify every cited
+  `repository_id` identifies an existing durable configured-repository row and was
+  valid for the session/run context, run domain readiness gates, persist immutable
+  evidence with its accepted/rejected result, record the post-promotion
+  `state_version` as `accepted_state_version` on accepted evidence, apply any valid
+  transition and exactly one `state_version` increment, and commit as one
+  transaction. `assessment_id` and `accepted_state_version` are created/bound by
+  accepted readiness evidence, not supplied as inbound concurrency tokens. Only
+  after commit SHALL it send `event_ack(status=accepted)` for a valid effect or
+  `event_ack(status=rejected)` for a durable rejection. A stale/invalid event SHALL
+  not change Requirement revision, state_version, or status; a duplicate of a
+  committed event SHALL not repeat its effect or version increment. The
+  `north-protocol` wire layer validates repository identity and complete Git
+  SHA-1/SHA-256 fields; repository existence and session/run acceptability belong
+  to server readiness persistence.
 
 #### Scenario: Event ACK follows durable assessment handling
 

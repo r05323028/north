@@ -1,0 +1,11 @@
+{
+  "name": "north-openwiki-tools",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Private runtime dependencies for the scheduled OpenWiki update workflow",
+  "dependencies": {
+    "jsdom": "29.1.1",
+    "mermaid": "11.16.0",
+    "openwiki": "0.7.2"
+  }
+}

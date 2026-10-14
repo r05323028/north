@@ -129,6 +129,17 @@ test("Board repairs missed updates on reconnect, duplicate delayed hints, and re
     });
   });
 
+  await page.route("**/auth/me", async (route) => {
+    await route.fulfill({
+      body: JSON.stringify({
+        id: "user-1",
+        email: "user@example.com",
+        role: "Requester",
+      }),
+      headers: jsonHeaders(),
+    });
+  });
+
   await page.goto("/");
   await expect(page.getByTestId("requirement-card-r-1")).toContainText("Draft");
 

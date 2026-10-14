@@ -131,11 +131,11 @@ fn concurrent_start_status_reconnect_and_graceful_stop() {
     );
     assert_eq!(reported_pid(&first), reported_pid(&second));
 
-    let status = fixture.wait_for_status("\"process_state\":\"running\"", Duration::from_secs(3));
-    assert!(
-        status.contains("\"connection_state\":\"reconnecting\""),
-        "{status}"
+    let status = fixture.wait_for_status(
+        "\"connection_state\":\"reconnecting\"",
+        Duration::from_secs(3),
     );
+    assert!(status.contains("\"process_state\":\"running\""), "{status}");
     assert!(!status.contains("test-secret"), "status exposed credential");
 
     let stopped = fixture.run(&["daemon", "stop"]);

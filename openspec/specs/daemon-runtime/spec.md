@@ -10,30 +10,12 @@ its single-server 0.1.0 architecture.
 
 ### Requirement: Setup approval is safe against cross-site state changes
 
-`GET /daemon/setup/{request_token}/approve` SHALL be read-only and SHALL NOT
-approve, claim, or otherwise mutate a setup request. When the request accepts
-`text/html` without an explicit `application/json` preference, it SHALL return
-a minimal human confirmation page that identifies North, the daemon label,
-setup state, an explicit `Approve` form targeting the same-origin POST route,
-and an explicit cancel/back action. The HTML SHALL NOT contain daemon
-credentials or other claim secrets. When `Accept: application/json` is
-requested, GET SHALL retain the read-only JSON preview for programmatic
-clients. The state-changing approval SHALL be performed only by
-`POST /daemon/setup/{request_token}/approve`, which SHALL require an
-authenticated user and SHALL validate the browser request origin against the
-North server origin before mutating state. A successful HTML POST SHALL return
-a human-readable success page; non-HTML clients MAY retain the existing empty
-204 response. Invalid, expired, already claimed, unauthenticated, and
-cross-origin approval requests SHALL be rejected without creating a credential.
-Daemon credentials SHALL be returned only by the setup claim endpoint used by
-the polling CLI.
+GET `/daemon/setup/{request_token}/approve` SHALL be read-only; only authenticated same-origin POST to that route may approve. HTML without JSON preference SHALL show confirmation; JSON Accept SHALL retain the read-only preview. Invalid, expired, claimed, unauthenticated, or cross-origin requests SHALL be rejected without credentials. HTML success SHALL return a page; non-HTML MAY use 204. The polling CLI's claim endpoint alone SHALL return credentials.
 
 #### Scenario: Approval page is read-only
 
-- **WHEN** an authenticated user requests the approval URL with `GET`
-- **THEN** an HTML response shows confirmation state, daemon information, an
-  `Approve` POST form, and cancel/back action, but the setup request remains
-  pending and no credential is created
+- **WHEN** an authenticated user requests the approval URL with `GET` and an HTML Accept without explicit `application/json` preference
+- **THEN** a minimal confirmation identifies North, the daemon label and setup state, and has an `Approve` form targeting the same-origin POST route plus cancel/back action; setup remains pending and the page contains no daemon credential or claim secret
 
 #### Scenario: API preview remains JSON
 
@@ -77,14 +59,7 @@ the polling CLI.
 
 ### Requirement: Durable command envelope matches dispatch
 
-For any command persisted to the daemon outbox, the server SHALL construct one
-complete command envelope, including command ID, session identity, and
-sequence metadata, serialize that envelope, persist that exact representation
-transactionally, and dispatch that same persisted representation. Callers
-SHALL NOT be able to persist an arbitrary payload and dispatch an unrelated
-command through the public command path. Persistence SHALL complete before
-attempted dispatch; a dispatch failure SHALL NOT rewrite the persisted command
-or silently substitute another representation.
+For each persisted command, the server SHALL build a complete envelope (command ID, session identity, sequence metadata), serialize it, transactionally persist that exact representation, then dispatch it. The public path SHALL NOT accept arbitrary payloads or dispatch a different command. Dispatch failure SHALL NOT rewrite or substitute the persisted envelope.
 
 #### Scenario: Stored command is the received command
 
@@ -217,17 +192,7 @@ capabilities; the server SHALL track liveness via North heartbeats
 
 ### Requirement: Connection handshake gates application traffic
 
-The daemon SHALL use one supervisor with explicit phases
-`Connecting`, `AwaitingWelcome`, `Authenticated`, `Reconciling`,
-`ReconciliationReceived`, and `Active`. It SHALL send `hello`, wait for
-`welcome`, receive one connection-level reconciliation snapshot, deliver it to
-coordination, and wait for coordination readiness before transmitting ordinary
-commands, events, replayed journal frames, or North heartbeat. WebSocket
-ping/pong SHALL remain available before `Active`. Handshake hello,
-welcome/authentication, and reconciliation stages SHALL have configurable timeouts
-distinct from execution retry policy. The coordination stage SHALL use one total
-budget for `HandshakeComplete` delivery, reconciliation application, and the
-readiness signal; timeout remains retryable.
+One supervisor SHALL gate traffic until hello/welcome, one per-connection reconciliation snapshot, and coordination readiness complete. Before Active, commands/events/journal replay/North heartbeat SHALL wait; WebSocket ping/pong remains available. Configurable hello/welcome-auth and reconciliation timeouts SHALL be distinct from execution retry; coordination SHALL use one retryable total budget for HandshakeComplete delivery, snapshot application, and readiness.
 
 #### Scenario: Runtime traffic cannot race authentication
 
@@ -236,8 +201,8 @@ readiness signal; timeout remains retryable.
 
 #### Scenario: Reconciliation receipt does not activate transport
 
-- **WHEN** the daemon receives a valid reconciliation snapshot but coordination has not signaled readiness
-- **THEN** normal application frames remain queued until coordination completes reconciliation
+- **WHEN** the daemon receives its connection-level snapshot while coordination readiness is pending
+- **THEN** the supervisor proceeds through `Connecting`, `AwaitingWelcome`, `Authenticated`, `Reconciling`, and `ReconciliationReceived`, reaching `Active` only after readiness; ordinary frames stay queued while WebSocket ping/pong remains available
 
 ### Requirement: Terminal protocol failures stop reconnect
 

@@ -600,7 +600,7 @@ release_compose_start() {
         --tuples-only --no-align --username "$POSTGRES_USER" \
         --dbname "$POSTGRES_DB" \
         --command 'SELECT version FROM seaql_migrations ORDER BY version DESC LIMIT 1;')
-    if [[ "$compose_migration_head" != "m0003_user_requirement_preferences" ]]; then
+    if [[ "$compose_migration_head" != "m0001_initial_schema" ]]; then
         release_log "OWNER-ACTION Compose startup did not reach current migration head value=$compose_migration_head"
         exit 1
     fi
@@ -654,23 +654,19 @@ fi
 release_check_invalid_otp_startup() {
     local invalid_key='north-release-invalid-otp-7c5b41'
     local invalid_log="$RELEASE_TMPDIR/logs/invalid-otp-startup.log"
-    local database_password probe_port probe_url server_pid startup_status=0 listening=false
+    local database_password invalid_database_url probe_port probe_url server_pid startup_status=0 listening=false
+
+    database_password=$(openssl rand -hex 32) || {
+        release_log "OWNER-ACTION unable to generate invalid-OTP database sentinel"
+        return 2
+    }
+    invalid_database_url="postgres://north:${database_password}@127.0.0.1:1/north"
 
     probe_port=$(pick_port)
     probe_url="http://127.0.0.1:$probe_port/healthz"
-    database_password=$(node - "$NORTH_TEST_DATABASE_URL" <<'NODE'
-try {
-  process.stdout.write(decodeURIComponent(new URL(process.argv[2]).password));
-} catch {
-  process.exit(2);
-}
-NODE
-    ) || {
-        release_log "OWNER-ACTION NORTH_TEST_DATABASE_URL is not a valid PostgreSQL URL"
-        return 2
-    }
 
-    env DATABASE_URL="$NORTH_TEST_DATABASE_URL" \
+    env -u NORTH_TEST_DATABASE_URL \
+        DATABASE_URL="$invalid_database_url" \
         NORTH_OTP_HMAC_KEY="$invalid_key" \
         NORTH_BIND_ADDR="127.0.0.1:$probe_port" \
         "$server_bin" >"$invalid_log" 2>&1 &

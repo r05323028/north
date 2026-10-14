@@ -2,7 +2,7 @@
 
 ## Context
 
-See `proposal.md` and the OTP/retention deltas; the active 0.1.0 release-qualification delta is revised in `prepare-0-1-0-release`. The checked-in history contains 18 migrations numbered through 0019. `north-persistence` embeds them at compile time; startup applies them before the server binds. `fresh_install` verifies the current migration head. `migration_upgrade` proves data-preserving upgrades from unpublished intermediate schemas. The in-progress 0.1.0 release change currently treats that history as immutable; its relevant plan text must be revised alongside this change.
+See `proposal.md` and the OTP/retention deltas; the active 0.1.0 release-qualification delta is revised in `prepare-0-1-0-release`. Before consolidation, `north-persistence` registered one compiled initial-schema baseline and two unpublished follow-on migrations for board positions and per-user preferences. Startup applies pending migrations before the server binds. `fresh_install` verified the current head and schema, while an obsolete test proved an upgrade from an unpublished intermediate schema. Release task 2.5 requires a sole baseline; this change folds both tables into the baseline and removes the follow-on migration source files and upgrade test.
 
 ## Goals / Non-Goals
 
@@ -19,23 +19,24 @@ See `proposal.md` and the OTP/retention deltas; the active 0.1.0 release-qualifi
 
 ## Decisions
 
-- **One initial baseline, not one file per feature.** Concatenate existing migration SQL in original version order into `0001_initial_schema.sql`, with source-version comments. This preserves the exact clean-install DDL and constraints while discarding the unsupported intermediate migration history. Legacy backfills run against empty tables during baseline installation; do not keep an upgrade test for those nonexistent supported database states.
-- **Manual database disposition.** Never drop/reset a database from server startup or validation. Existing databases stamped with old migration checksums must be backed up and manually recreated only when disposable. Keep startup fail-closed.
-- **Retain clean-install proof; remove historical-upgrade proof.** Assert the single migration head and representative final schema through `fresh_install`; delete `migration_upgrade` and remove its integration invocation. Existing domain and persistence tests continue to cover product invariants.
+- **One initial baseline, not one file per feature.** Fold the unpublished board-position and preference table DDL into the compiled SeaORM baseline source `initial_schema.rs`, while retaining recorded migration ID `m0001_initial_schema`. Remove follow-on pre-release migration sources and registrations. Stamp `seaql_migrations` with `north-schema:0.1.0-baseline-v1` inside the migration transaction. Before migration DDL, accept only registered applied versions forming a current migration prefix; require this marker for non-empty history, and allow an empty ledger only when no other schema relations exist. The baseline only supports empty databases, so do not backfill board ranks for unsupported intermediate schemas. Keep the final-schema catalog reference and compare every current table. Use descriptive, unnumbered Rust source filenames; migration ledger names remain explicit metadata, not source filenames.
+- **Manual database disposition.** Never drop/reset a database from server startup or validation. Existing databases stamped with old migration checksums, unknown versions, or an empty ledger beside schema objects must be backed up and manually recreated only when disposable. Keep startup fail-closed. The marker identifies the consolidated migration provenance; it does not fingerprint arbitrary out-of-band schema edits.
+- **Retain clean-install proof; remove historical-upgrade proof.** Assert the sole baseline head and complete current schema through `fresh_install`, including full catalog parity. Delete the obsolete test that starts from a pre-0.1.0 intermediate schema; existing domain and persistence tests continue to cover product invariants.
 - **Revise active release plan, not unrelated work.** Remove only claims that old migrations are immutable or that historical upgrade coverage remains required from `prepare-0-1-0-release`. Keep its other user-authored work intact.
 - **Freeze after publication.** Once the 0.1.0 baseline is released, do not edit it; append later migrations after version 1.
 
 ## Risks / Trade-offs
 
-- **Existing pre-release database no longer starts cleanly →** document backup and manual recreation; never auto-drop data.
+- **Existing pre-release database no longer starts cleanly →** reject reused/unknown history before migration DDL, document backup and manual recreation, and never auto-drop data. A fixed marker does not attest arbitrary schema changes; those remain unsupported.
 - **Legacy backfill behavior loses regression coverage →** accept because no published database depends on those schemas; fresh-install qualification still proves current schema creation.
 - **Single baseline transaction may expose SQL incompatibility →** run the PostgreSQL fresh-install/integration profile when an isolated `NORTH_TEST_DATABASE_URL` is available; do not claim DB validation if unavailable.
 - **Release plan contradicts consolidation →** update its migration-specific design, task, and release-qualification delta in the same change.
 
 ## Migration Plan
 
-1. Replace pre-release migration files with one baseline by preserving their SQL order; update migration metadata and canonical docs.
-2. Keep fresh-install coverage, remove obsolete historical-upgrade test and invocation, and update the release qualification artifacts to state the pre-release reset boundary.
-3. Run strict OpenSpec validation, focused Rust/architecture tests, fast validation, and isolated PostgreSQL fresh-install/integration checks when configured. Never reset the supplied database.
+1. Rename the baseline source to `initial_schema.rs` while retaining recorded migration ID `m0001_initial_schema`; fold unreleased board-position and preference DDL into it without historical backfill.
+2. Remove follow-on migration registrations and source files; preserve preflight rejection of unsupported database histories and never reset supplied databases.
+3. Keep fresh-install proof for the sole migration head and complete schema; remove the historical-upgrade test and update release artifacts and canonical persistence guidance.
+4. Run strict OpenSpec validation, focused Rust/architecture checks, fast validation, and isolated PostgreSQL fresh-install/integration checks when configured. Never claim database validation if unavailable.
 
-Rollback before publication: restore old migration files and tests from version control and recreate any baseline-stamped disposable test database. No automatic database rollback is supported.
+Rollback before publication: restore the prior migration sources and tests from version control and recreate any baseline-stamped disposable test database. No automatic database rollback is supported.

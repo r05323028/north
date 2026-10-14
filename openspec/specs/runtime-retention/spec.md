@@ -10,19 +10,25 @@ untouchable.
 
 ### Requirement: Retention applies only to explicitly allowlisted ephemeral data
 
-Only data classes on the explicit ephemeral allowlist SHALL be eligible for
-expiry-driven deletion. The 0.1.0 allowlist contains exactly
-`clarification_activities`: coarse runtime activity telemetry that is never
-the sole source of truth for any Requirement or execution decision. Every
-other persisted class SHALL be durable by default, including business state
-(users, roles, requirements, conversations, messages, readiness evidence,
-review decisions, repositories) and coordination state (daemon registrations
-and setup rows, execution sessions, execution attempts, attempt counters and
-limits, `next_retry_at`, current-attempt identity, failure classification,
-server command outbox and tombstones, command/event dedupe and rejection
-records, and sequence watermarks). A table SHALL NOT become a retention
-target through a generic or inferred mechanism; adding one SHALL require
-deliberately extending the allowlist and its firewall test.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Only data classes on the explicit ephemeral allowlist SHALL be eligible for
+  expiry-driven deletion. The 0.1.0 allowlist contains exactly
+  `clarification_activities`: coarse runtime activity telemetry that is never
+  the sole source of truth for any Requirement or execution decision. Every
+  other persisted class SHALL be durable by default, including business state
+  (users, roles, requirements, conversations, messages, readiness evidence,
+  review decisions, repositories) and coordination state (daemon registrations
+  and setup rows, execution sessions, execution attempts, attempt counters and
+  limits, `next_retry_at`, current-attempt identity, failure classification,
+  server command outbox and tombstones, command/event dedupe and rejection
+  records, and sequence watermarks). A table SHALL NOT become a retention
+  target through a generic or inferred mechanism; adding one SHALL require
+  deliberately extending the allowlist and its firewall test.
 
 #### Scenario: Sweep deletes only its class
 
@@ -74,19 +80,25 @@ non-expired rows, and SHALL not require replay or repair after a restart.
 
 ### Requirement: Backlog recovery is bounded per cycle
 
-One scheduler cycle SHALL drain expired telemetry by running bounded sweep
-passes while a pass deleted a full batch, SHALL stop when a pass deletes fewer
-rows than the batch bound, and SHALL stop at the configured maximum number of
-passes per cycle. The configured cycle capacity is the configured per-pass
-batch bound multiplied by the configured maximum passes per cycle.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-Each pass SHALL remain an independent batch-bounded statement so a cycle never
-becomes one large transaction, and retention SHALL never run an unbounded loop.
-When the pass bound stops a cycle with expired rows still eligible, the cycle
-SHALL report that expired rows remain, using a bounded existence probe rather
-than an exact backlog count, and the next cycle continues the drain. Exact
-backlog size is an observability concern and SHALL not be coupled to retention
-progress.
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  One scheduler cycle SHALL drain expired telemetry by running bounded sweep
+  passes while a pass deleted a full batch, SHALL stop when a pass deletes fewer
+  rows than the batch bound, and SHALL stop at the configured maximum number of
+  passes per cycle. The configured cycle capacity is the configured per-pass
+  batch bound multiplied by the configured maximum passes per cycle.
+
+  Each pass SHALL remain an independent batch-bounded statement so a cycle never
+  becomes one large transaction, and retention SHALL never run an unbounded loop.
+  When the pass bound stops a cycle with expired rows still eligible, the cycle
+  SHALL report that expired rows remain, using a bounded existence probe rather
+  than an exact backlog count, and the next cycle continues the drain. Exact
+  backlog size is an observability concern and SHALL not be coupled to retention
+  progress.
 
 #### Scenario: Backlog within cycle capacity recovers
 
@@ -145,17 +157,23 @@ with invalid retention settings.
 
 ### Requirement: The sweep layer cannot target durable tables by construction
 
-The persistence API SHALL expose only named ephemeral maintenance operations
-with fixed SQL; it SHALL NOT expose generic table-name deletion or arbitrary
-SQL deletion primitives to hosts. The TTL allowlist SHALL contain exactly
-`clarification_activities`. Daemon setup-row retention and acknowledged outbox
-compaction are separately classified bounded deletions, not TTL targets.
-A structural test SHALL inspect persistence Rust syntax and require every
-destructive statement (DELETE, TRUNCATE) to be a static string literal passed
-directly to a known SQL-executing call, classifying it by exact source file and
-table; SQL assembled through `format!`, `concat!`, variables, or dynamic table
-names SHALL be rejected, as SHALL any unclassified durable table, and test
-modules SHALL not satisfy production classification.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The persistence API SHALL expose only named ephemeral maintenance operations
+  with fixed SQL; it SHALL NOT expose generic table-name deletion or arbitrary
+  SQL deletion primitives to hosts. The TTL allowlist SHALL contain exactly
+  `clarification_activities`. Daemon setup-row retention and acknowledged outbox
+  compaction are separately classified bounded deletions, not TTL targets.
+  A structural test SHALL inspect persistence Rust syntax and require every
+  destructive statement (DELETE, TRUNCATE) to be a static string literal passed
+  directly to a known SQL-executing call, classifying it by exact source file and
+  table; SQL assembled through `format!`, `concat!`, variables, or dynamic table
+  names SHALL be rejected, as SHALL any unclassified durable table, and test
+  modules SHALL not satisfy production classification.
 
 #### Scenario: Durable-table delete fails the firewall
 

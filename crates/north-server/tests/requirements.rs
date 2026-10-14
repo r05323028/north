@@ -332,13 +332,28 @@ async fn create_board_requirement(app: Router, title: &str) -> Value {
 #[tokio::test]
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
 async fn board_ordering_is_persistent_and_serializes_with_lifecycle_changes() {
-    let database_url = std::env::var("NORTH_TEST_DATABASE_URL")
+    let base_database_url = std::env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for requirement integration tests");
+    let admin = support::database(&base_database_url, 1)
+        .await
+        .expect("connect test database admin");
+    let schema = unique("north_board").replace('-', "_");
+    support::query(format!(r#"CREATE SCHEMA "{schema}""#))
+        .execute(&admin)
+        .await
+        .expect("create isolated board schema");
+    let separator = if base_database_url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    let schema_database_url =
+        format!("{base_database_url}{separator}options=-c%20search_path%3D{schema}");
     let pool = TestDatabaseOptions::new()
         .max_connections(8)
-        .connect(&database_url)
+        .connect(&schema_database_url)
         .await
-        .expect("connect test database");
+        .expect("connect isolated board database");
     north_persistence::run_migrations(&pool)
         .await
         .expect("run migrations");
@@ -437,6 +452,14 @@ async fn board_ordering_is_persistent_and_serializes_with_lifecycle_changes() {
         .collect();
     assert_eq!(ids, fallback_order);
 
+    let canonical_board = request(
+        app.clone(),
+        Method::GET,
+        "/requirements?sort=board",
+        json!(null),
+    )
+    .await;
+    let canonical_board = json_body(canonical_board).await;
     let moved = request(
         app.clone(),
         Method::POST,
@@ -448,7 +471,18 @@ async fn board_ordering_is_persistent_and_serializes_with_lifecycle_changes() {
         }),
     )
     .await;
-    assert_eq!(moved.status(), StatusCode::NO_CONTENT);
+    let moved_status = moved.status();
+    let moved_body = String::from_utf8_lossy(
+        &to_bytes(moved.into_body(), usize::MAX)
+            .await
+            .expect("reorder response body"),
+    )
+    .into_owned();
+    assert_eq!(
+        moved_status,
+        StatusCode::NO_CONTENT,
+        "response body: {moved_body}; canonical board before reorder: {canonical_board}"
+    );
     let board = request(
         app.clone(),
         Method::GET,
@@ -485,6 +519,14 @@ async fn board_ordering_is_persistent_and_serializes_with_lifecycle_changes() {
     assert_eq!(unchanged["revision"], middle["revision"]);
     assert_eq!(unchanged["state_version"], middle["state_version"]);
 
+    let canonical_board_before_no_op = request(
+        app.clone(),
+        Method::GET,
+        "/requirements?sort=board",
+        json!(null),
+    )
+    .await;
+    let canonical_board_before_no_op = json_body(canonical_board_before_no_op).await;
     let no_op = request(
         app.clone(),
         Method::POST,
@@ -496,7 +538,15 @@ async fn board_ordering_is_persistent_and_serializes_with_lifecycle_changes() {
         }),
     )
     .await;
-    assert_eq!(no_op.status(), StatusCode::NO_CONTENT);
+    let no_op_status = no_op.status();
+    let no_op_body = to_bytes(no_op.into_body(), usize::MAX)
+        .await
+        .expect("no-op response body");
+    assert_eq!(
+        no_op_status,
+        StatusCode::NO_CONTENT,
+        "response body: {no_op_body:?}; canonical board before no-op: {canonical_board_before_no_op}"
+    );
 
     let non_adjacent = request(
         app.clone(),
@@ -759,6 +809,12 @@ async fn board_ordering_is_persistent_and_serializes_with_lifecycle_changes() {
         })
         .collect();
     assert_eq!(discussing_ids, vec![racing_id, ready_first_id]);
+
+    let _ = pool.close().await;
+    support::query(format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
+        .execute(&admin)
+        .await
+        .expect("drop isolated board schema");
 }
 
 #[tokio::test]

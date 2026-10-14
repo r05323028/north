@@ -50,14 +50,7 @@ being inferred.
 
 ### Requirement: Review mutation identities match existing server contracts
 
-For Accept, Reject, and Request Changes, the workspace SHALL send both
-`assessment_id` from the current packet and `expected_state_version` from that
-packet/Requirement contract. Request Changes SHALL also send its validated
-feedback. For Reopen, the workspace SHALL send `expected_state_version` and
-SHALL NOT require or send `assessment_id`.
-
-The browser SHALL not optimistically change lifecycle or readiness. On success
-it SHALL refetch canonical Requirement and any applicable Review Packet state.
+Accept, Reject, and Request Changes SHALL send the current packet's `assessment_id` and `expected_state_version` from its/Requirement contract; Request Changes also sends validated feedback. Reopen SHALL send only `expected_state_version`. The browser SHALL not optimistically change lifecycle/readiness; success SHALL refetch canonical Requirement and applicable Review Packet state.
 
 #### Scenario: Ready decision carries assessment identity
 
@@ -100,22 +93,12 @@ mandatory and authoritative.
 
 ### Requirement: Stale review repair is explicit and preserves feedback
 
-When a review mutation returns HTTP 409 because Requirement content, lifecycle,
-Ready generation, assessment identity, or state version changed, the workspace
-SHALL leave the old packet unusable, apply no optimistic transition, refetch the
-canonical Requirement first or under one generation, and request Review Packet
-only if the refreshed Requirement is Ready. If it is no longer Ready, the old
-packet SHALL be dropped; Rejected Reopen remains Requirement-state-only. The
-workspace SHALL keep review mutations disabled until the reviewer performs
-an explicit accessible acknowledgement after stale repair: `Review refreshed
-packet` for a Ready decision, or `Review refreshed Requirement` for Reopen.
-Refetch/render completion alone is not inspection. The acknowledgement identity
-is `(requirement_state_version, assessment_id)` for Ready decisions and
-`requirement_state_version` for Reopen. A later SSE hint, focus/visibility
-repair, explicit refresh, or duplicate refetch SHALL preserve acknowledgement
-when that canonical identity is unchanged and SHALL invalidate it when the
-identity changes. The workspace SHALL NOT automatically retry.
-Unsent Request Changes feedback SHALL survive the refetch and stale notice.
+A review 409 caused by changed Requirement/Ready/assessment state SHALL invalidate the old packet, avoid optimism, and refetch canonical Requirement before/with Review Packet only if Ready; Rejected Reopen remains Requirement-only. Keep mutations disabled until explicit accessible acknowledgement: `Review refreshed packet` for Ready or `Review refreshed Requirement` for Reopen. Preserve acknowledgement only for unchanged identity; never auto-retry or discard unsent feedback.
+
+#### Scenario: Acknowledgement is bound to canonical identity
+
+- **WHEN** an acknowledged Ready packet or Reopen Requirement is refreshed by SSE, focus/visibility repair, explicit refresh, or duplicate refetch
+- **THEN** Ready identity is `(requirement_state_version, assessment_id)` and Reopen identity is `requirement_state_version`; unchanged identity preserves acknowledgement, while a changed identity invalidates it
 
 #### Scenario: Concurrent edit causes stale decision
 

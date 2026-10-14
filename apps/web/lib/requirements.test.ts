@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  beginRequirementDiscussion,
   createRequirement,
   getRequirement,
+  reorderRequirement,
   groupRequirements,
   listRequirements,
   parseRequirement,
@@ -172,6 +174,33 @@ describe("Requirement API", () => {
           description: " A description ",
         }),
       }),
+    );
+  });
+
+  it("sends canonical same-column reorder anchors and expected version", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(undefined, 204));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await reorderRequirement("r/1", { expected_state_version: 7, before_id: "next", after_id: null });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/requirements/r%2F1/reorder",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ expected_state_version: 7, before_id: "next", after_id: null }),
+      }),
+    );
+  });
+
+  it("uses existing begin-discussion transition with expected state version", async () => {
+    const canonical = requirement("r-1", "discussing", { state_version: 2 });
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(canonical));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(beginRequirementDiscussion("r-1", 1)).resolves.toEqual(canonical);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/requirements/r-1/begin-discussion",
+      expect.objectContaining({ method: "POST", body: JSON.stringify({ expected_state_version: 1 }) }),
     );
   });
 

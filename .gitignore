@@ -12,6 +12,7 @@ next-env.d.ts
 graphify-out
 .ua
 .pi
+.agents
 
 .ruff_cache
 

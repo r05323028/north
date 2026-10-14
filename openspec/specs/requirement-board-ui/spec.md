@@ -10,14 +10,20 @@ Requirement truth.
 
 ### Requirement: Board and list use the existing collection API at 0.1 scale
 
-The board and list SHALL consume the current authenticated
-`GET /requirements` collection and SHALL use its existing `search`, `status`,
-`created_by`, and `sort` query parameters. North 0.1.0 defines no cursor,
-`limit`, `offset`, total-count, page-size, or virtualization contract for this
-surface. Cursor pagination and virtualization SHALL remain out of scope unless
-a separate change first defines them. The HTTP representation of `revision` and
-`state_version` remains numeric; the browser boundary SHALL accept only positive
-JavaScript safe integers (`Number.isSafeInteger(value) && value >= 1`).
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The board and list SHALL consume the current authenticated
+  `GET /requirements` collection and SHALL use its existing `search`, `status`,
+  `created_by`, and `sort` query parameters. North 0.1.0 defines no cursor,
+  `limit`, `offset`, total-count, page-size, or virtualization contract for this
+  surface. Cursor pagination and virtualization SHALL remain out of scope unless
+  a separate change first defines them. The HTTP representation of `revision` and
+  `state_version` remains numeric; the browser boundary SHALL accept only positive
+  JavaScript safe integers (`Number.isSafeInteger(value) && value >= 1`).
 
 #### Scenario: Query controls stay server-backed
 
@@ -31,14 +37,20 @@ JavaScript safe integers (`Number.isSafeInteger(value) && value >= 1`).
 
 ### Requirement: Board owns minimal Requirement detail route
 
-The Board change SHALL provide the read-only `/requirements/[id]` route reached
-from board, list, and creation flows. It SHALL load the existing authenticated
-`GET /requirements/{id}` response and render only canonical Requirement fields,
-including title, description, status, creator (`created_by`), updated time,
-summary, acceptance criteria, assumptions, open questions, revision, and
-state_version where useful. The base shell SHALL not require clarification or
-runtime availability and SHALL not add clarification controls, activity,
-readiness interaction, or editing.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The Board change SHALL provide the read-only `/requirements/[id]` route reached
+  from board, list, and creation flows. It SHALL load the existing authenticated
+  `GET /requirements/{id}` response and render only canonical Requirement fields,
+  including title, description, status, creator (`created_by`), updated time,
+  summary, acceptance criteria, assumptions, open questions, revision, and
+  state_version where useful. The base shell SHALL not require clarification or
+  runtime availability and SHALL not add clarification controls, activity,
+  readiness interaction, or editing.
 
 #### Scenario: Board detail route works without clarification
 
@@ -92,24 +104,30 @@ client-predicted lifecycle/version values.
 
 ### Requirement: Browser transport is HTTP plus notification-only SSE
 
-Board and list SHALL use HTTP for canonical reads/mutations and this change's
-single authenticated `GET /events` SSE endpoint for lightweight invalidation
-hints. The base producer SHALL emit `requirement.changed` only after the
-canonical Requirement transaction commits. `Last-Event-ID` SHALL not be
-required for correctness. If the server detects that an SSE subscriber missed
-broadcast notifications, it SHALL close that stream so native EventSource
-reconnect/refetch can restore canonical state. `introduce-agent-requirement-clarification` may
-extend this same producer with clarification categories, but SHALL not create
-another endpoint or producer. The frontend SHALL never open a WebSocket.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-The invalidation path SHALL be:
+#### Scenario: Complete contract preserves all requirement clauses
 
-```text
-canonical north-server commit
-  -> SSE notification (requirement identity/category only)
-  -> GET /requirements refetch
-  -> render canonical response
-```
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Board and list SHALL use HTTP for canonical reads/mutations and this change's
+  single authenticated `GET /events` SSE endpoint for lightweight invalidation
+  hints. The base producer SHALL emit `requirement.changed` only after the
+  canonical Requirement transaction commits. `Last-Event-ID` SHALL not be
+  required for correctness. If the server detects that an SSE subscriber missed
+  broadcast notifications, it SHALL close that stream so native EventSource
+  reconnect/refetch can restore canonical state. `introduce-agent-requirement-clarification` may
+  extend this same producer with clarification categories, but SHALL not create
+  another endpoint or producer. The frontend SHALL never open a WebSocket.
+
+  The invalidation path SHALL be:
+
+  ```text
+  canonical north-server commit
+    -> SSE notification (requirement identity/category only)
+    -> GET /requirements refetch
+    -> render canonical response
+  ```
 
 #### Scenario: Canonical status change refreshes a board
 
@@ -123,13 +141,19 @@ canonical north-server commit
 
 ### Requirement: Missed and duplicate hints are harmless
 
-SSE SHALL not be a durable browser event log, a Requirement state store, a
-WebSocket transport, or a required replay mechanism. After initial load,
-refocus, disconnect, or EventSource reconnect, board/list SHALL refetch
-`GET /requirements`. Missed, duplicated, delayed, or out-of-order hints SHALL
-never duplicate a Requirement row or lifecycle transition. If the server detects
-that a subscriber lagged beyond the broadcast buffer, it closes the stream so
-EventSource reconnect/refetch restores canonical state.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  SSE SHALL not be a durable browser event log, a Requirement state store, a
+  WebSocket transport, or a required replay mechanism. After initial load,
+  refocus, disconnect, or EventSource reconnect, board/list SHALL refetch
+  `GET /requirements`. Missed, duplicated, delayed, or out-of-order hints SHALL
+  never duplicate a Requirement row or lifecycle transition. If the server detects
+  that a subscriber lagged beyond the broadcast buffer, it closes the stream so
+  EventSource reconnect/refetch restores canonical state.
 
 #### Scenario: Missed update is repaired
 

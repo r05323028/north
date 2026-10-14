@@ -1,8 +1,15 @@
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DbBackend, Schema};
 use sea_orm_migration::prelude::*;
 
-#[derive(DeriveMigrationName)]
+pub(super) const BASELINE_MARKER: &str = "north-schema:0.1.0-baseline-v1";
+
 pub struct Migration;
+
+impl MigrationName for Migration {
+    fn name(&self) -> &str {
+        "m0001_initial_schema"
+    }
+}
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
@@ -38,6 +45,12 @@ impl MigrationTrait for Migration {
                 .execute_unprepared(statement)
                 .await?;
         }
+        manager
+            .get_connection()
+            .execute_unprepared(&format!(
+                "COMMENT ON TABLE seaql_migrations IS '{BASELINE_MARKER}'"
+            ))
+            .await?;
         crate::entities::instance_settings::ActiveModel {
             id: sea_orm::ActiveValue::Set(1),
             owner_user_id: Default::default(),
@@ -50,6 +63,25 @@ impl MigrationTrait for Migration {
 }
 
 const POST_TABLE_DDL: &[&str] = &[
+    // Current durable workspace tables belong to clean-install baseline; no historical backfill is supported.
+    "CREATE TABLE requirement_board_positions (
+        requirement_id TEXT PRIMARY KEY
+            REFERENCES requirements(id) ON DELETE CASCADE,
+        rank BIGINT NOT NULL
+    )",
+    "CREATE TABLE user_requirement_preferences (
+        user_id TEXT PRIMARY KEY
+            REFERENCES users(id) ON DELETE CASCADE,
+        default_view TEXT NOT NULL DEFAULT 'board'
+            CHECK (default_view IN ('board', 'list')),
+        list_status TEXT
+            CHECK (list_status IS NULL OR list_status IN ('draft', 'discussing', 'ready', 'accepted', 'rejected')),
+        list_created_by TEXT
+            CHECK (list_created_by IS NULL OR CHAR_LENGTH(BTRIM(list_created_by)) BETWEEN 1 AND 256),
+        list_sort TEXT NOT NULL DEFAULT 'updated'
+            CHECK (list_sort IN ('updated', 'updated_asc')),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )",
     // Defaults from the supported final schema.
     "ALTER TABLE users ALTER COLUMN role SET DEFAULT 'Requester', ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP",
     "ALTER TABLE verification_codes ALTER COLUMN failed_attempts SET DEFAULT 0, ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP",

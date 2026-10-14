@@ -4,7 +4,7 @@
 
 ### Requirement: Board reorder rejects stale or inconsistent positions
 
-The board reorder operation SHALL require the moved Requirement's `expected_state_version` and SHALL serialize with other board-order and lifecycle writes before validating its current column and target neighbors. The target references SHALL identify the immediately preceding and following cards in that same column after the moved card is removed; null references SHALL denote the corresponding column boundary. Unknown references, the moved card as its own neighbor, cross-column references, non-adjacent anchors, or a stale state version SHALL be rejected without changing order. Concurrent requests based on incompatible snapshots SHALL not silently overwrite one another.
+The reorder SHALL require `expected_state_version` and serialize with board-order and lifecycle writes before validating the column and anchors. After removing the moved card, only immediately adjacent same-column before/after references are valid; null denotes a column boundary. Invalid anchors or stale versions SHALL be rejected without mutation, and incompatible concurrent snapshots SHALL conflict.
 
 #### Scenario: Stale Requirement version cannot reorder
 
@@ -20,3 +20,8 @@ The board reorder operation SHALL require the moved Requirement's `expected_stat
 
 - **WHEN** two requests from one board snapshot choose incompatible positions and one commits first
 - **THEN** the later request detects changed anchors or state and returns a conflict instead of silently corrupting order
+
+#### Scenario: Unknown, self, or non-adjacent anchors are rejected
+
+- **WHEN** a reorder names an unknown card, the moved card itself, or non-adjacent anchors
+- **THEN** the server rejects the request and preserves the current order

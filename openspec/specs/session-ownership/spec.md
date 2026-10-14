@@ -46,14 +46,20 @@ selected only for a new session or an explicit future migration feature.
 
 ### Requirement: Daemon credentials are user-owned instance registrations
 
-A daemon registration is an instance-scoped identity, while its credential is
-owned by the North account named by `created_by`; `created_by` means the account
-that authorized setup and owns the registration, not the actor that later
-executes a session. Credentials are not transferable or shared across users in
-0.1.0. The credential owner MAY revoke its own credential, and Admin/Owner MAY
-revoke any credential. Revocation SHALL close current access and refuse future
-connections; pinned sessions are not reassigned and follow normal retry or
-failure handling.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  A daemon registration is an instance-scoped identity, while its credential is
+  owned by the North account named by `created_by`; `created_by` means the account
+  that authorized setup and owns the registration, not the actor that later
+  executes a session. Credentials are not transferable or shared across users in
+  0.1.0. The credential owner MAY revoke its own credential, and Admin/Owner MAY
+  revoke any credential. Revocation SHALL close current access and refuse future
+  connections; pinned sessions are not reassigned and follow normal retry or
+  failure handling.
 
 #### Scenario: Revocation cuts current and future access
 

@@ -176,7 +176,7 @@ test("redirects 401 guests but does not misclassify other auth failures", async 
   await expect(page.getByRole("heading", { name: "登入 North" })).toBeVisible();
 });
 
-test("does not redirect when current-user request fails without 401", async ({
+test("keeps protected shell hidden without redirect when current-user request fails without 401", async ({
   page,
 }) => {
   await page.route("**/auth/me", async (route) => {
@@ -188,7 +188,8 @@ test("does not redirect when current-user request fails without 401", async ({
   });
   await page.goto("/");
   await expect(page).not.toHaveURL(/\/login$/);
-  await expect(page.getByRole("navigation", { name: "主導覽" })).toBeVisible();
+  await expect(page.getByText("無法確認登入狀態，請重新整理重試。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "主導覽" })).toHaveCount(0);
 });
 
 test("shows generic cooldown feedback for rate-limited code requests", async ({

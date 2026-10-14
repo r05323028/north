@@ -41,3 +41,12 @@ npm run test:e2e -- auth-live.spec.ts
 Without both variables the live test skips; regular stubbed auth browser tests
 remain runnable with `npm run test:e2e -- auth.spec.ts`. Never point this probe
 or its log at production.
+
+## Playwright server isolation
+
+The mocked browser suite owns a Next.js `webServer` process in
+`apps/web/playwright.config.ts`. `NORTH_WEB_E2E_PORT` is shared by its launch
+command and `baseURL`; Playwright must not reuse an already-running process. Use
+a free port or let the run fail on collision rather than silently testing a
+stale server. The assembled release suite targets its separately configured
+proxy and does not start this mocked server.

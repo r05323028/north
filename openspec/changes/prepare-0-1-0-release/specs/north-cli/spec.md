@@ -8,12 +8,12 @@ Defines the minimal operator CLI that configures and supervises the local North 
 
 ### Requirement: CLI setup enrolls and starts the local daemon
 
-The `north` CLI SHALL provide `north setup --server-url HTTPS_URL [--label LABEL]` as the one-command daemon setup path. It SHALL reuse the existing `north-daemon setup` device flow: request setup over HTTPS, present the server-provided same-origin approval URL, wait only until request expiry, claim the approved daemon credential, and store it in the existing owner-only `~/.north/daemon.json` state using the existing atomic mode-0600 behavior. It SHALL pass the same-origin approval URL directly to the system browser when supported. If browser opening fails, it SHALL print the URL once on stdout as an explicit operator fallback; that display SHALL not be persisted or copied to daemon logs/status. Credentials and setup tokens SHALL never appear in daemon logs or status output. After successful claim, it SHALL start the bundled daemon in the background. It SHALL NOT add OAuth/PAT tokens, user-session storage, or a second daemon enrollment API.
+The `north` CLI SHALL provide `north setup --server-url HTTPS_URL [--label LABEL]` as the one-command setup path. It SHALL reuse `north-daemon setup` and its owner-only, atomic mode-0600 `~/.north/daemon.json` state. It SHALL start the bundled daemon only after credential claim succeeds. It SHALL NOT add another enrollment API or credential type.
 
 #### Scenario: Browser approval completes setup
 
 - **WHEN** an operator runs `north setup --server-url https://north.example` and approves the displayed request in an authenticated same-origin browser session
-- **THEN** the CLI stores the claimed daemon credential with owner-only permissions and starts the bundled daemon without exposing the credential
+- **THEN** the CLI opens the server-provided same-origin approval URL directly when supported, stores the claimed daemon credential with owner-only permissions, and starts the bundled daemon without exposing credentials
 
 #### Scenario: Invalid or expired setup fails closed
 
@@ -23,11 +23,16 @@ The `north` CLI SHALL provide `north setup --server-url HTTPS_URL [--label LABEL
 #### Scenario: Browser opening is unavailable
 
 - **WHEN** the platform has no supported browser opener or opening fails
-- **THEN** the CLI prints the validated same-origin approval URL and continues bounded polling without weakening TLS verification
+- **THEN** the CLI prints the validated same-origin URL once on stdout, omits it from persistent state and daemon logs/status, continues bounded polling until expiry, and keeps TLS verification enabled
+
+#### Scenario: Setup credentials stay out of diagnostics
+
+- **WHEN** setup tokens or daemon credentials are handled during setup or daemon runtime
+- **THEN** daemon logs and status omit both values; only the claimed daemon credential is stored in `daemon.json` after approval
 
 ### Requirement: CLI supervises the bundled daemon safely
 
-Each CLI release archive SHALL contain matching `north` and `north-daemon` binaries. `north daemon start` SHALL run the sibling daemon in the background by default; `--foreground` SHALL run it interactively for diagnostics. `north daemon stop` SHALL request graceful shutdown over an owner-only Unix-domain control socket and wait for confirmation within a bounded timeout; timeout SHALL fail closed without signaling a PID. `north daemon status` SHALL query the live control socket and report process/backend connection state in human-readable output and `--output json`. Local PID/instance/status/log metadata SHALL live under `~/.north`; daemon credentials remain in `daemon.json`. The daemon SHALL verify the instance ID on control requests. PID metadata is informational only: stale or reused PIDs SHALL never cause process signals. An unresponsive existing socket SHALL be reported stale/unresponsive and SHALL NOT be unlinked based only on a timed-out probe. Repeated start/stop operations SHALL return stable status without duplicating daemons or deleting credentials.
+The CLI SHALL supervise `north-daemon` through an owner-only Unix-domain control socket. `north daemon start` SHALL background by default and support `--foreground`; `stop` SHALL await graceful confirmation within a bounded timeout; `status` SHALL report process/backend state as text or stable JSON. `~/.north` SHALL hold PID/instance/status/log metadata; credentials remain in `daemon.json`. PID metadata SHALL never authorize signals.
 
 #### Scenario: Start survives CLI exit
 
@@ -39,19 +44,24 @@ Each CLI release archive SHALL contain matching `north` and `north-daemon` binar
 - **WHEN** an operator runs `north daemon start --foreground`
 - **THEN** the CLI runs the bundled daemon attached to the terminal and propagates its exit status without creating a background PID record
 
-#### Scenario: Stale PID cannot stop an unrelated process
+#### Scenario: Stale PID or socket cannot stop an unrelated process
 
-- **WHEN** PID metadata is stale or reused by another process
-- **THEN** stop uses only the control socket, reports stale/unresponsive state if the managed daemon does not answer, and sends no process signal
+- **WHEN** PID metadata is stale or reused, or the control socket is unresponsive or reports a mismatched instance ID
+- **THEN** stop uses only the owner-only control socket and matching instance ID; it reports stale/unresponsive state, sends no process signal, and does not unlink an unresponsive socket after a timed-out probe
 
 #### Scenario: Stop preserves enrollment
 
 - **WHEN** the managed daemon confirms graceful shutdown through its control socket
 - **THEN** the CLI clears only live process/control metadata and retains daemon credentials, journal, and repository state
 
+#### Scenario: Repeated start and stop operations are stable
+
+- **WHEN** an operator repeats start or stop while the daemon is already running or stopped
+- **THEN** the CLI reports stable status, starts no duplicate daemon, and does not delete credentials, the journal, or repository state
+
 ### Requirement: CLI backend status reflects protocol readiness
 
-The bundled daemon SHALL expose local status updates to the CLI for `starting`, `connecting`, `connected`, `reconnecting`, `failed`, and `stopped` states. `connected` SHALL be reported only after the existing hello/welcome, reconciliation snapshot, and coordination-readiness gate succeeds. Retryable socket failures SHALL clear connected state before backoff; terminal protocol/authentication failures SHALL report failed state without credentials. Status SHALL show server URL, daemon ID, process state, and connection state without printing credential material. JSON status SHALL be parseable and use stable field names.
+The bundled daemon SHALL expose `starting`, `connecting`, `connected`, `reconnecting`, `failed`, and `stopped`, with server URL, daemon ID, and process state. `connected` SHALL require hello/welcome, reconciliation snapshot, and coordination readiness. Retryable socket failures SHALL clear `connected` before backoff; terminal protocol/authentication failures SHALL report `failed` without credentials. Text and JSON output SHALL be stable and parseable.
 
 #### Scenario: Connected means coordination ready
 
@@ -66,7 +76,7 @@ The bundled daemon SHALL expose local status updates to the CLI for `starting`, 
 #### Scenario: Terminal failure is safe
 
 - **WHEN** daemon authentication or protocol validation fails terminally
-- **THEN** status reports `failed` and safe failure class without exposing credentials
+- **THEN** status reports `failed` with a safe failure class and without exposing credentials
 
 #### Scenario: Stale status is not reported connected
 

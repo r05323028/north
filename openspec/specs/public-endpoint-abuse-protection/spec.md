@@ -10,31 +10,37 @@ rejections.
 
 ### Requirement: Client identity is canonical and proxy trust is explicit
 
-For `/auth/request-code` and `/daemon/setup/request`, the server SHALL resolve
-one **normalized effective client address** from the immediate socket peer and,
-only when trusted, the validated `X-Forwarded-For` chain. IPv4-mapped IPv6
-SHALL normalize to IPv4 before key derivation. The server SHALL derive one
-**primary limiter key** from that address: a PostgreSQL `CIDR` value with IPv4
-`/32` or IPv6 `/64` prefix. The primary key is the typed identity for
-process-local endpoint buckets; North 0.1.0 has no broader secondary
-anti-rotation key. Only IPv4-mapped IPv6 is collapsed; IPv4-compatible IPv6
-(for example, `::192.0.2.7`) and loopback IPv6 remain IPv6 for comparison and
-keying.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-The durable setup quota SHALL use the same `CIDR` value as its **durable setup
-quota key**, persisted in the existing nullable `client_network_key` column.
-New rows SHALL have a non-null key; legacy NULL rows remain unkeyed. The column
-name is retained for migration compatibility; its value is the primary key, not
-a broad IPv4 network identity. User-Agent, cookies, email local parts, and
-daemon labels SHALL NOT be any client identity or quota key.
+#### Scenario: Complete contract preserves all requirement clauses
 
-The server SHALL use only `X-Forwarded-For` when the immediate peer is inside
-configured `trusted_proxy_cidrs`. The default trusted-proxy set SHALL be empty.
-An untrusted peer's forwarding header SHALL be ignored. A trusted chain SHALL be
-parsed right-to-left as one complete comma-separated chain of IP tokens;
-malformed/missing/empty/all-trusted chains SHALL fall back to the socket peer,
-and no partial value SHALL be accepted. Duplicate header fields SHALL be
-joined in wire order before validation.
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  For `/auth/request-code` and `/daemon/setup/request`, the server SHALL resolve
+  one **normalized effective client address** from the immediate socket peer and,
+  only when trusted, the validated `X-Forwarded-For` chain. IPv4-mapped IPv6
+  SHALL normalize to IPv4 before key derivation. The server SHALL derive one
+  **primary limiter key** from that address: a PostgreSQL `CIDR` value with IPv4
+  `/32` or IPv6 `/64` prefix. The primary key is the typed identity for
+  process-local endpoint buckets; North 0.1.0 has no broader secondary
+  anti-rotation key. Only IPv4-mapped IPv6 is collapsed; IPv4-compatible IPv6
+  (for example, `::192.0.2.7`) and loopback IPv6 remain IPv6 for comparison and
+  keying.
+
+  The durable setup quota SHALL use the same `CIDR` value as its **durable setup
+  quota key**, persisted in the existing nullable `client_network_key` column.
+  New rows SHALL have a non-null key; legacy NULL rows remain unkeyed. The column
+  name is retained for migration compatibility; its value is the primary key, not
+  a broad IPv4 network identity. User-Agent, cookies, email local parts, and
+  daemon labels SHALL NOT be any client identity or quota key.
+
+  The server SHALL use only `X-Forwarded-For` when the immediate peer is inside
+  configured `trusted_proxy_cidrs`. The default trusted-proxy set SHALL be empty.
+  An untrusted peer's forwarding header SHALL be ignored. A trusted chain SHALL be
+  parsed right-to-left as one complete comma-separated chain of IP tokens;
+  malformed/missing/empty/all-trusted chains SHALL fall back to the socket peer,
+  and no partial value SHALL be accepted. Duplicate header fields SHALL be
+  joined in wire order before validation.
 
 #### Scenario: Untrusted forwarding header is ignored
 
@@ -71,37 +77,43 @@ joined in wire order before validation.
 
 ### Requirement: Public creation endpoints use bounded independent controls
 
-Only `POST /auth/request-code` and `POST /daemon/setup/request` SHALL be
-protected by this capability. Each SHALL apply a process-local,
-concurrency-safe bucket keyed by endpoint plus the primary limiter key before
-durable creation. The 0.1.0 default for each bucket SHALL be capacity 5 with
-one token refilled per 120 seconds for each IPv4 `/32` or IPv6 `/64` primary key,
-and buckets SHALL reset on process restart. Each endpoint's process-local bucket
-namespace SHALL have a configurable hard maximum of entries (default 4096). On
-access, lazy cleanup MAY evict only buckets that are fully refilled and have
-been untouched for at least one refill interval; active or partially filled
-buckets SHALL NOT be reset by eviction. When a new key reaches the hard maximum
-and no safe bucket can be evicted, the limiter SHALL fail closed with the
-generic rate-limit contract. The endpoints SHALL retain separate durable
-resource controls and SHALL NOT claim cross-process or cross-instance limiter
-guarantees, add Redis, or use a generic platform.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-Request-code resource control SHALL use normalized email identity. A
-syntactically valid request that passes its client bucket SHALL consume that
-token immediately; later email cooldown or pending-quota rejection SHALL NOT
-refund it. Malformed requests rejected before client identity/limiter
-evaluation SHALL consume no token. New daemon setup rows SHALL persist the
-durable setup quota key (the same CIDR primary limiter key) and enforce a bounded
-count of unexpired, unclaimed rows for that key (default maximum 3 per durable
-setup quota key in 0.1.0). The transaction SHALL acquire
-`pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))` before
-serializing count-and-insert for one CIDR key; daemon label alone SHALL never
-be a quota key. Pre-existing null-key rows retain claim/expiry behavior but are
-not counted for new keyed quotas. Rate-limited or quota-rejected requests SHALL
-create no protected resource. JSON extractor failures for setup requests
-(including malformed JSON, missing fields, wrong types, missing content type,
-or unsupported content type) SHALL return HTTP 400 with `{ "error": "bad_request" }`
-before client identity/limiter evaluation and SHALL create no setup row.
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Only `POST /auth/request-code` and `POST /daemon/setup/request` SHALL be
+  protected by this capability. Each SHALL apply a process-local,
+  concurrency-safe bucket keyed by endpoint plus the primary limiter key before
+  durable creation. The 0.1.0 default for each bucket SHALL be capacity 5 with
+  one token refilled per 120 seconds for each IPv4 `/32` or IPv6 `/64` primary key,
+  and buckets SHALL reset on process restart. Each endpoint's process-local bucket
+  namespace SHALL have a configurable hard maximum of entries (default 4096). On
+  access, lazy cleanup MAY evict only buckets that are fully refilled and have
+  been untouched for at least one refill interval; active or partially filled
+  buckets SHALL NOT be reset by eviction. When a new key reaches the hard maximum
+  and no safe bucket can be evicted, the limiter SHALL fail closed with the
+  generic rate-limit contract. The endpoints SHALL retain separate durable
+  resource controls and SHALL NOT claim cross-process or cross-instance limiter
+  guarantees, add Redis, or use a generic platform.
+
+  Request-code resource control SHALL use normalized email identity. A
+  syntactically valid request that passes its client bucket SHALL consume that
+  token immediately; later email cooldown or pending-quota rejection SHALL NOT
+  refund it. Malformed requests rejected before client identity/limiter
+  evaluation SHALL consume no token. New daemon setup rows SHALL persist the
+  durable setup quota key (the same CIDR primary limiter key) and enforce a bounded
+  count of unexpired, unclaimed rows for that key (default maximum 3 per durable
+  setup quota key in 0.1.0). The transaction SHALL acquire
+  `pg_advisory_xact_lock(hashtextextended(client_network_key::text, 0))` before
+  serializing count-and-insert for one CIDR key; daemon label alone SHALL never
+  be a quota key. Pre-existing null-key rows retain claim/expiry behavior but are
+  not counted for new keyed quotas. Rate-limited or quota-rejected requests SHALL
+  create no protected resource. JSON extractor failures for setup requests
+  (including malformed JSON, missing fields, wrong types, missing content type,
+  or unsupported content type) SHALL return HTTP 400 with `{ "error": "bad_request" }`
+  before client identity/limiter evaluation and SHALL create no setup row.
 
 #### Scenario: Auth and setup buckets are isolated
 
@@ -160,15 +172,21 @@ code, setup token, daemon credential, or raw exception.
 
 ### Requirement: Public protection is observable without secrets
 
-The server SHALL record abuse-control endpoint, allowed/rejected outcome, and
-coarse limiter category metrics or structured events. Abuse-control telemetry
-SHALL NOT contain verification codes, setup tokens, daemon credentials, raw
-forwarding headers, raw email addresses, full labels, or unnecessary raw
-resource identifiers.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-An explicitly configured CodeDelivery sink such as LogCodeDelivery is a
-separate verification-code delivery boundary and is not abuse-control
-telemetry; existing development/self-hosted delivery behavior remains intact.
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The server SHALL record abuse-control endpoint, allowed/rejected outcome, and
+  coarse limiter category metrics or structured events. Abuse-control telemetry
+  SHALL NOT contain verification codes, setup tokens, daemon credentials, raw
+  forwarding headers, raw email addresses, full labels, or unnecessary raw
+  resource identifiers.
+
+  An explicitly configured CodeDelivery sink such as LogCodeDelivery is a
+  separate verification-code delivery boundary and is not abuse-control
+  telemetry; existing development/self-hosted delivery behavior remains intact.
 
 #### Scenario: Rejection telemetry is redacted
 

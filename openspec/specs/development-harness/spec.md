@@ -57,13 +57,7 @@ statuses remain active
 
 ### Requirement: Hook policy through prek
 
-Git hooks SHALL be managed by prek using `.pre-commit-config.yaml`. Pre-commit
-SHALL stay fast (hygiene and formatting only). Strict OpenSpec validation SHALL
-run through the shared validation entrypoint, pre-push gate, CI, and act parity;
-it need not run as a file-mutating pre-commit hook. Pre-push SHALL invoke one
-reusable script running the native gate plus act-based GitHub Actions parity,
-with a documented escape hatch. Commit messages SHALL be validated by a shared
-script usable by both the hook and CI.
+Prek SHALL manage Git hooks via `.pre-commit-config.yaml`; pre-commit SHALL run only fast hygiene and formatting. Strict OpenSpec validation SHALL use the shared entrypoint in pre-push, CI, and act parity, not as a mutating pre-commit hook. One reusable pre-push script SHALL run the native gate and act-based GitHub Actions parity with a documented escape hatch. A shared commit-message script SHALL be used by both hook and CI.
 
 #### Scenario: Non-conventional subject is rejected at commit time
 
@@ -155,3 +149,26 @@ validation SHALL reject obvious validation-only crate names under `crates/`.
 - **WHEN** a crate named with `-archtests`, `-architecture-tests`,
   `-integration-tests`, `-e2e-tests`, or `-smoke-tests` is added under `crates/`
 - **THEN** the architecture test fails with the repository-layout violation
+
+### Requirement: AI-assisted documentation workflows isolate publishing credentials
+
+The OpenWiki update workflow MUST NOT persist checkout credentials in repository configuration while model-facing tools can read repository files. The workflow MUST NOT pass its GitHub publishing token to the OpenWiki process through environment variables or files. The pull-request publishing action MUST receive its token explicitly through that action's token input.
+
+#### Scenario: Model reads repository without checkout credential
+
+- **WHEN** the OpenWiki model-facing process can read repository files, including `.git/config`
+- **THEN** checkout credentials are not persisted in `.git/config` and the OpenWiki process receives no GitHub publishing token through its environment
+
+#### Scenario: Pull-request action remains authenticated
+
+- **WHEN** the workflow reaches the pull-request publishing action
+- **THEN** that action receives an explicit token input with the permissions needed to create or update the workflow's pull request
+
+### Requirement: AI-assisted documentation workflows use locked dependencies
+
+The OpenWiki update workflow MUST install OpenWiki and its Mermaid/jsdom helper tools from committed npm package metadata and lockfile using `npm ci`. It MUST NOT use a global or other unlocked npm install. The workflow MUST invoke the repository-local OpenWiki binary so execution uses the locked installation.
+
+#### Scenario: Workflow installs and runs locked tools
+
+- **WHEN** the workflow installs tools and runs OpenWiki
+- **THEN** it uses `npm ci --prefix .github/openwiki-tools` with the committed lockfile, then invokes `.github/openwiki-tools/node_modules/.bin/openwiki` from the repository root

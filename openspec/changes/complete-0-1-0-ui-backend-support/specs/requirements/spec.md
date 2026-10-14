@@ -4,14 +4,7 @@
 
 ### Requirement: Queryable list with deterministic ordering
 
-The system SHALL expose listing with search over text fields, filtering by
-status and creator, and sorting by updated time — sufficient for board and list
-views without client-side full scans. It SHALL also support the additive
-`sort=board` option, which orders records by canonical lifecycle status and
-persisted presentation rank. Existing default and updated-time sort behavior
-SHALL remain unchanged. Board ordering SHALL use the status order Draft,
-Discussing, Ready, Accepted, Rejected, then rank ascending; equal or missing
-ranks SHALL use deterministic creation-time and requirement-id tie-breakers.
+The API SHALL support text search, status/creator filters, and updated-time sorting without client scans, preserving existing default and updated-sort behavior. Add `sort=board`, ordered by lifecycle status (Draft, Discussing, Ready, Accepted, Rejected) then persisted rank; equal or missing ranks SHALL use creation time and requirement ID as deterministic tie-breakers.
 
 #### Scenario: Board feeds itself from the API
 
@@ -27,7 +20,7 @@ ranks SHALL use deterministic creation-time and requirement-id tie-breakers.
 
 ### Requirement: Board position is durable presentation state
 
-The system SHALL persist requirement card order separately from the Requirement domain aggregate and SHALL provide a valid position for every requirement in its current lifecycle column. Creating a requirement or applying an existing legal lifecycle transition SHALL place the card at the end of its destination column unless a subsequent reorder positions it elsewhere. A board-order change SHALL NOT change lifecycle status, structured content, revision, state_version, readiness assessment validity, or human-review evidence.
+The system SHALL persist card order as presentation state separate from the Requirement aggregate and maintain a valid position per card and lifecycle column. Creation and legal lifecycle transitions SHALL place cards at the destination-column end; reorders SHALL NOT change lifecycle status, content, revision, state_version, readiness validity, or human-review evidence.
 
 #### Scenario: Reordering leaves Requirement identity unchanged
 

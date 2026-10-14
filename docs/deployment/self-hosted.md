@@ -56,10 +56,11 @@ Create an empty database and dedicated database owner with schema DDL privileges
 then set `DATABASE_URL`. Normal server startup automatically applies pending
 checked-in SeaORM migrations before app construction or listener binding and
 verifies the resulting head. The optional packaged `north-server migrate`
-command uses the same guarded path. Preflight rejects unpublished SQLx migration
-history and partial North schemas before changing them. Back up any needed data,
-then manually recreate the disposable database. North never drops or resets a
-database automatically.
+command uses the same guarded path. Preflight rejects unpublished SQLx history,
+unregistered SeaORM versions, history without the consolidated-baseline marker,
+and partial schemas before issuing migration DDL. Back up any needed data, then
+manually recreate the disposable database. North never drops or resets one
+automatically.
 
 ```bash
 export DATABASE_URL='postgres://north:CHANGE_ME@127.0.0.1:5432/north'
@@ -74,7 +75,8 @@ same transaction-scoped PostgreSQL advisory lock, so concurrent migration work
 serializes. The server role needs DDL privileges for pending migrations. This
 lock serializes migration runners only; North still supports one server instance
 and does not provide multi-instance ownership. First 0.1.0 use requires an empty
-baseline database; old pre-release databases are not upgradeable.
+baseline database; old pre-release databases are not upgradeable. The marker
+identifies the consolidated baseline but is not a general schema fingerprint.
 
 
 SeaORM's PostgreSQL connector defaults to `sslmode=prefer`: it tries TLS, then

@@ -8,16 +8,22 @@ Makes concurrent Requirement mutations and readiness-event ingestion explicit, s
 
 ### Requirement: Existing Requirement mutations require expected state version
 
-Every state-changing operation on an existing Requirement SHALL carry
-`expected_state_version`, including structured edits, human review decisions,
-agent readiness assessment application, request-changes/reopen operations, and
-any future mutation endpoint. `revision` identifies canonical structured content
-and readiness matching; `state_version` identifies mutable Requirement state.
-The server/persistence boundary SHALL compare expected_state_version atomically
-with the current state_version. A mismatch SHALL return a typed conflict,
-normally HTTP `409 Conflict`, with no state, audit, message, assessment, or
-retry side effect. Requirement creation has no expected state version because no
-prior row exists.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Every state-changing operation on an existing Requirement SHALL carry
+  `expected_state_version`, including structured edits, human review decisions,
+  agent readiness assessment application, request-changes/reopen operations, and
+  any future mutation endpoint. `revision` identifies canonical structured content
+  and readiness matching; `state_version` identifies mutable Requirement state.
+  The server/persistence boundary SHALL compare expected_state_version atomically
+  with the current state_version. A mismatch SHALL return a typed conflict,
+  normally HTTP `409 Conflict`, with no state, audit, message, assessment, or
+  retry side effect. Requirement creation has no expected state version because no
+  prior row exists.
 
 #### Scenario: Stale structured edit loses safely
 
@@ -31,20 +37,26 @@ prior row exists.
 
 ### Requirement: Assessment ingest is one atomic durable transaction
 
-For `requirement.assessed`, the server SHALL execute one transaction that
-(1) validates event identity and per-session sequence, (2) deduplicates the
-event id, (3) loads and locks or atomically claims the current Requirement,
-(4) validates the event's `requirement_revision`, (5) runs domain readiness
-gates, (6) persists immutable assessment evidence with its accepted/rejected
-validation result and accepted promotion `state_version`, (7) applies any
-valid lifecycle transition, and (8) persists the resulting Requirement state.
-A well-formed stale or invalid event commits its rejection/dedupe evidence
-without changing Requirement state. Identity or sequence conflicts are
-protocol errors with no evidence or ACK. The transaction SHALL commit before
-the server acknowledges the daemon event. A rolled-back transaction SHALL
-leave no dedupe marker, evidence, transition, or acknowledgement. A duplicate
-of a committed event SHALL produce an acknowledgement without repeating steps
-5–8.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  For `requirement.assessed`, the server SHALL execute one transaction that
+  (1) validates event identity and per-session sequence, (2) deduplicates the
+  event id, (3) loads and locks or atomically claims the current Requirement,
+  (4) validates the event's `requirement_revision`, (5) runs domain readiness
+  gates, (6) persists immutable assessment evidence with its accepted/rejected
+  validation result and accepted promotion `state_version`, (7) applies any
+  valid lifecycle transition, and (8) persists the resulting Requirement state.
+  A well-formed stale or invalid event commits its rejection/dedupe evidence
+  without changing Requirement state. Identity or sequence conflicts are
+  protocol errors with no evidence or ACK. The transaction SHALL commit before
+  the server acknowledges the daemon event. A rolled-back transaction SHALL
+  leave no dedupe marker, evidence, transition, or acknowledgement. A duplicate
+  of a committed event SHALL produce an acknowledgement without repeating steps
+  5–8.
 
 #### Scenario: Valid assessment commits before ACK
 

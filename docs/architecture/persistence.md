@@ -21,7 +21,7 @@ versioned Rust migrations, with PostgreSQL-specific DDL kept in those migrations
 | Durable business | users, roles, requirements (+revisions and board positions), readiness assessments, conversations, messages, configured repositories, human review decisions, personal Requirement workspace preferences | never TTL-deleted; deletion is a product decision |
 | Durable coordination | daemon registrations/setup requests, `session.daemon_id`, session execution state, execution attempts, server command outbox, event dedupe/rejection records, sequence watermarks, keyed setup quota | transactionally maintained; command payloads may be compacted only at the protocol's acknowledged sequence boundary |
 
-The compiled SeaORM baseline migration, `crates/north-persistence/src/m0001_initial_schema.rs`, creates the unpublished base schema from an empty database: requirements, conversations and readiness evidence; daemon/session and durable delivery state; repositories, retry attempts, retention metadata, setup quota keys, and keyed OTP storage. The append-only `m0002_requirement_board_positions` migration adds durable board ranks and backfills existing Requirements by status, creation time, and id; on fresh installs its backfill has no pre-existing rows. The append-only `m0003_user_requirement_preferences` migration adds constrained personal Requirement workspace defaults; rollback never drops the table or saved preferences. Pre-0.1.0 SQLx-stamped or partial North databases are unsupported and the migration command rejects them with manual-recreation guidance. North never resets them automatically. After publication, applied migrations are immutable and later versions append in Rust.
+The compiled SeaORM baseline source, `crates/north-persistence/src/initial_schema.rs`, creates the complete 0.1.0 schema from an empty database, including durable board ranks and personal Requirement workspace preferences. Its recorded migration ID remains `m0001_initial_schema`; no intermediate pre-0.1.0 schema is supported, and baseline installation performs no historical board-rank backfill. The baseline stamps `seaql_migrations` with `north-schema:0.1.0-baseline-v1`. Migration preflight rejects SQLx history, unregistered SeaORM versions, non-empty history without that marker, and existing objects beside an empty or absent history before applying DDL; verification also rejects unsupported SeaORM history. The marker proves baseline provenance, not arbitrary out-of-band schema compatibility. Back up and manually recreate unsupported databases; North never resets them. After publication, keep the baseline immutable and append later migrations using descriptive, unnumbered Rust source filenames.
 
 
 ## Personal Requirement workspace preferences
@@ -32,12 +32,7 @@ Authenticated GET/PUT derives `user_id` from the validated session. Every role m
 
 ## Requirement board positions
 
-`requirement_board_positions` stores one durable sparse rank per Requirement.
-Migration `m0002_requirement_board_positions` creates the table and backfills
-existing rows within each status by `(created_at, id)`; new rows and successful
-status transitions append to their destination column. Board reads sort by the
-canonical status order, then rank, then deterministic creation/id fallbacks.
-Other collection sorts remain unchanged.
+`requirement_board_positions` stores one durable sparse rank per Requirement and is created by the initial baseline without backfill; clean installs have no existing Requirements to rank. New rows and successful status transitions append to their destination column. Board reads sort by the canonical status order, then rank, then deterministic creation/id fallbacks. Other collection sorts remain unchanged.
 
 `POST /requirements/{id}/reorder` checks `expected_state_version` and requires
 immediate same-column predecessor/successor anchors; stale, cross-column, or

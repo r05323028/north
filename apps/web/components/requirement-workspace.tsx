@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { SegmentedControl } from "@/components/ui/tabs";
@@ -33,6 +33,8 @@ export function RequirementWorkspace() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
+  const editGeneration = useRef(0);
+  const saveInFlight = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -58,6 +60,9 @@ export function RequirementWorkspace() {
   }, []);
 
   const saveAsDefault = async () => {
+    if (saveInFlight.current) return;
+    saveInFlight.current = true;
+    const saveGeneration = editGeneration.current;
     setSaving(true);
     setSaveError(null);
     setSaved(false);
@@ -70,15 +75,18 @@ export function RequirementWorkspace() {
         list_created_by: listPreferences.creator.trim() || null,
         list_sort: listPreferences.sort,
       });
-      setListPreferences({
-        status: preferences.list_status ?? "",
-        creator: preferences.list_created_by ?? "",
-        sort: preferences.list_sort,
-      });
-      setSaved(true);
+      if (editGeneration.current === saveGeneration) {
+        setListPreferences({
+          status: preferences.list_status ?? "",
+          creator: preferences.list_created_by ?? "",
+          sort: preferences.list_sort,
+        });
+        setSaved(true);
+      }
     } catch {
       setSaveError("無法儲存個人預設。");
     } finally {
+      saveInFlight.current = false;
       setSaving(false);
     }
   };
@@ -104,7 +112,12 @@ export function RequirementWorkspace() {
               ]}
               value={view === "create" ? "board" : view}
               onValueChangeAction={(value) => {
-                if (value === "board" || value === "list") setView(value);
+                if (value === "board" || value === "list") {
+                  editGeneration.current += 1;
+                  setSaved(false);
+                  setSaveError(null);
+                  setView(value);
+                }
               }}
             />
             {view !== "create" && (
@@ -151,7 +164,12 @@ export function RequirementWorkspace() {
         {view === "list" && (
           <RequirementList
             onCreateAction={() => setView("create")}
-            onPreferencesChange={setListPreferences}
+            onPreferencesChange={(preferences) => {
+              editGeneration.current += 1;
+              setSaved(false);
+              setSaveError(null);
+              setListPreferences(preferences);
+            }}
             preferences={listPreferences}
           />
         )}

@@ -377,6 +377,21 @@
   flex: 1;
 }
 
+.north-auth-gate {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+  color: var(--muted);
+}
+
+.north-auth-gate p {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 14px 18px;
+}
+
 .north-container {
   width: 100%;
   max-width: 1280px;

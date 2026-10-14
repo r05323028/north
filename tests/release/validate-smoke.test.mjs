@@ -39,7 +39,7 @@ test("OCI server image migrates a fresh Compose database during startup", () => 
   assert.ok(databaseStart >= 0 && stackStart > databaseStart);
   assert.doesNotMatch(compose.slice(databaseStart, stackStart), /north-server migrate/);
   assert.ok(compose.includes("SELECT version FROM seaql_migrations"));
-  assert.ok(compose.includes("m0003_user_requirement_preferences"));
+  assert.ok(compose.includes("m0001_initial_schema"));
 });
 
 test("release qualification runs migration checks against extracted server binary", () => {

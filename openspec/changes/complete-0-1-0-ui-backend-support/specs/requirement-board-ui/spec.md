@@ -4,15 +4,7 @@
 
 ### Requirement: Board scope excludes unrelated product features
 
-The board/list change SHALL include only lifecycle board, list search/filter/sort,
-minimal creation, the Board-owned minimal read-only Requirement detail shell,
-detail navigation, live notification refetch, persistent same-column card
-ordering, and drag-and-drop mapped to existing legal lifecycle operations. It
-SHALL not add clarification, runtime status, activity, readiness interaction,
-editing, labels, attachments, advanced prioritization, a generic status-mutation
-API, or unrelated administration. Drag-and-drop SHALL preserve the domain
-lifecycle: Discussing to Ready remains assessment-owned and Accepted remains
-terminal.
+The board/list change SHALL include only lifecycle board, list search/filter/sort, minimal creation, Board-owned minimal read-only Requirement detail/navigation, live notification refetch, persistent same-column ordering, and drags through existing legal lifecycle operations. It SHALL exclude clarification, runtime status, activity, readiness interaction, editing, labels, attachments, advanced prioritization, generic status mutation, and unrelated administration.
 
 #### Scenario: Same-column drop changes presentation order only
 
@@ -22,7 +14,7 @@ terminal.
 #### Scenario: Cross-column drop uses an existing legal operation
 
 - **WHEN** a user drops a card into a different lifecycle column
-- **THEN** the board invokes only the corresponding existing explicit transition operation, and any destination placement uses the same-column reorder operation after the transition succeeds
+- **THEN** the board permits only Draft to Discussing via begin-discussion or Rejected to Discussing via reviewer reopen, using that existing operation before same-column destination reorder; readiness and Ready review decisions remain assessment/human-review owned, and Accepted remains terminal
 
 #### Scenario: Discussing cannot be dragged to Ready
 
@@ -43,25 +35,27 @@ terminal.
 
 ### Requirement: Board ordering uses a narrow canonical API
 
-The board SHALL request the authenticated `GET /requirements?sort=board`
-collection for deterministic lifecycle-column ordering. A same-column reorder
-SHALL use `POST /requirements/{id}/reorder` with `expected_state_version` and
-optional `before_id` and `after_id` neighbors. The neighbor pair SHALL describe
-the card's final insertion point after removing it from the current column;
-null denotes a column boundary. The operation SHALL NOT accept a target status.
-A successful legal lifecycle transition SHALL place the card at the end of its
-destination column, after which a same-column reorder MAY place it among its
-new neighbors.
+The board SHALL read the authenticated `GET /requirements?sort=board` collection and reorder within a column via `POST /requirements/{id}/reorder` with `expected_state_version` and optional `before_id`/`after_id` anchors. Anchors SHALL identify the final insertion point after removal; null denotes a column boundary. Reorder SHALL NOT accept a target status. A successful legal transition SHALL append the card to its destination column before a later same-column reorder.
 
 #### Scenario: Explicit transition mapping remains authoritative
 
-- **WHEN** a drag targets Draft to Discussing, Ready to Accepted, Ready to Rejected, Ready to Discussing, or Rejected to Discussing
-- **THEN** the board uses respectively begin-discussion, accept, reject, request-changes with required feedback, or reopen; role, readiness, and expected-version guards remain enforced by those existing operations
+- **WHEN** a drag targets Draft to Discussing or Rejected to Discussing
+- **THEN** the board uses respectively begin-discussion or reviewer reopen; role and expected-version guards remain enforced by those existing operations; Ready review decisions remain in the requirement-review-panel because Board drag supplies neither review packet nor required feedback
 
 #### Scenario: Reorder rejects lifecycle mutation
 
 - **WHEN** a reorder request attempts to name or imply a destination lifecycle status
 - **THEN** the server rejects it because the reorder API changes presentation order only
+
+#### Scenario: Failed reorder restores canonical board state
+
+- **WHEN** reorder or an allowed transition fails, including a stale-version conflict
+- **THEN** the board displays a clear error, refetches `GET /requirements?sort=board`, and renders only server-confirmed ordering and lifecycle state
+
+#### Scenario: Unsupported drop is rejected without mutation
+
+- **WHEN** a card is dropped across columns other than Draft to Discussing or Rejected to Discussing
+- **THEN** the board sends no lifecycle mutation and refreshes canonical board data
 
 ### Requirement: Board updates use existing HTTP and SSE repair path
 

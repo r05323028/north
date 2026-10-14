@@ -9,6 +9,9 @@ const { pathname } = vi.hoisted(() => ({ pathname: { value: "/" } }));
 vi.mock("next/navigation", () => ({
   usePathname: () => pathname.value,
 }));
+vi.mock("@/lib/api/current-user", () => ({
+  getCurrentUser: async () => ({ id: "user-1", email: "test@example.test", role: "Requester" }),
+}));
 vi.mock("next/link", () => ({
   default: ({
     children,
@@ -60,11 +63,9 @@ describe("NorthShell", () => {
           <p>content</p>
         </NorthShell>,
       );
-      expect(html).toContain("主導覽");
-      expect(html).toContain("content");
-      expect(html).toContain("執行狀態");
-      expect(html).toContain("儲存庫");
-      expect(html).toContain("成員");
+      expect(html).toContain("正在確認登入狀態");
+      expect(html).not.toContain("content");
+      expect(html).not.toContain("主導覽");
     }
 
     for (const value of ["/login", "/signup"]) {

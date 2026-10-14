@@ -15,6 +15,7 @@
     "test:e2e:release": "playwright test --config=playwright.release.config.ts"
   },
   "dependencies": {
+    "@dnd-kit/react": "0.5.0",
     "@radix-ui/react-slot": "^1.3.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

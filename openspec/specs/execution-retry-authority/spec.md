@@ -8,33 +8,18 @@ Separates daemon transport recovery from server execution policy so attempt budg
 
 ### Requirement: Server owns execution state and retry policy
 
-For every logical clarification run, the server SHALL authoritatively persist
-execution state (`Idle`, `Running`, `Retrying`, or `Failed`), attempt count,
-snapshotted retry limit, due retry time, and a bounded safe failure reason.
-Existing successful `Completed` persistence remains the terminal success value.
-The server SHALL decide whether to issue `session.resume` and when execution
-becomes terminal `Failed`; the daemon SHALL never make that decision.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-`max_attempts` is total server-created execution-attempt commands, including the
-initial `session.start`. Attempt count starts at zero before assignment and
-increments exactly once in the same transaction that commits a new durable
-`session.start` or `session.resume` command. It SHALL survive server and daemon
-restarts and SHALL NOT increment for reconnect, command/event replay, heartbeat,
-reconciliation, ACK retry, cancellation, or local runtime recovery.
+#### Scenario: Complete contract preserves all requirement clauses
 
-A known failed attempt with remaining budget, a non-cancelled run, and a valid
-pinned owner SHALL atomically close/clear the current attempt, set the logical
-run to `Retrying`, persist `next_retry_at`, keep the clarification run
-non-terminal and slot-occupying, and later create one explicit `session.resume`.
-Due scheduling SHALL require no current attempt. A cancellation request or
-invalid owner SHALL follow terminal cancellation/`owner_unavailable` policy
-instead of scheduling a resume. Exhaustion SHALL set logical execution to
-`Failed`, release the slot, and leave
-Requirement lifecycle/content/revision/readiness unchanged. Once
-`execution_outcome_unknown` terminalizes a logical run, that run SHALL never
-receive `session.resume`; later execution requires a new logical run, new
-`run_id`/protocol `session_id`, current context, a new `session.start`, and
-normal sequential-slot/state-version rules.
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  For each logical run, server SHALL persist authoritative state (`Idle`, `Running`, `Retrying`, `Failed`; `Completed` remains success), attempt count, snapshotted `max_attempts`, due time, and safe failure reason. Only server policy may create `session.resume` after known failure, remaining budget, no cancellation, and valid pinned owner; daemon facts are inputs. Exhausted or unknown-outcome runs SHALL NOT resume; execution failure leaves Requirement lifecycle/content/revision/readiness unchanged.
+
+#### Scenario: Attempt budget counts committed commands only
+
+- **WHEN** the server commits a new durable `session.start` or `session.resume`
+- **THEN** `max_attempts` counts total server-created execution-attempt commands including the initial start; count starts at zero before assignment and increments once in the same transaction. It survives server/daemon restarts and never increments for reconnect, command/event replay, heartbeat, reconciliation, ACK retry, cancellation, or local runtime recovery.
 
 #### Scenario: Initial command counts once
 
@@ -45,14 +30,18 @@ normal sequential-slot/state-version rules.
 #### Scenario: Known failure remains in the slot
 
 - **WHEN** a current attempt emits a well-formed known failure and attempts remain
-- **THEN** the server commits `Retrying` plus a persisted due time and safe
-  reason, keeps phase `active`, and does not create a second run
+- **THEN** the server atomically closes the current attempt and commits `Retrying` plus a persisted due time and safe reason, keeps phase `active`, and does not create a second run
 
 #### Scenario: Exhaustion is server-decided
 
 - **WHEN** a known failure leaves no attempt budget
 - **THEN** the server commits terminal `Failed`, releases the clarification slot,
   and leaves Requirement status, revision, readiness, and state version unchanged
+
+#### Scenario: Unknown outcome starts only a new logical run
+
+- **WHEN** `execution_outcome_unknown` terminalizes a run
+- **THEN** it never receives `session.resume`; later execution requires a new logical run, new `run_id`/protocol `session_id`, current context, and a new `session.start` under normal sequential-slot/state-version rules
 
 #### Scenario: Unknown outcome is not resubmitted
 
@@ -75,17 +64,7 @@ normal sequential-slot/state-version rules.
 
 ### Requirement: Daemon owns only transport and local recovery mechanics
 
-The daemon MAY reconnect its WebSocket with backoff, replay buffered events,
-reattach a local runtime transport when instructed, and report recoverability or
-failure facts. `session.failed.recoverable` describes only daemon-local ability
-to resume/reattach the existing operation; either value remains an input to
-server policy, not authority. `session.failed` is an execution-attempt fact.
-The daemon MUST NOT own a business retry budget, create a business retry, decide
-permanent execution failure, migrate a pinned run, or mutate Requirement
-lifecycle state. For `execution_outcome_unknown`, automatic daemon resubmission
-is forbidden and the terminal logical run can never receive `session.resume`;
-any later attempt uses a new logical run and explicit `session.start` with a new
-command/run identity.
+The daemon MAY reconnect, replay buffered events, reattach only when instructed, and report local recoverability/failure facts; `session.failed` is an execution-attempt fact. Only server policy decides retries. It SHALL NOT own a budget, create retries, decide permanent failure, migrate pinned runs, or mutate Requirement state. For `execution_outcome_unknown`, never resubmit; later execution requires a new logical run, `session_id`/command identity, and explicit `session.start`.
 
 #### Scenario: Reconnect is delivery only
 
@@ -131,19 +110,7 @@ conflicts retain protocol-error behavior.
 
 ### Requirement: Retry scheduling survives restart and concurrency
 
-The server SHALL persist `next_retry_at` and discover due `Retrying` runs from
-the database after startup and during bounded polling/wakeup. A due worker SHALL
-lock/claim the session, verify cancellation/state/budget and
-`current_attempt_id IS NULL`, then atomically create one pinned `session.resume`,
-attempt row, new current-attempt identity, and attempt-count update. Database
-uniqueness and row locking SHALL make concurrent workers and stale timers
-harmless.
-
-Owner validity is separate from owner liveness. A valid but offline pinned owner
-MAY receive a durable outbox command for reconnect delivery; reconnect only
-delivers it. An invalid/revoked owner cannot receive new retry work, is never
-replaced by automatic migration, and follows terminal `owner_unavailable`
-policy.
+Server SHALL persist `next_retry_at` and discover due `Retrying` runs after startup and by bounded poll/wakeup. A due worker SHALL verify cancellation/state/budget and no current attempt, then atomically create one pinned `session.resume`, attempt row/identity, and count increment; locking and uniqueness make races harmless.
 
 #### Scenario: Restart finds due retry
 
@@ -173,13 +140,7 @@ policy.
 
 ### Requirement: Cancellation prevents future execution attempts
 
-Cancellation SHALL remain run-scoped and explicit. For a running attempt it
-shall persist intent and use/reuse one pinned `session.cancel`, with no later
-retry after the terminal fact. For a retrying run with no current resume command,
-cancellation shall atomically clear due work and terminalize the run as a safe
-cancelled failure result. Waiting timers, stale retry workers, unavailable
-owners, and reconnects SHALL not create or resurrect a resume. Cancellation
-shall not affect a newer run with another `run_id`.
+Cancellation SHALL be run-scoped. For a running attempt, persist intent and use/reuse one pinned `session.cancel`; after its terminal fact, no retry. For a retrying run, atomically clear due work and terminalize cancelled failure. Timers, stale workers, unavailable owners, and reconnects SHALL NOT create/resurrect resume. Cancellation SHALL NOT affect a newer `run_id`.
 
 #### Scenario: Cancel while waiting for due time
 
@@ -196,17 +157,7 @@ shall not affect a newer run with another `run_id`.
 
 ### Requirement: Public clarification projection exposes safe retry state
 
-The existing `/requirements/{id}/session` read SHALL remain the only public run
-projection. It SHALL retain `phase` values `awaiting_assignment`, `active`, and
-`terminal`, and extend coarse `status` with `retrying` and `failed` only as
-server projections. A policy-selected retry maps to
-`phase=active,status=retrying`; exhausted, unknown-outcome, owner-unavailable,
-or terminal cancellation maps to `phase=terminal,status=failed`. The projection
-MAY include non-sensitive `attempt_count`, `next_retry_at`, and bounded safe
-`failure_reason`; it SHALL NOT expose retry limits, remaining budget, daemon or
-provider details, raw runtime errors, credentials, or operation IDs. Browser
-clients SHALL not infer retry truth from transcript/activity and SHALL not
-automatically resubmit.
+Only `/requirements/{id}/session` SHALL project runs; phases are `awaiting_assignment/active/terminal`, statuses add `retrying/failed`. Retry maps active/retrying; exhaustion, unknown outcome, owner-unavailable, or cancellation maps terminal/failed. It MAY expose safe attempt count, due time, and bounded safe failure reason, but SHALL hide limits/budget, daemon/provider details, raw errors, credentials, and operation IDs. Browsers SHALL use it, not transcript/activity, and never auto-resubmit.
 
 #### Scenario: Retry is visibly active
 

@@ -26,7 +26,7 @@ const initialState: RequirementCollectionState = {
 
 export function useRequirementCollection(
   query: RequirementQuery = {},
-): RequirementCollectionState {
+): RequirementCollectionState & { refresh: () => void } {
   const path = requirementsUrl(query);
   const pathRef = useRef(path);
   pathRef.current = path;
@@ -92,5 +92,5 @@ export function useRequirementCollection(
     };
   }, [fetchCollection]);
 
-  return state;
+  return { ...state, refresh: () => void fetchCollection(false) };
 }

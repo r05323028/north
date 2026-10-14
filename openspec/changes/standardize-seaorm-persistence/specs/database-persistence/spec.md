@@ -17,7 +17,7 @@ Production server persistence SHALL use SeaORM connections, entity models, and t
 
 ### Requirement: Schema changes use guarded versioned migrations
 
-The supported PostgreSQL schema SHALL be created and evolved through ordered, reviewed SeaORM migrations. Normal server startup SHALL run the shared migration path, apply pending checked-in migrations, verify the resulting head, and commit before binding its listener. The packaged `north-server migrate` command SHALL remain available and use that same path. Both entry points SHALL serialize migration work through the same PostgreSQL transaction-scoped advisory lock. Preflight, migration execution, and verification SHALL use the locked transaction. Entity-first schema synchronization, automatic reset, and schema dropping SHALL remain disabled. Additive changes, renames, backfills, and destructive changes SHALL use explicit versioned migrations.
+PostgreSQL schema creation and evolution SHALL use ordered, reviewed SeaORM migrations. Startup and the packaged `north-server migrate` command SHALL share one path and transaction-scoped advisory lock; preflight, migration, and head verification SHALL run in that locked transaction, which commits before startup binds. Entity-first sync, automatic reset, and schema drops SHALL remain disabled; additions, renames, backfills, and destructive changes SHALL use explicit versioned migrations.
 
 #### Scenario: Fresh database is migrated before service
 

@@ -8,14 +8,20 @@ Provides isolated, disposable clarification workspaces and durable repository id
 
 ### Requirement: Clarification workspaces are session-isolated
 
-A reusable daemon repository cache SHALL never be a runtime working tree. Each
-clarification execution SHALL receive a unique disposable checkout scoped to
-session/task and repository identity. Two concurrent sessions inspecting the
-same repository SHALL use different mutable directories. Runtime file changes
-MUST remain inside that disposable checkout; a contaminated checkout SHALL be
-discarded and reported. North 0.1.0 SHALL describe this as process-level
-protection, not kernel or sandbox isolation, and SHALL not require Git
-worktrees.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  A reusable daemon repository cache SHALL never be a runtime working tree. Each
+  clarification execution SHALL receive a unique disposable checkout scoped to
+  session/task and repository identity. Two concurrent sessions inspecting the
+  same repository SHALL use different mutable directories. Runtime file changes
+  MUST remain inside that disposable checkout; a contaminated checkout SHALL be
+  discarded and reported. North 0.1.0 SHALL describe this as process-level
+  protection, not kernel or sandbox isolation, and SHALL not require Git
+  worktrees.
 
 #### Scenario: Concurrent inspections do not share files
 
@@ -29,18 +35,24 @@ worktrees.
 
 ### Requirement: Repository identity is soft-disabled and credential-free
 
-Configured repositories SHALL retain their durable row and identity after a
-normal Remove operation by setting `disabled_at`; hard deletion of a referenced
-repository SHALL not be the normal 0.1.0 path. New inspections SHALL exclude
-disabled repositories. Every readiness citation SHALL resolve to an existing
-durable configured-repository row; an unknown identity is rejected before
-accepted evidence or Requirement promotion. Evidence from an in-flight
-inspection may remain valid after disable when the retained row exists and the
-citation was present in the server-assembled session context or otherwise
-explicitly inspected under that run. Readiness owns evidence acceptability;
-configured repositories own identity/lifecycle. Server-side repository
-configuration SHALL contain no Git credentials, tokens, keys, or passwords;
-credentials remain in the daemon host's Git environment.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Configured repositories SHALL retain their durable row and identity after a
+  normal Remove operation by setting `disabled_at`; hard deletion of a referenced
+  repository SHALL not be the normal 0.1.0 path. New inspections SHALL exclude
+  disabled repositories. Every readiness citation SHALL resolve to an existing
+  durable configured-repository row; an unknown identity is rejected before
+  accepted evidence or Requirement promotion. Evidence from an in-flight
+  inspection may remain valid after disable when the retained row exists and the
+  citation was present in the server-assembled session context or otherwise
+  explicitly inspected under that run. Readiness owns evidence acceptability;
+  configured repositories own identity/lifecycle. Server-side repository
+  configuration SHALL contain no Git credentials, tokens, keys, or passwords;
+  credentials remain in the daemon host's Git environment.
 
 #### Scenario: Remove preserves assessment history
 

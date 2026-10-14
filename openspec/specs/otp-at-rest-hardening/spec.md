@@ -8,16 +8,22 @@ Protects short-lived verification codes from database-only offline guessing with
 
 ### Requirement: Verification-code digest construction
 
-For every issued verification code, the server SHALL store a raw 32-byte HMAC-SHA-256 output under the existing verification-code digest field. The HMAC key SHALL be the active server-held OTP key. The MAC message SHALL be the following exact byte sequence, in this order:
+The system SHALL satisfy the complete normative contract in this scenario.
 
-1. the ASCII bytes `north/otp/verification-code/v1`, followed by one NUL byte (`0x00`);
-2. a four-byte unsigned big-endian email byte length;
-3. the UTF-8 bytes of the canonical email. The HTTP/authentication boundary SHALL apply the existing `normalize_email` contract—trim surrounding Unicode whitespace with `str::trim`, then ASCII lowercase, with no Unicode normalization—before passing the value into persistence; the HMAC helper SHALL consume that value without additional normalization;
-4. the verification row's positive `BIGSERIAL` `id` encoded as an eight-byte unsigned big-endian integer;
-5. a four-byte unsigned big-endian code byte length; and
-6. the UTF-8 bytes of the code, with no trimming or other transformation. Normal endpoint codes remain six ASCII digits.
+#### Scenario: Complete contract preserves all requirement clauses
 
-Length prefixes SHALL be included exactly as stated; ambiguous concatenation and reuse across OTP purposes are forbidden. The stored output SHALL remain binary `BYTEA`, not hex or base64. Verification SHALL recompute the MAC with the row's email and ID and compare fixed-length outputs with a constant-time equality operation.
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  For every issued verification code, the server SHALL store a raw 32-byte HMAC-SHA-256 output under the existing verification-code digest field. The HMAC key SHALL be the active server-held OTP key. The MAC message SHALL be the following exact byte sequence, in this order:
+
+  1. the ASCII bytes `north/otp/verification-code/v1`, followed by one NUL byte (`0x00`);
+  2. a four-byte unsigned big-endian email byte length;
+  3. the UTF-8 bytes of the canonical email. The HTTP/authentication boundary SHALL apply the existing `normalize_email` contract—trim surrounding Unicode whitespace with `str::trim`, then ASCII lowercase, with no Unicode normalization—before passing the value into persistence; the HMAC helper SHALL consume that value without additional normalization;
+  4. the verification row's positive `BIGSERIAL` `id` encoded as an eight-byte unsigned big-endian integer;
+  5. a four-byte unsigned big-endian code byte length; and
+  6. the UTF-8 bytes of the code, with no trimming or other transformation. Normal endpoint codes remain six ASCII digits.
+
+  Length prefixes SHALL be included exactly as stated; ambiguous concatenation and reuse across OTP purposes are forbidden. The stored output SHALL remain binary `BYTEA`, not hex or base64. Verification SHALL recompute the MAC with the row's email and ID and compare fixed-length outputs with a constant-time equality operation.
 
 #### Scenario: Issuance context prevents reuse
 
@@ -36,7 +42,13 @@ Length prefixes SHALL be included exactly as stated; ambiguous concatenation and
 
 ### Requirement: OTP key configuration fails closed
 
-The server SHALL load the active OTP key from `NORTH_OTP_HMAC_KEY` before serving authentication routes. The value SHALL be strict ASCII hexadecimal representing exactly 32 bytes (at least 256 bits); missing values, odd-length values, non-hex values, or values shorter than 64 hex characters SHALL be invalid. The key value SHALL never be logged, returned, or included in errors, telemetry, or traces. Production and development startup SHALL fail closed before accepting requests when the variable is missing or invalid. There SHALL be no implicit development key, unkeyed fallback, or key derivation from `DATABASE_URL` or another application value. Tests SHALL inject an explicit deterministic test key through the key/configuration constructor or an explicitly configured test environment.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The server SHALL load the active OTP key from `NORTH_OTP_HMAC_KEY` before serving authentication routes. The value SHALL be strict ASCII hexadecimal representing exactly 32 bytes (at least 256 bits); missing values, odd-length values, non-hex values, or values shorter than 64 hex characters SHALL be invalid. The key value SHALL never be logged, returned, or included in errors, telemetry, or traces. Production and development startup SHALL fail closed before accepting requests when the variable is missing or invalid. There SHALL be no implicit development key, unkeyed fallback, or key derivation from `DATABASE_URL` or another application value. Tests SHALL inject an explicit deterministic test key through the key/configuration constructor or an explicitly configured test environment.
 
 #### Scenario: Missing or invalid server key stops startup
 
@@ -50,12 +62,14 @@ The server SHALL load the active OTP key from `NORTH_OTP_HMAC_KEY` before servin
 
 ### Requirement: Legacy records and key rotation are fail-closed
 
-The deployment migration SHALL invalidate every existing active verification row produced by the legacy unkeyed SHA-256 scheme before the new authentication path accepts traffic. The new implementation SHALL never attempt legacy SHA-256 verification. North SHALL use one active key and SHALL accept no previous key; replacing `NORTH_OTP_HMAC_KEY` therefore invalidates all outstanding rows made with the previous key. Those rows may remain for normal expiry/retention but SHALL never create a session. New codes issued with the new key remain usable under normal semantics.
+Legacy OTP rows SHALL be invalidated before authentication traffic; verification SHALL never use legacy digests or previous keys.
 
 #### Scenario: Legacy active code is rejected after migration
 
 - **WHEN** an OTP row created before the HMAC deployment is submitted after the migration
 - **THEN** the legacy code is rejected, no session is created, and no legacy digest fallback runs
+- **AND** the complete requirement-level contract is:
+  The deployment migration SHALL invalidate every existing active verification row produced by the legacy unkeyed SHA-256 scheme before the new authentication path accepts traffic. The new implementation SHALL never attempt legacy SHA-256 verification. North SHALL use one active key and SHALL accept no previous key; replacing `NORTH_OTP_HMAC_KEY` therefore invalidates all outstanding rows made with the previous key. Those rows may remain for normal expiry/retention but SHALL never create a session. New codes issued with the new key remain usable under normal semantics.
 
 #### Scenario: Expired legacy record is preserved but unverifiable
 
@@ -74,7 +88,13 @@ The deployment migration SHALL invalidate every existing active verification row
 
 ### Requirement: OTP security boundary preserves authentication semantics
 
-This capability SHALL apply only to verification-code issuance and verification. It SHALL NOT change session-token, daemon setup-token, daemon-credential, API-credential, password-like, protocol-digest, or unrelated hashing behavior. Plaintext OTP values SHALL never be persisted. The OTP key and computed MAC SHALL never appear in application logs, errors, abuse telemetry, or traces. The existing configured CodeDelivery sink is the sole intentional recipient of plaintext delivery data; its development `LogCodeDelivery` output is a separate delivery boundary and remains unchanged by this at-rest capability. Expiry, supersession, cooldown, single-use consumption, transactional failed-attempt limits, and generic verification errors SHALL remain intact.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  This capability SHALL apply only to verification-code issuance and verification. It SHALL NOT change session-token, daemon setup-token, daemon-credential, API-credential, password-like, protocol-digest, or unrelated hashing behavior. Plaintext OTP values SHALL never be persisted. The OTP key and computed MAC SHALL never appear in application logs, errors, abuse telemetry, or traces. The existing configured CodeDelivery sink is the sole intentional recipient of plaintext delivery data; its development `LogCodeDelivery` output is a separate delivery boundary and remains unchanged by this at-rest capability. Expiry, supersession, cooldown, single-use consumption, transactional failed-attempt limits, and generic verification errors SHALL remain intact.
 
 #### Scenario: Database-only reader lacks an efficient verifier
 

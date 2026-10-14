@@ -10,15 +10,7 @@ and reconnect/resume without duplicate effects.
 
 ### Requirement: Envelopes and connection frames have explicit fields
 
-Only `CommandEnvelope` and `EventEnvelope` are delivery envelopes. Every
-`CommandEnvelope` SHALL carry `command_id`, `session_id`,
-`server_command_seq`, `sent_at`, `schema_version`, and one typed command. Every
-`EventEnvelope` SHALL carry `event_id`, `session_id`, `daemon_event_seq`,
-`sent_at`, `schema_version`, and one typed event. Connection/control frames
-SHALL use their own schemas and SHALL NOT be required to carry `session_id`.
-ACK frames may copy the target session and sequence because they identify the
-message being acknowledged; they are not envelopes. `session.resume` is a
-server command only.
+Delivery envelopes SHALL be only `CommandEnvelope` and `EventEnvelope`. Both SHALL carry `session_id`, `sent_at`, and `schema_version`; commands also carry `command_id`, `server_command_seq`, and one typed command; events carry `event_id`, `daemon_event_seq`, and one typed event. Connection/control frames SHALL use distinct schemas and SHALL NOT require `session_id`. ACKs MAY copy target session/sequence but are not envelopes. `session.resume` SHALL be server-command-only.
 
 #### Scenario: Connection frame has no envelope requirement
 
@@ -36,14 +28,7 @@ server command only.
 
 ### Requirement: Command and event identities and sequences have defined scope
 
-`command_id` SHALL be a globally unique opaque identity in the command
-namespace. `event_id` SHALL be a globally unique opaque identity in the event
-namespace. The server outbox and daemon command journal SHALL enforce unique
-`command_id`; the daemon event journal and server event dedupe record SHALL
-enforce unique `event_id`. `server_command_seq` SHALL be unique and monotonic
-within one session in the server-to-daemon direction. `daemon_event_seq` SHALL
-be unique and monotonic within one session in the daemon-to-server direction.
-Both sequences SHALL start at 1 and SHALL be stored with their durable record.
+`command_id` and `event_id` SHALL be globally unique opaque IDs in separate namespaces. Server outbox/daemon command journal SHALL enforce command-ID uniqueness; daemon event journal/server dedupe SHALL enforce event-ID uniqueness. `server_command_seq` (server→daemon) and `daemon_event_seq` (daemon→server) SHALL be unique, monotonic per session, start at 1, and persist with the durable message.
 
 #### Scenario: Same global ID cannot map to two deliveries
 
@@ -54,14 +39,7 @@ Both sequences SHALL start at 1 and SHALL be stored with their durable record.
 
 ### Requirement: Sequence allocation and durable records commit atomically
 
-For server commands, allocation of `server_command_seq` and insertion of the
-complete command outbox record SHALL commit as one durable transaction. For
-daemon events, allocation of `daemon_event_seq` and append/commit of the
-complete event journal record SHALL commit as one durable journal operation. A
-sequence value SHALL NOT enter the durable session sequence space unless its
-message record also commits. A failure before commit SHALL allow that same next
-sequence value to be allocated later. Best-effort in-memory counters and
-non-transactional sequence allocation SHALL NOT define ordering.
+`server_command_seq` allocation and complete command-outbox insertion SHALL be one durable transaction; `daemon_event_seq` allocation and complete event-journal append SHALL be one durable journal operation. A sequence SHALL NOT enter durable session space without its message record. Pre-commit failure SHALL leave that next value available. In-memory counters or non-transactional allocation SHALL NOT define order.
 
 #### Scenario: Failed command transaction leaves no hole
 
@@ -98,17 +76,7 @@ identity and digest before advancing its contiguous command watermark.
 
 ### Requirement: Daemon command journal has explicit recovery states
 
-Every command SHALL have durable state with these meanings: `received` means
-the complete command and payload digest are committed and a `command_ack` MAY
-be sent; `dispatch_started` means that state was committed before invoking a
-runtime operation whose duplicate could matter; `terminal` means no further
-automatic invocation is allowed and the local outcome of processing or
-dispatching that specific command is durable. Terminal outcome metadata SHALL
-identify `dispatch_succeeded`, `dispatch_failed`, or `unknown`, with reason,
-timestamp, and stable runtime operation identity. An implementation MAY store
-the first two as `completed`/`failed`; those labels describe command dispatch
-outcome, not execution-session completion. A duplicate in any state SHALL
-return its known ACK where appropriate and SHALL NOT invoke the runtime twice.
+Commands SHALL persist `received` (complete command+payload digest committed; `command_ack` MAY follow), `dispatch_started` (committed before a possibly duplicating runtime call), and `terminal` (durable local outcome; no automatic reinvocation). Terminal metadata SHALL include `dispatch_succeeded`/`dispatch_failed`/`unknown`, reason, timestamp, and stable runtime-operation ID. Implementations MAY label dispatch outcomes `completed`/`failed`; these are not execution-session completion.
 
 #### Scenario: Received command survives daemon crash
 
@@ -122,27 +90,14 @@ return its known ACK where appropriate and SHALL NOT invoke the runtime twice.
 - **THEN** `dispatch_started` is durably committed first with
   `runtime_operation_id` equal to the stable `command_id`
 
-#### Scenario: Terminal duplicate is inert
+#### Scenario: Duplicate delivery is inert in every state
 
-- **WHEN** a command in terminal state is delivered again
-- **THEN** the daemon returns the known durable receipt/outcome information as
-  applicable and never invokes the runtime again
+- **WHEN** a command is redelivered in any journal state
+- **THEN** the daemon returns its known ACK/outcome where appropriate and SHALL NOT invoke the runtime twice
 
 ### Requirement: Durable command processing crosses a narrow runtime seam
 
-The durable command coordinator SHALL decide journal state and idempotency
-before crossing a narrow internal dispatch/execution seam. The seam SHALL
-accept stable command/runtime operation identity, with
-`runtime_operation_id = command_id` in 0.1.0. Its exact Rust type/name is not
-part of the wire contract. Durable-delivery tests MAY use a deterministic
-fake/test executor. Duplicate or replayed commands SHALL cross the seam only
-when permitted by the command-journal state machine; terminal or
-duplicate-safe records SHALL NOT cross it again.
-
-The landed `clarification-runtime` capability provides the real agent-runtime
-adapter behind this seam. This protocol contract SHALL NOT introduce agent
-prompting, SDK behavior, tool choice, repository inspection, or readiness
-judgment.
+Coordinator SHALL decide journal state/idempotency before crossing a narrow runtime seam. The seam SHALL accept stable command/runtime identity (`runtime_operation_id = command_id` in 0.1.0); its Rust type/name is not wire contract. Replayed commands SHALL cross only when journal state permits; terminal/duplicate-safe records SHALL NOT cross again. This protocol SHALL NOT introduce prompting, SDK behavior/tool choice, repository inspection, or readiness judgment.
 
 #### Scenario: Durable tests use a fake executor
 
@@ -155,29 +110,19 @@ judgment.
 - **WHEN** a replayed command is already terminal or otherwise duplicate-safe
 - **THEN** the coordinator returns its known result without another seam call
 
+#### Scenario: Clarification adapter remains behind the seam
+
+- **WHEN** a real clarification command is dispatched
+- **THEN** the landed `clarification-runtime` capability provides the agent-runtime adapter behind this same seam
+
 ### Requirement: Unknown dispatch outcome is explicit and non-duplicating
 
-If the daemon crashes after durable `dispatch_started` and before terminal
-outcome commit, restart SHALL first attempt runtime reattachment/status
-recovery using the stable operation identity. `session.failed.recoverable` is a
-daemon fact about the existing runtime operation: `true` means the daemon
-believes it can safely resume or reattach that operation locally; `false` means
-local mechanics cannot safely recover it. Neither value forbids a future
-server-directed attempt or authorizes the daemon to decide execution failure.
-If the runtime result cannot be safely determined, the daemon SHALL persist
-terminal `unknown` and emit a journaled `session.failed` event with
-`recoverable: false` and a reason containing `execution_outcome_unknown`,
-`command_id`, `runtime_operation_id`, and `automatic_resubmit=false`. Automatic
-daemon resubmission remains forbidden; any later `session.resume`/`session.start`
-attempt is explicitly server-directed and uses a new command identity under
-server retry policy. This is an execution fact, not a protocol error.
+After crash post-`dispatch_started`, restart SHALL first reattach/status-check by stable operation ID. `session.failed.recoverable` reports only local safe reattach/resume ability; it neither forbids server-directed attempts nor decides execution failure. Unknown outcome SHALL persist terminal `unknown` and journal `session.failed`; daemon SHALL NOT resubmit automatically. Later `session.resume`/`session.start` requires explicit server direction, new command identity, and server retry policy.
 
 #### Scenario: Crash after dispatch does not double-submit
 
-- **WHEN** the daemon crashes after the runtime call and cannot determine
-  whether it was received, running, complete, or failed
-- **THEN** restart records unknown execution, emits the explicit recoverable-
-  false failure fact, and does not invoke the side-effecting operation again
+- **WHEN** the daemon crashes after the runtime call and cannot determine whether it was received, running, complete, or failed
+- **THEN** restart records terminal unknown as an execution fact (not a protocol error), journals `session.failed` with `recoverable: false` and a reason containing `execution_outcome_unknown`, `command_id`, `runtime_operation_id`, and `automatic_resubmit=false`, and does not invoke the side-effecting operation again
 
 #### Scenario: Reattachment resolves outcome
 
@@ -188,15 +133,7 @@ server retry policy. This is an execution fact, not a protocol error.
 
 ### Requirement: `message.send` has separate transport and logical identity
 
-For `message.send`, `command_id` SHALL identify transport/delivery and
-`message_id` SHALL identify the logical conversation message. The server SHALL
-create one immutable command mapping for that logical message and retries SHALL
-reuse the same command ID, message ID, and content. The daemon SHALL enforce
-one `(session_id, message_id)` mapping to one command ID and immutable content.
-A same-message/different-command delivery SHALL be rejected as an
-integrity/protocol error with no runtime submission. One logical message SHALL
-therefore result in at most one automatic runtime submission across reconnect
-and daemon restart.
+For `message.send`, `command_id` identifies transport; `message_id` identifies the logical message. Server SHALL create one immutable command mapping per message; retries SHALL reuse command ID, message ID, and content. Daemon SHALL enforce one `(session_id,message_id)`→command ID with immutable content; same-message/different-command is an integrity/protocol rejection with no runtime submission. One logical message SHALL cause at most one automatic runtime submission across reconnect/restart.
 
 #### Scenario: Duplicate message command is harmless
 
@@ -214,15 +151,7 @@ and daemon restart.
 
 ### Requirement: Events are journaled before transmission and ACKed after handling
 
-The daemon SHALL atomically allocate `daemon_event_seq` and append each event
-before transmitting it. The server SHALL process an event at most once inside
-the transaction that validates its identity/payload, commits its business
-effect or durable rejection record, and records dedupe state. It SHALL send
-`event_ack(status=accepted)` only after an effect commit and
-`event_ack(status=rejected)` only after a durable rejection commit. Both are
-terminal transport acknowledgements for that exact event identity/sequence. A
-rejected ACK SHALL NOT request retry. Rollback, protocol error, or no ACK
-leaves the original event replay-eligible.
+Daemon SHALL atomically allocate `daemon_event_seq` and append each event before transmission. Server SHALL process each event at most once in a transaction validating identity/payload, committing effect or durable rejection, and recording dedupe. `event_ack(status=accepted)` SHALL follow effect commit; `event_ack(status=rejected)` SHALL follow rejection commit. Both are terminal for that identity; rejection does not retry. Rollback, protocol error, or no ACK leaves replay eligible.
 
 #### Scenario: Assessment ACK follows the transaction
 
@@ -244,22 +173,7 @@ leaves the original event replay-eligible.
 
 ### Requirement: Reconciliation merges command and event delivery state
 
-The server SHALL send one finite connection-level `ReconcileSnapshot` after
-authentication and before application readiness. It SHALL contain at most one
-unique state entry per session pinned to that daemon and MAY contain zero
-entries. For each session, `command_ack_through_seq` SHALL mean every command
-at or below that sequence is durably known by the daemon, based only on
-server-recorded durable `command_ack` results. `event_ack_through_seq` SHALL
-mean every daemon event at or below it is durably handled by the server;
-`event_ack_sparse` SHALL identify individually handled event sequences above
-that watermark.
-
-The server MAY compact outbox payloads at or below the confirmed command
-watermark after retaining identity/tombstone state. Commands above it that are
-not durably ACKed remain eligible for resend with original ID/sequence/payload
-in ascending order. The daemon SHALL not replay event payloads at or below the
-event watermark or listed in sparse ACKs; every other journaled event remains
-replay-eligible and replay SHOULD be ascending by `daemon_event_seq`.
+After authentication and before application readiness, server SHALL send one finite connection-level `ReconcileSnapshot` with at most one unique entry per pinned session (possibly zero). `command_ack_through_seq` covers only commands durably known by daemon via server-recorded ACKs; `event_ack_through_seq` covers events durably handled by server; `event_ack_sparse` lists handled higher sequences.
 
 #### Scenario: Snapshot handles no pinned sessions
 
@@ -275,30 +189,18 @@ replay-eligible and replay SHOULD be ascending by `daemon_event_seq`.
 
 #### Scenario: Sparse event ACK suppresses replay
 
-- **WHEN** event sequence 7 appears in durable `event_ack_sparse` while the
-  event watermark is 4
-- **THEN** event 7's payload is not replayed, while unacknowledged event 5 or 6
-  remains eligible
+- **WHEN** event sequence 7 appears in durable `event_ack_sparse` while the event watermark is 4
+- **THEN** event 7 is not replayed; unacknowledged event 5 or 6 remains eligible, and journal replay is ascending by `daemon_event_seq`
+
+#### Scenario: Unacknowledged command resend preserves identity and order
+
+- **GIVEN** `command_ack_through_seq` confirms through N and identity/tombstone state is retained
+- **WHEN** the server compacts payloads at/below N while commands above N lack durable ACK
+- **THEN** it MAY compact confirmed payloads only after retaining identity/tombstones; above-watermark commands remain resend-eligible with original ID/sequence/payload in ascending order
 
 ### Requirement: Sequence gaps are bounded and business-inert
 
-For each session and direction, a valid frame above the next expected sequence
-MAY be durably buffered but SHALL NOT affect business state until the gap
-closes. North 0.1 SHALL enforce a finite configurable
-`max_gap_buffer_entries_per_session` with default 256 across pending durable and
-in-memory records. On capacity exhaustion, the receiver SHALL withhold ACK and
-business application and close at a retryable reconciliation boundary; it
-SHALL NOT require unlimited memory and SHALL NOT misclassify a valid gap as a
-`protocol.error`.
-
-Identity validation SHALL enforce:
-
-```text
-same sequence + same id + same payload  -> duplicate; inert / re-ack
-same sequence + different id             -> protocol/integrity error
-same id + different sequence             -> protocol/integrity error
-same id + same sequence + different payload -> protocol/integrity error
-```
+For each session/direction, valid frames above expected sequence MAY be durably buffered but SHALL NOT affect business state before gap closure. North 0.1 SHALL bound pending durable+memory frames with configurable `max_gap_buffer_entries_per_session` (default 256). On exhaustion, receiver SHALL withhold ACK/application and close at a retryable reconciliation boundary; it SHALL NOT require unbounded memory or treat a valid gap as `protocol.error`.
 
 #### Scenario: Out-of-order event cannot mutate state
 
@@ -308,23 +210,18 @@ same id + same sequence + different payload -> protocol/integrity error
 
 #### Scenario: Conflicting sequence closes safely
 
-- **WHEN** two frames use the same session sequence with different IDs
-- **THEN** the receiver performs no business mutation, sends a directional
-  `protocol.error`, and closes the current connection
+- **WHEN** frames reuse session sequence/identity inconsistently
+- **THEN** same sequence+ID+payload is an inert duplicate/re-ACK; same sequence/different ID, same ID/different sequence, or same ID+sequence/different payload is a protocol/integrity error; the receiver performs no business mutation, sends a directional `protocol.error`, and closes the connection
+
+#### Scenario: Gap-buffer exhaustion is retryable and bounded
+
+- **GIVEN** `max_gap_buffer_entries_per_session` is full (default 256)
+- **WHEN** another valid out-of-order frame arrives
+- **THEN** the receiver withholds ACK and business application and closes at a retryable reconciliation boundary; it neither grows unbounded nor labels the valid gap `protocol.error`
 
 ### Requirement: Compaction retains durable duplicate protection
 
-Compaction SHALL remove payload only after its delivery boundary is durable:
-server command payloads after durable daemon ACK and contiguous command
-watermark; daemon command payloads after terminal processing and contiguous
-processed watermark; daemon event payloads after durable accepted or rejected
-ACK. Compaction SHALL retain per-session watermarks and compact ID/payload
-identity tombstones sufficient to make late duplicates inert and conflicts
-visible. The daemon's `processed_through_seq` or equivalent SHALL NOT expire by
-time alone while the durable session identity remains relevant. Server event
-dedupe information SHALL never be deleted in a way that permits late replay to
-reapply a business effect. Raw payload retention is not required once compact
-identity, sequence, digest, and outcome protection is durable.
+Compaction SHALL retain per-session watermarks and compact identity/payload tombstones sufficient for inert duplicates and visible conflicts. `processed_through_seq` SHALL NOT expire solely by time while durable session identity remains relevant. Server SHALL retain event dedupe so late replay cannot reapply business effects. Raw payload MAY be removed once compact identity, sequence, digest, and outcome protection is durable.
 
 #### Scenario: Old command remains duplicate-safe after payload compaction
 
@@ -339,6 +236,12 @@ identity, sequence, digest, and outcome protection is durable.
   is replayed
 - **THEN** the server's retained identity/watermark/digest state prevents a
   second business effect and returns the known terminal ACK
+
+#### Scenario: Payload compaction follows durable delivery
+
+- **WHEN** a durable delivery payload is compacted
+- **THEN** server command payload follows daemon ACK plus contiguous command watermark; daemon command payload follows terminal processing plus contiguous processed watermark; daemon event payload follows durable accepted/rejected ACK
+- **AND** watermarks and compact identity/sequence/digest/outcome tombstones remain sufficient for inert duplicates and visible conflicts; raw payload MAY be removed after that protection is durable
 
 ### Requirement: Execution terminal state is separate from Requirement lifecycle
 
@@ -358,17 +261,7 @@ delivery SHALL not alter the server's authoritative `revision`,
 
 ### Requirement: Protocol compatibility and errors fail closed in both directions
 
-Hello and welcome SHALL carry exact `protocol_version: "0.1"`; 0.1.x frames
-SHALL use `schema_version: 1`. `protocol.error` SHALL be a connection/control
-frame in both `ServerFrame` and `DaemonFrame`. Server-to-daemon errors report
-daemon protocol violations; daemon-to-server errors report server protocol
-violations. Unknown frame/command/event types, unsupported schema, invalid
-identity reuse, and incompatible versions SHALL cause no business side effect,
-shall receive a protocol error where a valid error frame can be encoded, and
-shall close the current connection. A protocol error SHALL have no severity
-discriminator. Receiving one is terminal to the current connection; future
-reconnect is only a host policy. Unacknowledged durable work remains eligible
-for replay.
+Hello/welcome SHALL use `protocol_version:"0.1"`; 0.1.x SHALL use `schema_version:1`. `ServerFrame`/`DaemonFrame` SHALL define connection/control `protocol.error` for peer violations. Unknown type, unsupported schema/version, invalid identity reuse, or incompatibility SHALL cause no business effect, send error if encodable, and close connection. Errors SHALL have no severity discriminator; receipt ends connection; reconnect is host policy. Unacknowledged durable work remains replay-eligible.
 
 #### Scenario: Daemon reports invalid server command
 
@@ -386,74 +279,52 @@ for replay.
 
 ### Requirement: Handshake and transport boundaries remain unchanged
 
-North 0.1 SHALL use JSON text WebSocket messages with an Axum server adapter
-and a `tokio-tungstenite` daemon supervisor. The daemon supervisor SHALL own
-hello, split reader/writer tasks, ping/pong, bounded queues, disconnect,
-transport backoff, and reconnect. It SHALL expose `Welcome` and the complete
-`ReconcileSnapshot` to coordination and SHALL wait for coordination readiness
-before `Active`, heartbeat, events, ACKs, replay, or commands. Transport
-liveness SHALL NOT imply durable delivery or business completion.
+North 0.1 SHALL use JSON-text WebSocket with Axum server and tokio-tungstenite daemon. One supervisor SHALL own hello, split reader/writer tasks, ping/pong, bounded queues, disconnect/backoff, and reconnect. It SHALL expose Welcome and complete ReconcileSnapshot to coordination, gating Active, heartbeat, events, ACKs, replay, and commands until coordination is ready; ping/pong remains available pre-Active. Transport liveness SHALL NOT imply durable delivery or business completion.
 
 #### Scenario: Snapshot receipt does not activate traffic
 
-- **WHEN** a valid snapshot arrives but coordination has not applied it and
-  signaled ready
-- **THEN** application traffic remains gated and the daemon is not `Active`
+- **WHEN** a valid snapshot arrives but coordination has not applied it and signaled ready
+- **THEN** application traffic remains gated and the daemon is not `Active`; WebSocket ping/pong remains available
+
+#### Scenario: Handshake stages have bounded retryable timeouts
+
+- **WHEN** hello, welcome/authentication, or reconciliation exceeds its configured stage timeout, or coordination exceeds its total readiness budget
+- **THEN** handshake/reconciliation timeouts are configurable and distinct from execution retry; coordination uses one total budget for `HandshakeComplete` delivery, snapshot application, and readiness signaling; timeout is retryable
 
 ### Requirement: Context and readiness authority remain server-owned
 
-`session.start` SHALL contain complete server-assembled Requirement context,
-bounded relevant conversation, and enabled repository metadata without
-credentials, checkout paths, persistence handles, or domain types.
-`requirement.assessed` SHALL carry typed evidence. For a uniquely identified,
-session-bound, sequence-valid event, the server SHALL validate event identity,
-`daemon_event_seq`/sequence identity, and `requirement_revision` against the
-current Requirement revision, run server/domain readiness gates, atomically
-record immutable evidence, optionally promote `Discussing` to `Ready`, and
-record the resulting Ready-generation `state_version` as
-`accepted_state_version`. Accepted readiness evidence creates/binds
-`assessment_id` and `accepted_state_version`; they are not inbound assessment
-concurrency tokens. Later human Accept, Reject, or Request Changes SHALL use
-`assessment_id`, `expected_state_version`, and the exact current Ready
-generation. The daemon reports facts and never directly mutates Requirement
-state. `session.resume` SHALL contain execution recovery only and no transport
-event cursor. The `north-protocol` wire layer SHALL validate only structurally
-non-empty `repository_id` and `commit_sha`; it SHALL not access repository
-persistence.
+The server SHALL assemble complete safe `session.start` context, validate typed assessments/readiness, and own Requirement state; the daemon reports facts only and SHALL NOT mutate Requirement state. The wire layer SHALL validate only structurally non-empty `repository_id`/`commit_sha`, without repository persistence. `session.resume` SHALL carry execution recovery only, never a transport event cursor.
 
 #### Scenario: Delivered assessment cannot bypass server gates
 
-- **WHEN** a durable assessment event targets a stale revision or fails a
-  server readiness gate
-- **THEN** server coordination rejects or handles it using existing domain and
-  transaction rules, regardless of successful transport delivery
+- **GIVEN** `requirement.assessed` carries typed evidence for a uniquely identified, session-bound, sequence-valid event
+- **WHEN** event identity/`daemon_event_seq` are validated, `requirement_revision` matches the current Requirement revision, and server/domain readiness gates pass
+- **THEN** the server atomically records immutable evidence, MAY promote `Discussing` to `Ready`, records the resulting Ready-generation `state_version` as `accepted_state_version`, and binds `assessment_id` and `accepted_state_version`
+- **AND** these values are not inbound assessment concurrency tokens; stale revision or failed gates are durably rejected under domain transaction rules without changing Requirement status, revision, or `state_version`
 
 #### Scenario: Resume does not own replay state
 
 - **WHEN** a `session.resume` command is encoded
-- **THEN** it contains execution-recovery data only; directional event sequence
-  and replay watermarks remain in reconciliation state
+- **THEN** it contains execution-recovery data only and no transport event cursor; directional sequence/replay watermarks remain in reconciliation state
+
+#### Scenario: Session start contains complete server context
+
+- **WHEN** the server creates `session.start`
+- **THEN** it includes complete server-assembled Requirement context, bounded relevant conversation, and enabled repository metadata, without credentials, checkout paths, persistence handles, or domain types
+
+#### Scenario: Human review targets the accepted Ready generation
+
+- **WHEN** a human later Accepts, Rejects, or Requests Changes
+- **THEN** each decision uses `assessment_id`, `expected_state_version`, and the exact current Ready generation
+
+#### Scenario: Wire repository validation remains structural
+
+- **WHEN** `north-protocol` validates repository metadata
+- **THEN** it checks only structurally non-empty `repository_id`/`commit_sha` and does not access repository persistence
 
 ### Requirement: Runtime events use owning clarification projection
 
-The canonical daemon-protocol requirement already routes clarification-owned
-`session.started`, `agent.message`, `agent.activity`, `session.completed`, and
-`session.failed` events through their server-side clarification projection after
-identity, sequence, payload-integrity, dedupe, and ACK-after-commit handling.
-This change SHALL NOT introduce that routing or change the generic rejection
-fallback. It SHALL modify only `session.failed`: the pre-retry terminal
-logical-run projection becomes an execution-attempt fact handled by the
-canonical execution-retry-authority policy. Requirement lifecycle, content,
-revision, and readiness remain untouched.
-
-A known failure MAY close/clear the current attempt, preserve a valid
-non-cancelled logical run as `phase=active,status=retrying`, and persist
-`next_retry_at` when retry budget and owner validity permit. Exhausted failure,
-`execution_outcome_unknown`, invalid/revoked owner, or cancellation becomes
-terminal `phase=terminal,status=failed`; it releases the sequential slot and
-cannot receive `session.resume`. Owner liveness alone does not decide policy.
-Transport replay state remains in reconciliation/watermark records, and
-replayed facts remain inert.
+This change SHALL alter only clarification-owned `session.failed`: other events keep owning projection and identity/sequence/payload/dedupe/ACK-after-commit routing; generic rejection is unchanged. Failure becomes an execution-attempt fact governed by execution-retry-authority, not unconditional run termination. Requirement lifecycle/content/revision/readiness and transport replay/watermarks remain unchanged; replayed facts are inert. Owner liveness alone SHALL NOT decide policy.
 
 #### Scenario: Clarification event reaches its owning projection
 

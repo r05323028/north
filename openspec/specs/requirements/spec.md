@@ -51,14 +51,20 @@ changing Requirement state or its version tokens.
 
 ### Requirement: Human review transitions are reviewer-gated
 
-Accept, Reject, Request Changes, and Reopen SHALL require the reviewer role
-(Requirement Manager/Admin/Owner) enforced server-side. Accept, Reject, and
-Request Changes SHALL also require `expected_state_version` and the
-`assessment_id` from the reviewed packet. Persistence SHALL atomically verify
-the expected state version, current revision, Ready state, and that assessment
-is the currently valid accepted readiness assessment for that revision and
-Ready state generation. Reopen SHALL require the expected state version but
-not an assessment identity.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Accept, Reject, Request Changes, and Reopen SHALL require the reviewer role
+  (Requirement Manager/Admin/Owner) enforced server-side. Accept, Reject, and
+  Request Changes SHALL also require `expected_state_version` and the
+  `assessment_id` from the reviewed packet. Persistence SHALL atomically verify
+  the expected state version, current revision, Ready state, and that assessment
+  is the currently valid accepted readiness assessment for that revision and
+  Ready state generation. Reopen SHALL require the expected state version but
+  not an assessment identity.
 
 #### Scenario: Requester cannot accept
 
@@ -117,16 +123,22 @@ views without client-side full scans.
 
 ### Requirement: Existing Requirement mutations are revision-aware
 
-Every user-driven mutation of an existing Requirement SHALL require
-`expected_state_version`. Persistence SHALL compare it atomically with the
-current row before applying a domain operation. Server-owned readiness
-ingestion instead locks the current row and matches assessment evidence on
-`requirement_revision`; it increments `state_version` only for a successful
-promotion. `revision` remains the canonical structured-content revision and
-`state_version` changes on every real persisted Requirement mutation. A stale
-state version SHALL return a conflict (normally HTTP 409) and SHALL persist no
-content, status, revision, state_version, audit, message, or other side effect.
-No-op edits increment neither token.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Every user-driven mutation of an existing Requirement SHALL require
+  `expected_state_version`. Persistence SHALL compare it atomically with the
+  current row before applying a domain operation. Server-owned readiness
+  ingestion instead locks the current row and matches assessment evidence on
+  `requirement_revision`; it increments `state_version` only for a successful
+  promotion. `revision` remains the canonical structured-content revision and
+  `state_version` changes on every real persisted Requirement mutation. A stale
+  state version SHALL return a conflict (normally HTTP 409) and SHALL persist no
+  content, status, revision, state_version, audit, message, or other side effect.
+  No-op edits increment neither token.
 
 #### Scenario: Stale caller cannot overwrite newer state
 

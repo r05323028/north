@@ -25,13 +25,19 @@ operational error handled by the daemon boundary.
 
 ### Requirement: New selection is enabled-only, but authorized runs survive disable
 
-A new session context or new inspection selection SHALL accept only an enabled
-retained repository ID. The server SHALL exclude disabled rows while assembling
-new `session.start` context and SHALL reject unknown IDs. If repository R was
-included while enabled in a persisted session/run context and inspection began,
-then disabling R SHALL NOT cancel that run or invalidate its later citation
-solely because `disabled_at` is now set. Historical acceptance still requires
-the retained row, session/run binding, exact SHA, and normal readiness gates.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  A new session context or new inspection selection SHALL accept only an enabled
+  retained repository ID. The server SHALL exclude disabled rows while assembling
+  new `session.start` context and SHALL reject unknown IDs. If repository R was
+  included while enabled in a persisted session/run context and inspection began,
+  then disabling R SHALL NOT cancel that run or invalidate its later citation
+  solely because `disabled_at` is now set. Historical acceptance still requires
+  the retained row, session/run binding, exact SHA, and normal readiness gates.
 
 #### Scenario: Disabled repository is excluded from new selection
 
@@ -68,16 +74,22 @@ for repository R SHALL NOT unnecessarily serialize unrelated repository IDs.
 
 ### Requirement: Abandoned cache staging is safely recoverable
 
-Mirror preparation SHALL use only explicitly recognized staging names such as
-`.source-*` beneath an encoded repository cache namespace. If mirror cloning
-fails after creating staging material, the daemon SHALL remove it immediately
-when cache-root ownership, direct-child boundaries, and filesystem identity can
-be proven. Startup recovery MAY remove stale staging left behind by an earlier
-process using the same checks. If ownership, identity, or path boundaries
-cannot be proven, the daemon SHALL retain the path and report cleanup failure.
-Staging cleanup SHALL be separate from disposable-workspace cleanup, SHALL never
-remove `source.git`, SHALL not follow symlinks, and SHALL never delete outside
-the daemon-owned cache root.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Mirror preparation SHALL use only explicitly recognized staging names such as
+  `.source-*` beneath an encoded repository cache namespace. If mirror cloning
+  fails after creating staging material, the daemon SHALL remove it immediately
+  when cache-root ownership, direct-child boundaries, and filesystem identity can
+  be proven. Startup recovery MAY remove stale staging left behind by an earlier
+  process using the same checks. If ownership, identity, or path boundaries
+  cannot be proven, the daemon SHALL retain the path and report cleanup failure.
+  Staging cleanup SHALL be separate from disposable-workspace cleanup, SHALL never
+  remove `source.git`, SHALL not follow symlinks, and SHALL never delete outside
+  the daemon-owned cache root.
 
 #### Scenario: Failed mirror clone leaves staging material
 
@@ -134,13 +146,19 @@ claim OS/kernel sandboxing.
 
 ### Requirement: Inspection pins one exact full commit SHA
 
-Before runtime inspection begins, or during construction of its disposable
-checkout, the daemon SHALL resolve one exact full commit SHA from Git, check out
-that object in detached mode, and verify the workspace's `git rev-parse HEAD`
-equals the captured value. The runtime SHALL not follow a branch after pinning.
-The inspection result SHALL carry the configured `repository_id` and that same
-full SHA. Full means Git's complete object ID, not an abbreviated ref; the
-contract SHALL not assume one fixed hash width.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Before runtime inspection begins, or during construction of its disposable
+  checkout, the daemon SHALL resolve one exact full commit SHA from Git, check out
+  that object in detached mode, and verify the workspace's `git rev-parse HEAD`
+  equals the captured value. The runtime SHALL not follow a branch after pinning.
+  The inspection result SHALL carry the configured `repository_id` and that same
+  full SHA. Full means Git's complete object ID, not an abbreviated ref; the
+  contract SHALL not assume one fixed hash width.
 
 #### Scenario: Moving remote branch cannot change one run
 

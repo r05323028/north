@@ -10,44 +10,18 @@ logs, while guaranteeing exactly one initial Owner per fresh instance.
 
 ### Requirement: Verification code issuance
 
-The system SHALL accept an email address and issue a short-lived, single-use
-verification code for it through the configured CodeDelivery sink in 0.1.0; the
-default LogCodeDelivery sink emits that development/self-hosted delivery output
-through backend logs. This delivery boundary is separate from abuse-control
-telemetry. At most one active code SHALL exist per normalized email; requesting
-a new code supersedes the old. The API response MUST NOT contain the code.
-Each issued code SHALL
-have a small bounded failed-verification-attempt budget. Failed attempts SHALL
-be counted transactionally for that issued code; reaching the limit SHALL
-invalidate the code. A successful verification SHALL consume the code as
-before. Request-code cooldown SHALL remain independent from the verification
-attempt budget.
-
-The HTTP/authentication boundary SHALL apply the established `normalize_email`
-contract—trim surrounding Unicode whitespace with `str::trim`, then ASCII
-lowercase, with no Unicode normalization—before persistence; persistence SHALL
-receive and bind that canonical value without a second normalization policy.
-Stored verification-code values SHALL use the exact framed HMAC-SHA-256
-construction and `NORTH_OTP_HMAC_KEY` configuration defined by
-`otp-at-rest-hardening`; session-token, daemon-setup-token, and
-daemon-credential hashing SHALL remain unchanged. If the configured OTP key is
-unavailable or invalid, issuance and verification SHALL fail closed rather
-than fall back to ordinary hashing.
-
-A syntactically valid request to `POST /auth/request-code` SHALL pass the
-separate process-local bucket keyed by the normalized effective address's
-primary limiter key and the existing normalized-email cooldown/resource
-transaction. Client request rate, email cooldown, and failed
-verification-attempt budget are independent controls and SHALL NOT be merged.
-Any rate/cooldown rejection SHALL create no code and use the canonical generic
-HTTP 429 `rate_limited` response with safe `Retry-After` where applicable. The
-response SHALL not reveal whether an email has an active code or account.
+In 0.1.0, system SHALL issue short-lived single-use codes via configured CodeDelivery; default LogCodeDelivery writes logs. Delivery telemetry is separate from abuse control. At most one code SHALL be active per normalized email; reissue supersedes it. API responses MUST omit codes. Failed attempts SHALL be transactionally counted against a small per-code budget; the limit invalidates the code and success consumes it. Scenarios define abuse, normalization, storage, and nondisclosure.
 
 #### Scenario: Code arrives via logs only
 
 - **WHEN** a user requests a code within client and email limits
 - **THEN** the code appears in server logs and the HTTP response contains no
   trace of it
+
+#### Scenario: Request endpoint applies independent abuse limits
+
+- **WHEN** a syntactically valid request reaches `POST /auth/request-code`
+- **THEN** a process-local bucket keyed by the normalized effective address's primary limiter key and the normalized-email cooldown/resource transaction both apply; request rate, email cooldown, and verification budget stay independent. Rate/cooldown rejection creates no code and returns generic HTTP 429 `rate_limited` with safe `Retry-After` when applicable, without revealing active-code or account state.
 
 #### Scenario: Request rate and cooldown are distinct
 
@@ -104,6 +78,11 @@ response SHALL not reveal whether an email has an active code or account.
 - **WHEN** concurrent requests submit invalid codes for the same issued code
 - **THEN** no more than the configured bounded number of attempts can commit
   and the code is invalid once that limit is reached
+
+#### Scenario: Canonical email and OTP storage policy
+
+- **WHEN** an email address and verification code cross authentication persistence
+- **THEN** HTTP applies `normalize_email` using `str::trim` then ASCII lowercase only, with no Unicode normalization; persistence binds the canonical value without renormalizing. Codes use the exact framed HMAC-SHA-256 construction and `NORTH_OTP_HMAC_KEY` in `otp-at-rest-hardening`; session-token, daemon-setup-token, and daemon-credential hashes remain unchanged. An unavailable or invalid key fails issuance and verification closed, without ordinary-hash fallback.
 
 #### Scenario: Keyed storage preserves login behavior
 

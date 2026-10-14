@@ -5,4 +5,12 @@ declare global {
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+class TestResizeObserver implements ResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+globalThis.ResizeObserver = TestResizeObserver;
+
 export {};

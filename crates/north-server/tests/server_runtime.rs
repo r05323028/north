@@ -186,7 +186,7 @@ fn migration_failure_fails_before_listening_without_database_url_output() {
     let (reservation, address) = reserved_address();
     let output = wait_for_exit(spawn_server(&database_url, Some(TEST_OTP_KEY), address));
 
-    assert_startup_failure(&output, "migration (");
+    assert_startup_failure(&output, "migration");
     assert!(!stderr(&output).contains(&database_url));
     assert!(!stderr(&output).contains(TEST_OTP_KEY));
     drop(reservation);

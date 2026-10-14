@@ -16,3 +16,7 @@
 
 - [x] 3.1 Run `./scripts/validate.sh fast`, `NORTH_TEST_DATABASE_URL`-configured `./scripts/validate.sh ci`, `openspec validate --all --strict`, and `./scripts/pre-push-validation.sh`; verify every command passes.
 - [x] 3.2 Run assembled release E2E against the exact stack/artifacts; verify save, reload, and canonical restoration pass without weakening existing release tests.
+
+## 4. Preference response race correction
+
+- [x] 4.1 Guard save responses by local edit generation, prevent overlapping saves, and add deterministic unit coverage for stale load/save behavior and local-state preservation; verify with the RequirementWorkspace Vitest suite and web typecheck.

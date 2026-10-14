@@ -83,7 +83,7 @@ The release qualification SHALL exercise the browser against an assembled server
 
 ### Requirement: Fresh installation and startup are qualified
 
-A release qualification run SHALL start the packaged server directly against an empty PostgreSQL database, without a preceding `north-server migrate` command, and SHALL verify that guarded pending migrations commit before listener bind. It SHALL qualify the optional migration CLI separately and verify that startup follows only checked-in versioned migrations. It SHALL exercise a production-shaped `DATABASE_URL` and a valid `NORTH_OTP_HMAC_KEY`, and SHALL assert clear safe failure before serving routes when PostgreSQL is unavailable, the key is missing or invalid, or migration application fails. Databases stamped by the unreleased pre-0.1.0 history are unsupported: startup SHALL NOT reset or rewrite them, and the operator documentation SHALL require manual recreation before first-release use. After 0.1.0, applied migrations SHALL remain immutable and new migrations SHALL follow the existing head. Startup and failure output SHALL not disclose the OTP key or other credentials.
+A release qualification run SHALL start the packaged server directly against an empty PostgreSQL database, without a preceding `north-server migrate` command, and SHALL verify that guarded pending migrations commit before listener bind. It SHALL qualify the optional migration CLI separately and verify that startup follows only checked-in versioned migrations. It SHALL exercise a production-shaped `DATABASE_URL` and a valid `NORTH_OTP_HMAC_KEY`, and SHALL assert clear safe failure before serving routes when PostgreSQL is unavailable, the key is missing or invalid, or migration application fails. Databases stamped by the unreleased pre-0.1.0 history are unsupported: preflight and verification SHALL reject unregistered versions, non-empty SeaORM history without the exact `north-schema:0.1.0-baseline-v1` marker, and an empty ledger beside existing schema objects before migration DDL. Startup SHALL NOT reset or rewrite them, and the operator documentation SHALL require manual recreation before first-release use. The marker proves migration provenance, not arbitrary out-of-band schema compatibility. After 0.1.0, applied migrations SHALL remain immutable and new migrations SHALL follow the existing head. Startup and failure output SHALL not disclose the OTP key or other credentials.
 
 #### Scenario: Empty database reaches current migration head
 
@@ -94,6 +94,11 @@ A release qualification run SHALL start the packaged server directly against an 
 
 - **WHEN** the 0.1.0 server starts against a database stamped by the unreleased migration history
 - **THEN** startup fails before accepting traffic without dropping or rewriting database state, and the operator must back up and manually recreate that database before first-release use
+
+#### Scenario: Unsupported migration provenance fails before DDL
+
+- **WHEN** the migration runner, verifier, CLI, or startup sees `m0001_initial_schema` without the consolidated marker, an unregistered pre-release version such as `m0002_requirement_board_positions` or `m0003_user_preferences`, or an empty SeaORM ledger beside schema objects
+- **THEN** it returns a safe manual-recreation error before migration DDL, preserves schema/history/data, and server startup binds no listener
 
 #### Scenario: Required configuration is exercised
 
@@ -251,11 +256,39 @@ The provided `docker-compose.yaml` SHALL run PostgreSQL 16 with a named persiste
 
 ## ADDED Requirements
 
+### Requirement: Profile and logout remain server-authoritative
+
+North web SHALL provide read-only `/profile` with authenticated email and role plus sidebar navigation. Logout SHALL POST to `/auth/logout`, redirecting only after success; on failure it SHALL retain the profile and show an error. Protected children SHALL remain hidden until the current path's `/auth/me` succeeds; 401 SHALL redirect to login and cached UI SHALL not remain usable.
+
+#### Scenario: Authenticated user views profile and logs out
+
+- **WHEN** an authenticated user opens `/profile` and chooses logout
+- **THEN** the browser shows email/role without editing controls, POSTs `/auth/logout`, and redirects only after server success; the invalidated session cannot regain access through browser back navigation
+
+#### Scenario: Logout request fails
+
+- **WHEN** the server rejects or cannot complete logout
+- **THEN** the browser remains on the profile with the session view intact and displays an error instead of redirecting
+
+#### Scenario: Protected content requires current identity
+
+- **WHEN** a protected route is opened, reached through navigation, or restored by back/forward while identity is unresolved or `/auth/me` returns 401
+- **THEN** its children remain hidden until that path's `/auth/me` succeeds; a 401 redirects to login and cached UI is not usable
+
 ### Requirement: Browser E2E proves supported Requirement create/read/edit flow
 
-The default Playwright requirement-board suite SHALL cover visible-UI Requirement creation, canonical detail read, and version-checked content edit. Creation SHALL start at revision/state_version 1. One accepted edit SHALL submit current expected_state_version and increment both tokens once. Edited fields SHALL survive canonical GET after reload. Route-mocked coverage proves browser behavior only, not server/database persistence; assembled release qualification remains that proof. Deletion is out of scope without an API contract.
+The default Playwright suite SHALL create, canonically read, and version-edit Requirements through visible UI. It SHALL verify initial revision/state_version 1, edit with expected_state_version 1, both tokens incremented once to 2, and edited fields after reload. Route-mocked tests prove browser behavior only; assembled release qualification proves persistence. Deletion is out of scope without an API contract.
 
 #### Scenario: Create and revise from the workspace
 
-- **WHEN** the Requester fixture creates a Draft through the Board, edits its content with expected_state_version 1, and reloads its detail route
-- **THEN** the browser renders canonical creation and edit responses, with revised fields and revision/state_version 2 after reload
+- **WHEN** the Requester fixture creates a Draft through the Board, opens its canonical detail, submits one accepted content edit with expected_state_version 1, and reloads the detail route
+- **THEN** creation starts at revision/state_version 1; the edit increments both tokens once to 2; canonical GET renders the revised fields
+
+### Requirement: Playwright web server isolation
+
+The default Playwright `webServer` SHALL use `NORTH_WEB_E2E_PORT` consistently for server launch and `baseURL`, SHALL NOT reuse an existing process, and SHALL fail on port collision.
+
+#### Scenario: Existing browser server is not reused
+
+- **WHEN** another process occupies the configured `NORTH_WEB_E2E_PORT`
+- **THEN** Playwright reports the webServer port conflict and fails instead of attaching tests to that process

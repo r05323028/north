@@ -1,4 +1,4 @@
-schema: spec-driven
+schema: agent-quality
 
 context: |
   North - self-hosted requirement management: requesters collaborate

@@ -1,0 +1,67 @@
+
+name: agent-quality
+version: 1
+description: Spec-driven development with adversarial review
+
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Change proposal
+    template: proposal.md
+    requires: []
+
+  - id: specs
+    generates: "specs/**/*.md"
+    description: Behavioral specifications
+    template: spec.md
+    requires: [proposal]
+
+  - id: design
+    generates: design.md
+    description: Technical design
+    template: design.md
+    requires: [proposal]
+
+  - id: adversarial-review
+    generates: adversarial-review.md
+    description: Independent adversarial design review
+    template: adversarial-review.md
+    requires: [proposal, specs, design]
+    instruction: |
+      Act as a skeptical, independent reviewer.
+
+      Challenge:
+      - Hidden assumptions and ambiguous requirements
+      - Security boundaries and failure modes
+      - Architectural trade-offs
+      - Concurrency, reliability and performance
+      - Missing test cases and counterexamples
+
+      Use repository evidence where possible.
+      Report severity, evidence and remediation.
+      Do not assume the proposed design is correct.
+      Do not approve unresolved critical findings.
+
+  - id: tasks
+    generates: tasks.md
+    description: Implementation tasks
+    template: tasks.md
+    requires:
+      - specs
+      - design
+      - adversarial-review
+    instruction: |
+      Create actionable implementation tasks.
+      Incorporate accepted adversarial findings.
+      Ensure each task has verification criteria.
+      Flag unresolved critical findings as blockers.
+
+apply:
+  requires: [tasks]
+  tracks: tasks.md
+  instruction: |
+    Implement pending tasks and update checkboxes.
+    Run relevant tests and inspect failures.
+    Report unresolved issues.
+    Do not claim verification or memory curation
+    has completed unless actually executed.

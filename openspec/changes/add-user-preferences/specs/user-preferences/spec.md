@@ -40,7 +40,7 @@ Each page that supports personal preferences SHALL define its own supported fiel
 
 ### Requirement: Requirement workspace stores explicit personal display defaults
 
-The Requirement workspace SHALL support personal defaults for workspace view (`board` or `list`) and List filters/sort (status, creator, and `updated` or `updated_asc`). Defaults SHALL be board view, all statuses, all creators, and `updated` sort. Search text SHALL remain transient and SHALL NOT be persisted as a preference. A user SHALL be able to save these values through the workspace's preference editor and see them restored on a later workspace load. Invalid values SHALL be rejected without changing previously saved values.
+The Requirement workspace SHALL persist per-user defaults for board/list view and List status, creator, and updated/updated_asc sort; search text SHALL remain transient.
 
 #### Scenario: Missing preferences use workspace defaults
 - **WHEN** a user opens the Requirement workspace with no saved preferences
@@ -69,3 +69,11 @@ Saving preferences for one page SHALL NOT alter preferences for another page or 
 #### Scenario: Failed save preserves prior preferences
 - **WHEN** persistence rejects a preference update
 - **THEN** the editor reports the save failure and a subsequent read returns the previously saved values
+
+#### Scenario: Stale preference responses do not replace local edits
+- **WHEN** a preference load or save response arrives after newer local edits
+- **THEN** the editor keeps the newer values and does not report those values as saved by the older request
+
+#### Scenario: Conflicting saves do not overlap
+- **WHEN** a preference save is pending and another save is requested
+- **THEN** the editor permits only the pending save and keeps subsequent edits local until a later save

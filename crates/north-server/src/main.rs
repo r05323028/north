@@ -6,11 +6,11 @@ use tokio::{net::TcpListener, time::timeout};
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 enum StartupFailure {
     Configuration,
     Database,
-    Migration,
+    Migration(north_persistence::MigrationError),
     ServerState,
     Bind,
     Serve,
@@ -22,7 +22,7 @@ impl StartupFailure {
         match self {
             Self::Configuration => "configuration",
             Self::Database => "database connection",
-            Self::Migration => "migration",
+            Self::Migration(_) => "migration",
             Self::ServerState => "server state",
             Self::Bind => "bind",
             Self::Serve => "server",
@@ -39,6 +39,10 @@ async fn main() -> ExitCode {
 
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
+        Err(StartupFailure::Migration(error)) => {
+            eprintln!("north-server startup failed: migration ({error})");
+            ExitCode::FAILURE
+        }
         Err(failure) => {
             eprintln!("north-server startup failed: {}", failure.label());
             ExitCode::FAILURE
@@ -114,7 +118,7 @@ async fn run() -> Result<(), StartupFailure> {
         .map_err(|_| StartupFailure::Database)?;
     north_persistence::run_migrations(&database)
         .await
-        .map_err(|_| StartupFailure::Migration)?;
+        .map_err(StartupFailure::Migration)?;
 
     let app =
         match north_server::build_app(database.clone(), Arc::new(north_server::LogCodeDelivery))

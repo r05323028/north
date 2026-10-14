@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: Browser email-code login and signup
-The web application SHALL provide distinct `/login` and `/signup` screens linked to each other. Both screens SHALL use `POST /auth/request-code` and `POST /auth/verify`; signup SHALL use the same verification and server-controlled account bootstrap as login, without client-side role selection. A successful request-code response (`202 Accepted`) SHALL advance to code entry. A successful verification response (`204 No Content`) SHALL navigate to the workspace and rely on the server-managed session cookie. The browser SHALL keep the entered verification code only in active form state and MUST NOT place it in persistent browser storage or inspect the HttpOnly session cookie. User-facing delivery guidance SHALL describe the configured code-delivery method and MUST NOT promise SMTP or inbox delivery when that is not configured.
+The web app SHALL provide linked `/login` and `/signup` screens using `POST /auth/request-code` and `POST /auth/verify`; signup SHALL use shared verification and server-controlled account bootstrap without client role selection. The browser MUST NOT persist codes or inspect the HttpOnly session cookie. Delivery guidance SHALL describe configured delivery without promising unconfigured SMTP or inbox delivery.
 
 #### Scenario: Request a code from signup
 - **WHEN** a visitor submits a valid email address on `/signup` and the server returns `202 Accepted`
@@ -20,6 +20,10 @@ The web application SHALL provide distinct `/login` and `/signup` screens linked
 #### Scenario: Signup and login share backend verification
 - **WHEN** a visitor switches between `/login` and `/signup`
 - **THEN** both screens submit the same email/code payloads to the existing endpoints, and account role assignment remains server-controlled
+
+#### Scenario: Code handling and delivery guidance respect browser boundaries
+- **WHEN** a visitor requests or enters a verification code
+- **THEN** the code stays only in active form state, and delivery guidance describes the configured method without promising unconfigured SMTP or inbox delivery
 
 ### Requirement: Unauthenticated workspace entry
 The browser application SHALL redirect a visitor to `/login` when `/auth/me` returns `401 Unauthorized` on a non-auth route. `/login` and `/signup` SHALL remain accessible without a session and SHALL render without the authenticated workspace shell. Other `/auth/me` failures MUST NOT be treated as proof that the visitor is unauthenticated.

@@ -326,7 +326,7 @@ async fn schema_catalog(database: &DatabaseConnection, schema: &str) -> CatalogS
 
 #[tokio::test]
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
-async fn compiled_migration_matches_former_postgres_catalog() {
+async fn compiled_baseline_matches_current_schema_reference() {
     let _guard = database_test_lock().await;
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
         .expect("NORTH_TEST_DATABASE_URL is required for catalog parity tests");
@@ -334,15 +334,15 @@ async fn compiled_migration_matches_former_postgres_catalog() {
     let (seaorm_schema, seaorm_admin, seaorm_database) = isolated_schema(&database_url).await;
 
     legacy_database
-        .execute_unprepared(include_str!("fixtures/legacy_baseline.sql"))
+        .execute_unprepared(include_str!("fixtures/current_schema_reference.sql"))
         .await
-        .expect("apply former SQL baseline to empty schema");
+        .expect("apply current schema reference to empty schema");
     north_persistence::run_migrations(&seaorm_database)
         .await
         .expect("apply compiled SeaORM baseline");
 
     let legacy_catalog = schema_catalog(&legacy_database, &legacy_schema).await;
-    let mut seaorm_catalog = schema_catalog(&seaorm_database, &seaorm_schema).await;
+    let seaorm_catalog = schema_catalog(&seaorm_database, &seaorm_schema).await;
     let board_columns: Vec<_> = seaorm_catalog
         .columns
         .iter()
@@ -367,33 +367,9 @@ async fn compiled_migration_matches_former_postgres_catalog() {
             "user_id"
         ]
     );
-    seaorm_catalog
-        .columns
-        .retain(|column| column.table_name != "requirement_board_positions");
-    seaorm_catalog
-        .constraints
-        .retain(|constraint| constraint.table_name != "requirement_board_positions");
-    seaorm_catalog
-        .indexes
-        .retain(|index| index.table_name != "requirement_board_positions");
-    seaorm_catalog
-        .triggers
-        .retain(|trigger| trigger.table_name != "requirement_board_positions");
-    seaorm_catalog
-        .columns
-        .retain(|column| column.table_name != "user_requirement_preferences");
-    seaorm_catalog
-        .constraints
-        .retain(|constraint| constraint.table_name != "user_requirement_preferences");
-    seaorm_catalog
-        .indexes
-        .retain(|index| index.table_name != "user_requirement_preferences");
-    seaorm_catalog
-        .triggers
-        .retain(|trigger| trigger.table_name != "user_requirement_preferences");
     assert_eq!(
         seaorm_catalog, legacy_catalog,
-        "m0001 schema differs from former baseline"
+        "compiled baseline differs from current schema reference"
     );
 
     let legacy_id: i64 = support::query_scalar(
@@ -401,7 +377,7 @@ async fn compiled_migration_matches_former_postgres_catalog() {
     )
     .fetch_one(&legacy_database)
     .await
-    .expect("legacy baseline generates verification-code ID");
+    .expect("schema reference generates verification-code ID");
     let seaorm_id: i64 = support::query_scalar(
         "INSERT INTO verification_codes (email, code_hash, expires_at)\n         VALUES ('catalog@example.com', decode('00', 'hex'), CURRENT_TIMESTAMP)\n         RETURNING id",
     )
@@ -414,7 +390,7 @@ async fn compiled_migration_matches_former_postgres_catalog() {
         support::query_scalar("SELECT COUNT(*) FROM instance_settings WHERE id = 1")
             .fetch_one(&legacy_database)
             .await
-            .expect("read former baseline seed");
+            .expect("read schema reference seed");
     let seaorm_seed: i64 =
         support::query_scalar("SELECT COUNT(*) FROM instance_settings WHERE id = 1")
             .fetch_one(&seaorm_database)
@@ -455,17 +431,22 @@ async fn fresh_install_repeat_up_and_readiness_preserve_data() {
     north_persistence::verify_migrations(&database)
         .await
         .expect("verify current migration head");
+    let marker: Option<String> = support::query_scalar(
+        "SELECT obj_description(
+            to_regclass(format('%I.seaql_migrations', current_schema())), 'pg_class'
+        )",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("read consolidated baseline marker");
+    assert_eq!(marker.as_deref(), Some("north-schema:0.1.0-baseline-v1"));
 
     let applied: Vec<MigrationRow> =
         support::query_as("SELECT version FROM seaql_migrations ORDER BY version")
             .fetch_all(&database)
             .await
             .expect("read SeaORM migration head");
-    let expected_versions = [
-        "m0001_initial_schema",
-        "m0002_requirement_board_positions",
-        "m0003_user_requirement_preferences",
-    ];
+    let expected_versions = ["m0001_initial_schema"];
     assert_eq!(
         applied
             .iter()
@@ -694,6 +675,234 @@ async fn partial_north_schema_is_rejected_without_mutation() {
 
 #[tokio::test]
 #[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn legacy_baseline_provenance_is_rejected_before_startup_listener() {
+    const TEST_OTP_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let _guard = database_test_lock().await;
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for migration tests");
+    let (schema, admin, database) = isolated_schema(&database_url).await;
+    let command_url = schema_database_url(&database_url, &schema);
+    assert_schema_database_url(&command_url, &schema).await;
+    north_persistence::run_migrations(&database)
+        .await
+        .expect("create consolidated baseline fixture");
+    support::query("INSERT INTO users (id, email) VALUES ('kept', 'kept@example.com')")
+        .execute(&database)
+        .await
+        .expect("insert migration preservation sentinel");
+    support::query("CREATE TABLE migration_sentinel (value TEXT PRIMARY KEY)")
+        .execute(&database)
+        .await
+        .expect("create migration sentinel");
+    support::query("INSERT INTO migration_sentinel (value) VALUES ('kept')")
+        .execute(&database)
+        .await
+        .expect("insert migration sentinel");
+    support::query("DROP TABLE requirement_board_positions, user_requirement_preferences")
+        .execute(&database)
+        .await
+        .expect("simulate pre-release baseline tables");
+    support::query("COMMENT ON TABLE seaql_migrations IS NULL")
+        .execute(&database)
+        .await
+        .expect("remove consolidated baseline marker");
+
+    let schema_before = schema_catalog(&database, &schema).await;
+    let versions_before: Vec<String> =
+        support::query_scalar("SELECT version FROM seaql_migrations ORDER BY version")
+            .fetch_all(&database)
+            .await
+            .expect("read legacy migration history");
+    assert_eq!(versions_before, ["m0001_initial_schema"]);
+    let marker_before: Option<String> = support::query_scalar(
+        "SELECT obj_description(
+            to_regclass(format('%I.seaql_migrations', current_schema())), 'pg_class'
+        )",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("read legacy baseline marker");
+    assert_eq!(marker_before, None);
+
+    assert_eq!(
+        north_persistence::run_migrations(&database).await,
+        Err(MigrationError::UnsupportedSeaOrmHistory)
+    );
+    assert_eq!(
+        north_persistence::verify_migrations(&database).await,
+        Err(MigrationError::UnsupportedSeaOrmHistory)
+    );
+    assert_command_rejected_without_secrets(&run_migrate_command(&command_url).await, &command_url);
+
+    let address = {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve server port");
+        listener.local_addr().expect("read server port")
+    };
+    let mut command = Command::new(north_server_binary());
+    command
+        .current_dir(env::temp_dir())
+        .env("DATABASE_URL", &command_url)
+        .env("NORTH_BIND_ADDR", address.to_string())
+        .env(north_persistence::OTP_HMAC_KEY_ENV, TEST_OTP_KEY)
+        .kill_on_drop(true);
+    let output = timeout(Duration::from_secs(10), command.output())
+        .await
+        .expect("unsupported migration history should fail promptly")
+        .expect("run north-server startup");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(stderr.contains("manually recreate"));
+    assert!(!stderr.contains(&command_url));
+    assert!(!stderr.contains("postgres://"));
+    assert!(!stderr.contains(TEST_OTP_KEY));
+    assert!(TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err());
+
+    let schema_after = schema_catalog(&database, &schema).await;
+    let versions_after: Vec<String> =
+        support::query_scalar("SELECT version FROM seaql_migrations ORDER BY version")
+            .fetch_all(&database)
+            .await
+            .expect("read unchanged migration history");
+    let sentinel: String = support::query_scalar("SELECT value FROM migration_sentinel")
+        .fetch_one(&database)
+        .await
+        .expect("read unchanged migration sentinel");
+    let user_email: String = support::query_scalar("SELECT email FROM users WHERE id = 'kept'")
+        .fetch_one(&database)
+        .await
+        .expect("read unchanged user sentinel");
+    let marker_after: Option<String> = support::query_scalar(
+        "SELECT obj_description(
+            to_regclass(format('%I.seaql_migrations', current_schema())), 'pg_class'
+        )",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("read unchanged legacy baseline marker");
+    assert_eq!(schema_after, schema_before);
+    assert_eq!(marker_after, marker_before);
+    assert_eq!(versions_after, versions_before);
+    assert_eq!(sentinel, "kept");
+    assert_eq!(user_email, "kept@example.com");
+    drop_isolated_schema(&schema, &admin, database).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn unregistered_seaorm_history_is_rejected_without_mutation() {
+    let _guard = database_test_lock().await;
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for migration tests");
+    let (schema, admin, database) = isolated_schema(&database_url).await;
+    let command_url = schema_database_url(&database_url, &schema);
+    assert_schema_database_url(&command_url, &schema).await;
+    north_persistence::run_migrations(&database)
+        .await
+        .expect("create current baseline fixture");
+    support::query(
+        "INSERT INTO seaql_migrations (version, applied_at)
+         VALUES ($1, EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint),
+                ($2, EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)::bigint)",
+    )
+    .bind("m0002_requirement_board_positions")
+    .bind("m0003_user_preferences")
+    .execute(&database)
+    .await
+    .expect("insert removed pre-release history rows");
+
+    let schema_before = schema_catalog(&database, &schema).await;
+    let versions_before: Vec<String> =
+        support::query_scalar("SELECT version FROM seaql_migrations ORDER BY version")
+            .fetch_all(&database)
+            .await
+            .expect("read unsupported migration history");
+    let marker_before: Option<String> = support::query_scalar(
+        "SELECT obj_description(
+            to_regclass(format('%I.seaql_migrations', current_schema())), 'pg_class'
+        )",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("read baseline marker");
+
+    assert_eq!(
+        north_persistence::run_migrations(&database).await,
+        Err(MigrationError::UnsupportedSeaOrmHistory)
+    );
+    assert_eq!(
+        north_persistence::verify_migrations(&database).await,
+        Err(MigrationError::UnsupportedSeaOrmHistory)
+    );
+    assert_command_rejected_without_secrets(&run_migrate_command(&command_url).await, &command_url);
+
+    assert_eq!(schema_catalog(&database, &schema).await, schema_before);
+    let versions_after: Vec<String> =
+        support::query_scalar("SELECT version FROM seaql_migrations ORDER BY version")
+            .fetch_all(&database)
+            .await
+            .expect("read unchanged migration history");
+    let marker_after: Option<String> = support::query_scalar(
+        "SELECT obj_description(
+            to_regclass(format('%I.seaql_migrations', current_schema())), 'pg_class'
+        )",
+    )
+    .fetch_one(&database)
+    .await
+    .expect("read unchanged baseline marker");
+    assert_eq!(versions_after, versions_before);
+    assert_eq!(marker_after, marker_before);
+    drop_isolated_schema(&schema, &admin, database).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
+async fn empty_seaorm_history_with_partial_schema_is_rejected_without_mutation() {
+    use sea_orm_migration::MigratorTrait;
+
+    let _guard = database_test_lock().await;
+    let database_url = env::var("NORTH_TEST_DATABASE_URL")
+        .expect("NORTH_TEST_DATABASE_URL is required for migration tests");
+    let (schema, admin, database) = isolated_schema(&database_url).await;
+    let command_url = schema_database_url(&database_url, &schema);
+    assert_schema_database_url(&command_url, &schema).await;
+    north_persistence::migrations::Migrator::install(&database)
+        .await
+        .expect("create empty SeaORM ledger fixture");
+    support::query("CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL)")
+        .execute(&database)
+        .await
+        .expect("create partial schema fixture");
+    support::query("INSERT INTO users (id, email) VALUES ('kept', 'kept@example.com')")
+        .execute(&database)
+        .await
+        .expect("insert partial schema sentinel");
+
+    let schema_before = schema_catalog(&database, &schema).await;
+    assert_eq!(
+        north_persistence::run_migrations(&database).await,
+        Err(MigrationError::UnsupportedSeaOrmHistory)
+    );
+    assert_eq!(
+        north_persistence::verify_migrations(&database).await,
+        Err(MigrationError::UnsupportedSeaOrmHistory)
+    );
+    assert_command_rejected_without_secrets(&run_migrate_command(&command_url).await, &command_url);
+    assert_eq!(schema_catalog(&database, &schema).await, schema_before);
+    let ledger_count: i64 = support::query_scalar("SELECT COUNT(*)::bigint FROM seaql_migrations")
+        .fetch_one(&database)
+        .await
+        .expect("read unchanged empty ledger");
+    let sentinel: String = support::query_scalar("SELECT email FROM users WHERE id = 'kept'")
+        .fetch_one(&database)
+        .await
+        .expect("read unchanged partial schema sentinel");
+    assert_eq!(ledger_count, 0);
+    assert_eq!(sentinel, "kept@example.com");
+    drop_isolated_schema(&schema, &admin, database).await;
+}
+
+#[tokio::test]
+#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
 async fn migrate_command_runs_fresh_and_current_without_otp_or_http() {
     let _guard = database_test_lock().await;
     let database_url = env::var("NORTH_TEST_DATABASE_URL")
@@ -764,7 +973,7 @@ async fn server_startup_migrates_fresh_schema_before_listening() {
         .fetch_one(&database)
         .await
         .expect("read startup migration head");
-    assert_eq!(applied, 3);
+    assert_eq!(applied, 1);
 
     let mut health = TcpStream::connect(address).expect("connect to migrated server");
     health
@@ -869,13 +1078,10 @@ async fn migration_failure_rolls_back_schema_and_history() {
         .await
         .expect("create migration history table for failure injection");
     support::query(
-        "CREATE FUNCTION fail_after_first_migration() RETURNS trigger
+        "CREATE FUNCTION fail_migration_history_insert() RETURNS trigger
          LANGUAGE plpgsql AS $$
          BEGIN
-             IF EXISTS (SELECT 1 FROM seaql_migrations) THEN
-                 RAISE EXCEPTION 'forced migration-history failure';
-             END IF;
-             RETURN NEW;
+             RAISE EXCEPTION 'forced migration-history failure';
          END
          $$",
     )
@@ -883,9 +1089,9 @@ async fn migration_failure_rolls_back_schema_and_history() {
     .await
     .expect("install migration history failure trigger function");
     support::query(
-        "CREATE TRIGGER fail_after_first_migration
+        "CREATE TRIGGER fail_migration_history_insert
          BEFORE INSERT ON seaql_migrations
-         FOR EACH ROW EXECUTE FUNCTION fail_after_first_migration()",
+         FOR EACH ROW EXECUTE FUNCTION fail_migration_history_insert()",
     )
     .execute(&database)
     .await
@@ -1037,99 +1243,12 @@ async fn server_startup_without_ddl_privilege_fails_before_listening() {
     assert_eq!(table_count, 0);
 }
 
-#[tokio::test]
-#[ignore = "requires NORTH_TEST_DATABASE_URL; run explicitly with an isolated database"]
-async fn m0001_requirements_survive_board_position_upgrade() {
-    use sea_orm_migration::MigratorTrait;
-
-    let _guard = database_test_lock().await;
-    let database_url = env::var("NORTH_TEST_DATABASE_URL")
-        .expect("NORTH_TEST_DATABASE_URL is required for migration upgrade tests");
-    let (schema, admin, database) = isolated_schema(&database_url).await;
-
-    north_persistence::migrations::Migrator::up(&database, Some(1))
-        .await
-        .expect("apply m0001 baseline only");
-    support::query("INSERT INTO users (id, email, role) VALUES ('migration-user', 'migration@example.com', 'Requester')")
-        .execute(&database)
-        .await
-        .expect("seed m0001 user");
-    for (id, title, created_at) in [
-        (
-            "migration-later",
-            "Later requirement",
-            "2026-01-02T00:00:00Z",
-        ),
-        (
-            "migration-earlier",
-            "Earlier requirement",
-            "2026-01-01T00:00:00Z",
-        ),
-    ] {
-        support::query(
-            "INSERT INTO requirements
-                (id, title, description, summary, acceptance_criteria,
-                 assumptions, open_questions, status, revision, state_version,
-                 created_by, created_at)
-             VALUES ($1, $2, 'description', 'summary', $3, $3, $3,
-                     'Draft', 1, 1, 'migration-user', $4::timestamptz)",
-        )
-        .bind(id)
-        .bind(title)
-        .bind(Vec::<String>::new())
-        .bind(created_at)
-        .execute(&database)
-        .await
-        .expect("seed existing m0001 requirement");
-    }
-
-    north_persistence::run_migrations(&database)
-        .await
-        .expect("upgrade existing m0001 database");
-    let preserved: i64 = support::query_scalar(
-        "SELECT COUNT(*)::bigint FROM requirements
-         WHERE id IN ('migration-later', 'migration-earlier')",
-    )
-    .fetch_one(&database)
-    .await
-    .expect("count preserved requirements");
-    assert_eq!(preserved, 2);
-    let earlier_rank: i64 = support::query_scalar(
-        "SELECT rank FROM requirement_board_positions
-         WHERE requirement_id = 'migration-earlier'",
-    )
-    .fetch_one(&database)
-    .await
-    .expect("read earlier rank");
-    let later_rank: i64 = support::query_scalar(
-        "SELECT rank FROM requirement_board_positions
-         WHERE requirement_id = 'migration-later'",
-    )
-    .fetch_one(&database)
-    .await
-    .expect("read later rank");
-    assert_eq!(earlier_rank, 1024);
-    assert_eq!(later_rank, 2048);
-    let foreign_keys: i64 = support::query_scalar(
-        "SELECT COUNT(*)::bigint FROM pg_constraint
-         WHERE conrelid = 'requirement_board_positions'::regclass AND contype = 'f'",
-    )
-    .fetch_one(&database)
-    .await
-    .expect("inspect board position foreign key");
-    assert_eq!(foreign_keys, 1);
-    north_persistence::verify_migrations(&database)
-        .await
-        .expect("verify upgraded schema");
-
-    drop_isolated_schema(&schema, &admin, database).await;
-}
-
 #[test]
 fn migration_errors_do_not_expose_connection_details() {
     for error in [
         MigrationError::UnsupportedSqlxHistory,
         MigrationError::ExistingSchemaWithoutSeaOrmHistory,
+        MigrationError::UnsupportedSeaOrmHistory,
         MigrationError::DatabaseInspectionFailed,
         MigrationError::MigrationExecutionFailed,
     ] {

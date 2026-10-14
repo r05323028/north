@@ -31,14 +31,7 @@ chain-of-thought SHALL NOT be stored as or converted into messages.
 
 ### Requirement: Structured edits ride the domain contract
 
-Editing structured requirement fields through the conversation surface SHALL
-require `expected_state_version` and apply the same domain rules as direct
-edits: one `revision` and one `state_version` increment per accepted content
-edit, Ready demotion on a real edit, refusal in terminal states, and an atomic
-state-version check. `revision` remains content concurrency/readiness identity;
-`state_version` is mutable-state concurrency. Empty `summary` and empty list
-fields are valid intentional values, while title, description, and individual
-list entries remain trimmed and non-empty.
+Conversation edits to structured fields SHALL require `expected_state_version` and use the direct-edit domain operation. It atomically rejects stale versions and terminal-state edits; each real content edit increments `revision` and `state_version` once and demotes Ready. `revision` identifies content/readiness; `state_version` guards mutable state. Empty summaries and list fields may intentionally be empty; title, description, and each list entry must be trimmed and non-empty.
 
 #### Scenario: Edit from conversation view bumps versions
 

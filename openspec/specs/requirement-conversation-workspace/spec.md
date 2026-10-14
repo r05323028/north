@@ -36,20 +36,26 @@ inside the same canonical workspace and use server responses after mutation.
 
 ### Requirement: Conversation uses the existing durable model
 
-The workspace SHALL use the one durable Conversation associated with R. Its minimum North 0.1 projection is a stable `conversation_id`, `requirement_id`, and creation timestamp, plus durable Messages with stable `message_id` (wire `id`), `conversation_id`, optional author-user identity, one existing kind (`requester`, `agent`, or `system`), bounded user-facing body, and creation timestamp; the server may retain a source-event/idempotency key for deduplication. A message relates to a clarification Run only through the existing start/dispatch correlation, not through a new product lifecycle field. It SHALL display messages in the server's deterministic `(created_at, id)` order and deduplicate
-by stable message ID when pages or refetches overlap. An agent clarification
-question SHALL be displayed as an ordinary `agent` message; North 0.1 SHALL NOT
-add a `clarification_question` message kind or infer canonical Requirement
-fields from question text. High-value progress SHALL come from the canonical
-coarse activity read and SHALL NOT be inserted into the transcript as a
-synthetic message.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-The workspace SHALL keep product identity distinct from execution and transport
-identity: `requirement_id`, `conversation_id`, and `run_id` are application
-identities; protocol `session_id` is the existing wire identity carried by a
-run; runtime/provider IDs are correlation facts only. Components SHALL consume
-shared API/domain contracts and SHALL NOT define competing `Message`, run,
-readiness, or Requirement entities.
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The workspace SHALL use the one durable Conversation associated with R. Its minimum North 0.1 projection is a stable `conversation_id`, `requirement_id`, and creation timestamp, plus durable Messages with stable `message_id` (wire `id`), `conversation_id`, optional author-user identity, one existing kind (`requester`, `agent`, or `system`), bounded user-facing body, and creation timestamp; the server may retain a source-event/idempotency key for deduplication. A message relates to a clarification Run only through the existing start/dispatch correlation, not through a new product lifecycle field. It SHALL display messages in the server's deterministic `(created_at, id)` order and deduplicate
+  by stable message ID when pages or refetches overlap. An agent clarification
+  question SHALL be displayed as an ordinary `agent` message; North 0.1 SHALL NOT
+  add a `clarification_question` message kind or infer canonical Requirement
+  fields from question text. High-value progress SHALL come from the canonical
+  coarse activity read and SHALL NOT be inserted into the transcript as a
+  synthetic message.
+
+  The workspace SHALL keep product identity distinct from execution and transport
+  identity: `requirement_id`, `conversation_id`, and `run_id` are application
+  identities; protocol `session_id` is the existing wire identity carried by a
+  run; runtime/provider IDs are correlation facts only. Components SHALL consume
+  shared API/domain contracts and SHALL NOT define competing `Message`, run,
+  readiness, or Requirement entities.
 
 #### Scenario: Messages remain ordered and unique after repair
 
@@ -90,24 +96,30 @@ readiness, or Requirement entities.
 
 ### Requirement: Canonical detail reads repair all workspace state
 
-The workspace SHALL load Requirement first. Only when the canonical Requirement
-status is `Ready` SHALL it request `GET /requirements/{id}/review-packet`. A
-non-Ready Requirement has no applicable packet request; the server's conflict
-for such a request is not a nullable packet contract. A Rejected Requirement
-renders Reopen from Requirement state/version alone. If a Ready packet fetch
-fails, the workspace surfaces a review-load error and disables Ready review
-actions.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-Every repair is generation-aware: refresh Requirement first or coordinate both
-responses under one generation, then fetch a packet only if refreshed state is
-Ready. A non-Ready refresh invalidates/drops any previous packet. No old packet
-may be submitted against refreshed Requirement state. Review acknowledgement is
-bound to canonical identity: `(requirement_state_version, assessment_id)` for
-Ready decisions and `requirement_state_version` for Reopen. After stale review
-repair, mutations remain disabled until explicit acknowledgement of the latest
-identity. Duplicate SSE hints, focus/visibility repair, explicit refresh, and
-refetches preserve acknowledgement when identity is unchanged; an identity
-change invalidates it.
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The workspace SHALL load Requirement first. Only when the canonical Requirement
+  status is `Ready` SHALL it request `GET /requirements/{id}/review-packet`. A
+  non-Ready Requirement has no applicable packet request; the server's conflict
+  for such a request is not a nullable packet contract. A Rejected Requirement
+  renders Reopen from Requirement state/version alone. If a Ready packet fetch
+  fails, the workspace surfaces a review-load error and disables Ready review
+  actions.
+
+  Every repair is generation-aware: refresh Requirement first or coordinate both
+  responses under one generation, then fetch a packet only if refreshed state is
+  Ready. A non-Ready refresh invalidates/drops any previous packet. No old packet
+  may be submitted against refreshed Requirement state. Review acknowledgement is
+  bound to canonical identity: `(requirement_state_version, assessment_id)` for
+  Ready decisions and `requirement_state_version` for Reopen. After stale review
+  repair, mutations remain disabled until explicit acknowledgement of the latest
+  identity. Duplicate SSE hints, focus/visibility repair, explicit refresh, and
+  refetches preserve acknowledgement when identity is unchanged; an identity
+  change invalidates it.
 
 #### Scenario: Initial bundle uses canonical endpoints
 
@@ -191,29 +203,35 @@ change invalidates it.
 
 ### Requirement: Browser API boundary preserves existing wire contracts
 
-The workspace API layer SHALL use these existing authenticated operations without
-creating aliases, a generic command endpoint, or a protocol redesign:
+The system SHALL satisfy the complete normative contract in this scenario.
 
-- `GET /requirements/{requirement_id}` for canonical Requirement state;
-- `GET /requirements/{requirement_id}/conversation?offset=&limit=` for paged messages;
-- `POST /requirements/{requirement_id}/conversation/messages` for requester-message persistence;
-- the existing structured Requirement `PATCH` operation with
-  `expected_state_version`;
-- `GET /requirements/{requirement_id}/readiness` and
-  `GET /requirements/{requirement_id}/activity?offset=&limit=`;
-- `GET /requirements/{requirement_id}/session` for the public latest-run
-  projection;
-- explicit clarification `start`, run-scoped `dispatch`, and run-scoped
-  `cancel` operations; and
-- `GET /auth/me` and the shared authenticated `GET /events`.
+#### Scenario: Complete contract preserves all requirement clauses
 
-All JSON received for these resources SHALL be runtime-validated at the API
-boundary. Unknown status/kind/phase/role values, missing required identifiers,
-invalid positive version numbers, invalid arrays, and malformed response shapes
-SHALL fail closed with an actionable API error rather than being cast into a
-local type. The existing session response wrapper may be named `session` on the
-wire, but the shared browser contract SHALL expose it as one
-`ClarificationRun | null` concept and SHALL not define a second `Session` entity.
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The workspace API layer SHALL use these existing authenticated operations without
+  creating aliases, a generic command endpoint, or a protocol redesign:
+
+  - `GET /requirements/{requirement_id}` for canonical Requirement state;
+  - `GET /requirements/{requirement_id}/conversation?offset=&limit=` for paged messages;
+  - `POST /requirements/{requirement_id}/conversation/messages` for requester-message persistence;
+  - the existing structured Requirement `PATCH` operation with
+    `expected_state_version`;
+  - `GET /requirements/{requirement_id}/readiness` and
+    `GET /requirements/{requirement_id}/activity?offset=&limit=`;
+  - `GET /requirements/{requirement_id}/session` for the public latest-run
+    projection;
+  - explicit clarification `start`, run-scoped `dispatch`, and run-scoped
+    `cancel` operations; and
+  - `GET /auth/me` and the shared authenticated `GET /events`.
+
+  All JSON received for these resources SHALL be runtime-validated at the API
+  boundary. Unknown status/kind/phase/role values, missing required identifiers,
+  invalid positive version numbers, invalid arrays, and malformed response shapes
+  SHALL fail closed with an actionable API error rather than being cast into a
+  local type. The existing session response wrapper may be named `session` on the
+  wire, but the shared browser contract SHALL expose it as one
+  `ClarificationRun | null` concept and SHALL not define a second `Session` entity.
 
 #### Scenario: Malformed canonical response is rejected
 
@@ -232,31 +250,37 @@ wire, but the shared browser contract SHALL expose it as one
 
 ### Requirement: Requester message persistence precedes clarification intent
 
-Submitting composer content SHALL first persist one requester message through the
-canonical conversation-message operation. The returned stable `message_id` and
-server-created timestamp/body SHALL be retained. A successful persistence call
-SHALL have no runtime side effect by itself: it SHALL not create a run, choose a
-daemon, create `session.start`, or create `message.send`. The workspace SHALL
-not clear or discard composer content until persistence succeeds; a persistence
-failure SHALL leave content available for correction or retry.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-After persistence, the workspace SHALL use explicit intent based on the
-canonical run projection and its known identity:
+#### Scenario: Complete contract preserves all requirement clauses
 
-- with no run, or with a terminal run, it SHALL call clarification `start` for
-  the persisted message and current `expected_state_version`;
-- with an assigned active run and `cancel_requested=false`, it SHALL dispatch
-  the persisted message to that explicit `run_id`;
-- with an awaiting-assignment run, it SHALL not submit a different message for
-  dispatch or start while that run occupies the sequential slot; and
-- with an active cancellation-pending run, it SHALL not dispatch a new message
-  while that run occupies the slot.
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  Submitting composer content SHALL first persist one requester message through the
+  canonical conversation-message operation. The returned stable `message_id` and
+  server-created timestamp/body SHALL be retained. A successful persistence call
+  SHALL have no runtime side effect by itself: it SHALL not create a run, choose a
+  daemon, create `session.start`, or create `message.send`. The workspace SHALL
+  not clear or discard composer content until persistence succeeds; a persistence
+  failure SHALL leave content available for correction or retry.
 
-A start response SHALL retain its returned `run_id` and `start_message_id`.
-The initial start message SHALL not also be dispatched as `message.send`.
-Dispatch and cancellation SHALL never be sent without an explicit known
-`run_id`; a latest-run read SHALL guide presentation only and SHALL not silently
-choose a mutation target.
+  After persistence, the workspace SHALL use explicit intent based on the
+  canonical run projection and its known identity:
+
+  - with no run, or with a terminal run, it SHALL call clarification `start` for
+    the persisted message and current `expected_state_version`;
+  - with an assigned active run and `cancel_requested=false`, it SHALL dispatch
+    the persisted message to that explicit `run_id`;
+  - with an awaiting-assignment run, it SHALL not submit a different message for
+    dispatch or start while that run occupies the sequential slot; and
+  - with an active cancellation-pending run, it SHALL not dispatch a new message
+    while that run occupies the slot.
+
+  A start response SHALL retain its returned `run_id` and `start_message_id`.
+  The initial start message SHALL not also be dispatched as `message.send`.
+  Dispatch and cancellation SHALL never be sent without an explicit known
+  `run_id`; a latest-run read SHALL guide presentation only and SHALL not silently
+  choose a mutation target.
 
 #### Scenario: Persisted message has no runtime side effect
 
@@ -293,23 +317,29 @@ choose a mutation target.
 
 ### Requirement: Composer states expose slot and runtime truth
 
-The composer SHALL expose distinct user-visible states for idle initial input,
-message submission, clarification start/dispatch in progress, active
-clarification, awaiting runtime assignment, cancellation pending, completed
-run, temporarily blocked input, and failure. It MAY serialize one local submit
-chain for accidental double-click prevention, but server/persistence arbitration
-SHALL remain authoritative for concurrent browser contexts.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-While `phase=active` and `cancel_requested=false`, the composer SHALL accept
-later messages even when coarse `status=starting`, `status=running`, or
-`status=unavailable`; an unavailable pinned daemon is a waiting condition, not
-permission to migrate the run. While `phase=awaiting_assignment` or
-`phase=active` with `cancel_requested=true`, the workspace SHALL disable new
-clarification submissions, preserve any unsent draft, and offer only the legal
-same-start retry/cancel controls. It SHALL not silently post an input that
-cannot be dispatched. After `phase=terminal`, a new persisted message MAY start
-a new run using the existing start operation; it SHALL not reactivate or target
-the old run.
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The composer SHALL expose distinct user-visible states for idle initial input,
+  message submission, clarification start/dispatch in progress, active
+  clarification, awaiting runtime assignment, cancellation pending, completed
+  run, temporarily blocked input, and failure. It MAY serialize one local submit
+  chain for accidental double-click prevention, but server/persistence arbitration
+  SHALL remain authoritative for concurrent browser contexts.
+
+  While `phase=active` and `cancel_requested=false`, the composer SHALL accept
+  later messages even when coarse `status=starting`, `status=running`, or
+  `status=unavailable`; an unavailable pinned daemon is a waiting condition, not
+  permission to migrate the run. While `phase=awaiting_assignment` or
+  `phase=active` with `cancel_requested=true`, the workspace SHALL disable new
+  clarification submissions, preserve any unsent draft, and offer only the legal
+  same-start retry/cancel controls. It SHALL not silently post an input that
+  cannot be dispatched. After `phase=terminal`, a new persisted message MAY start
+  a new run using the existing start operation; it SHALL not reactivate or target
+  the old run.
 
 #### Scenario: Awaiting assignment is explicit
 
@@ -338,23 +368,29 @@ the old run.
 
 ### Requirement: Start conflicts, unavailability, and races preserve history
 
-The workspace SHALL preserve every requester message for which persistence
-succeeded, regardless of later start or dispatch outcome. A start conflict for a
-genuinely new logical start SHALL refetch canonical detail state and SHALL not
-retry with a newer `expected_state_version`. A matching same-message
-concurrent/retried start SHALL be presented as reuse of the canonical run, not
-as a stale-new-start failure. A different-message start while a non-terminal
-run occupies the slot SHALL be presented as an occupied-slot conflict; its
-persisted message remains history and is not automatically dispatched or
-rolled back.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-A `503 clarification_unavailable` result SHALL display runtime unavailability
-separately from message persistence and retain the returned awaiting run
-identity. A retry after reload SHALL use that run's public
-`start_message_id`. A dispatch/cancellation conflict, unknown run, or
-Requirement/run mismatch SHALL not be retargeted to another latest run.
-If cancellation wins after message persistence but before dispatch, the message
-SHALL remain history and no message command SHALL be created.
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The workspace SHALL preserve every requester message for which persistence
+  succeeded, regardless of later start or dispatch outcome. A start conflict for a
+  genuinely new logical start SHALL refetch canonical detail state and SHALL not
+  retry with a newer `expected_state_version`. A matching same-message
+  concurrent/retried start SHALL be presented as reuse of the canonical run, not
+  as a stale-new-start failure. A different-message start while a non-terminal
+  run occupies the slot SHALL be presented as an occupied-slot conflict; its
+  persisted message remains history and is not automatically dispatched or
+  rolled back.
+
+  A `503 clarification_unavailable` result SHALL display runtime unavailability
+  separately from message persistence and retain the returned awaiting run
+  identity. A retry after reload SHALL use that run's public
+  `start_message_id`. A dispatch/cancellation conflict, unknown run, or
+  Requirement/run mismatch SHALL not be retargeted to another latest run.
+  If cancellation wins after message persistence but before dispatch, the message
+  SHALL remain history and no message command SHALL be created.
 
 #### Scenario: Same-message Draft race resolves one run
 
@@ -394,13 +430,19 @@ SHALL remain history and no message command SHALL be created.
 
 ### Requirement: Clarification phase, status, completion, and cancellation remain separate
 
-The workspace SHALL consume the existing phase/status projection plus safe retry
-fields without owning retry policy. It SHALL render
-`phase=active,status=retrying` as an active slot-occupying server retry and
-`phase=terminal,status=failed` as terminal execution failure/cancellation. It
-SHALL never auto-submit `session.resume`, create a new run from a browser retry,
-or infer failure/retry from transcript/activity. Unknown-outcome terminal runs
-cannot be resumed; a later execution starts through a new logical run.
+The system SHALL satisfy the complete normative contract in this scenario.
+
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The workspace SHALL consume the existing phase/status projection plus safe retry
+  fields without owning retry policy. It SHALL render
+  `phase=active,status=retrying` as an active slot-occupying server retry and
+  `phase=terminal,status=failed` as terminal execution failure/cancellation. It
+  SHALL never auto-submit `session.resume`, create a new run from a browser retry,
+  or infer failure/retry from transcript/activity. Unknown-outcome terminal runs
+  cannot be resumed; a later execution starts through a new logical run.
 
 #### Scenario: Completion without assessment is not Ready
 
@@ -463,25 +505,31 @@ cannot be resumed; a later execution starts through a new logical run.
 
 ### Requirement: Live Requirement stays canonical and concurrency-safe
 
-The Live Requirement panel SHALL render title, description, summary, acceptance
-criteria, assumptions, open questions, lifecycle status, `revision`,
-`state_version`, creator, and timestamps from the Requirement response. Current
-readiness and repository citations SHALL come only from the readiness response;
-repository citations may show retained repository identity and full commit SHA
-but SHALL not show checkout paths or credentials. Conversation text SHALL never
-be summarized into structured fields.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-The workspace SHALL expose the existing structured Requirement edit contract in
-this slice because the canonical conversations requirement makes structured
-edits through the conversation surface part of North 0.1. This adds no new
-backend edit semantics. Every save SHALL send the displayed `state_version` as
-`expected_state_version` and shall use the server response as the next canonical
-Requirement. The panel SHALL not optimistically predict a Ready-to-Discussing
-demotion. A 409 SHALL keep the unsaved draft available for user reconciliation,
-refetch the canonical bundle, and explain that the Requirement changed; it SHALL
-not blindly retry. Accepted and Rejected Requirements remain subject to the
-existing terminal edit rules, and no new lifecycle transition is introduced by
-this workspace.
+#### Scenario: Complete contract preserves all requirement clauses
+
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The Live Requirement panel SHALL render title, description, summary, acceptance
+  criteria, assumptions, open questions, lifecycle status, `revision`,
+  `state_version`, creator, and timestamps from the Requirement response. Current
+  readiness and repository citations SHALL come only from the readiness response;
+  repository citations may show retained repository identity and full commit SHA
+  but SHALL not show checkout paths or credentials. Conversation text SHALL never
+  be summarized into structured fields.
+
+  The workspace SHALL expose the existing structured Requirement edit contract in
+  this slice because the canonical conversations requirement makes structured
+  edits through the conversation surface part of North 0.1. This adds no new
+  backend edit semantics. Every save SHALL send the displayed `state_version` as
+  `expected_state_version` and shall use the server response as the next canonical
+  Requirement. The panel SHALL not optimistically predict a Ready-to-Discussing
+  demotion. A 409 SHALL keep the unsaved draft available for user reconciliation,
+  refetch the canonical bundle, and explain that the Requirement changed; it SHALL
+  not blindly retry. Accepted and Rejected Requirements remain subject to the
+  existing terminal edit rules, and no new lifecycle transition is introduced by
+  this workspace.
 
 #### Scenario: Transcript cannot alter structured panel
 
@@ -550,35 +598,41 @@ workspace state; no client transition is authoritative.
 
 ### Requirement: Activity, errors, privacy, and accessibility are actionable
 
-The workspace SHALL display only server-published coarse activity summaries and
-safe readiness/session state. It SHALL never render chain-of-thought, raw
-prompts, hidden model context, raw tool-call traces, credentials, checkout
-paths, provider SDK records, daemon logs, or unfiltered failure diagnostics.
-Message bodies SHALL be rendered as text, not trusted HTML. Event IDs, daemon
-IDs, runtime IDs, and command payloads SHALL not be presented as user-facing
-execution controls.
+The system SHALL satisfy the complete normative contract in this scenario.
 
-User-visible errors SHALL distinguish at least: message submission failure,
-clarification start/dispatch conflict, runtime unavailable before assignment,
-pinned runtime unavailable, run failure, cancellation pending/completion/failure,
-canonical Requirement refresh failure, and temporary SSE reconnect. A stale
-canonical Requirement SHALL remain visible during non-initial failure where
-possible. Recovery controls SHALL be explicit and safe: retry the same
-unassigned start, retry a failed HTTP read, reconcile an edit, or cancel the
-known run; there SHALL be no blind state-version retry, frontend polling loop,
-or automatic new-run fallback.
+#### Scenario: Complete contract preserves all requirement clauses
 
-Composer controls, status announcements, tabs/sections, error messages, and
-activity updates SHALL have accessible names, keyboard operation, visible focus,
-and appropriate live/status semantics. Responsive layout SHALL not depend on
-hover or color alone to communicate availability, cancellation, failure, or
-readiness.
+- **WHEN** the described capability is exercised
+- **THEN** the following clauses apply:
+  The workspace SHALL display only server-published coarse activity summaries and
+  safe readiness/session state. It SHALL never render chain-of-thought, raw
+  prompts, hidden model context, raw tool-call traces, credentials, checkout
+  paths, provider SDK records, daemon logs, or unfiltered failure diagnostics.
+  Message bodies SHALL be rendered as text, not trusted HTML. Event IDs, daemon
+  IDs, runtime IDs, and command payloads SHALL not be presented as user-facing
+  execution controls.
 
-Coarse activity display is best-effort observability. Activity rows may expire
-under bounded retention; conversation history, readiness evidence, the
-clarification-run projection, and review state SHALL remain unaffected, and the
-workspace SHALL render a valid empty or partial activity history without
-treating expiry as an error.
+  User-visible errors SHALL distinguish at least: message submission failure,
+  clarification start/dispatch conflict, runtime unavailable before assignment,
+  pinned runtime unavailable, run failure, cancellation pending/completion/failure,
+  canonical Requirement refresh failure, and temporary SSE reconnect. A stale
+  canonical Requirement SHALL remain visible during non-initial failure where
+  possible. Recovery controls SHALL be explicit and safe: retry the same
+  unassigned start, retry a failed HTTP read, reconcile an edit, or cancel the
+  known run; there SHALL be no blind state-version retry, frontend polling loop,
+  or automatic new-run fallback.
+
+  Composer controls, status announcements, tabs/sections, error messages, and
+  activity updates SHALL have accessible names, keyboard operation, visible focus,
+  and appropriate live/status semantics. Responsive layout SHALL not depend on
+  hover or color alone to communicate availability, cancellation, failure, or
+  readiness.
+
+  Coarse activity display is best-effort observability. Activity rows may expire
+  under bounded retention; conversation history, readiness evidence, the
+  clarification-run projection, and review state SHALL remain unaffected, and the
+  workspace SHALL render a valid empty or partial activity history without
+  treating expiry as an error.
 
 #### Scenario: Raw runtime detail is not exposed
 

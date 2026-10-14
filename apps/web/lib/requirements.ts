@@ -18,7 +18,35 @@ export const requirementStatusLabels = {
   rejected: "Rejected",
 } satisfies Record<RequirementStatus, string>;
 
-export type RequirementSort = "updated" | "updated_asc";
+export type RequirementSort = "updated" | "updated_asc" | "board";
+
+export type ReorderRequirementInput = {
+  expected_state_version: number;
+  before_id: string | null;
+  after_id: string | null;
+};
+
+export async function reorderRequirement(
+  id: string,
+  input: ReorderRequirementInput,
+): Promise<void> {
+  await requestJson(`/requirements/${encodeURIComponent(id)}/reorder`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function beginRequirementDiscussion(
+  id: string,
+  expected_state_version: number,
+): Promise<Requirement> {
+  return parseRequirement(
+    await requestJson(
+      `/requirements/${encodeURIComponent(id)}/begin-discussion`,
+      { method: "POST", body: JSON.stringify({ expected_state_version }) },
+    ),
+  );
+}
 
 export type Requirement = {
   id: string;

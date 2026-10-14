@@ -19,15 +19,18 @@ vi.mock("@/components/requirement-board", () => ({
 vi.mock("@/components/requirement-list", () => ({
   RequirementList: ({
     onCreateAction,
+    onPreferencesChange,
     preferences,
   }: {
     onCreateAction: () => void;
+    onPreferencesChange: (preferences: { status: string; creator: string; sort: string }) => void;
     preferences: { status: string; creator: string; sort: string };
   }) => (
     <>
       <output data-testid="list-preferences">
         {`${preferences.status}|${preferences.creator}|${preferences.sort}`}
       </output>
+      <button aria-label="Edit preferences" type="button" onClick={() => onPreferencesChange({ status: "draft", creator: "Local edit", sort: "updated" })}>edit preferences</button>
       <button type="button" onClick={onCreateAction}>
         list
       </button>
@@ -109,13 +112,35 @@ describe("RequirementWorkspace", () => {
     ).toBe("ready|Mina|updated_asc");
   });
 
+  it("does not let a slow load or save response replace newer local edits", async () => {
+    let resolveLoad!: (value: { default_view: string; list_status: string; list_created_by: string; list_sort: string }) => void;
+    preferenceApi.getRequirementWorkspacePreferences.mockReturnValue(new Promise((resolve) => { resolveLoad = resolve; }));
+    await renderWorkspace();
+    expect(container?.querySelector('[role="status"]')?.textContent).toContain("載入個人預設中");
+    expect(container?.querySelector('[aria-label="Save as default"]')).toBeNull();
+    await act(async () => resolveLoad({ default_view: "list", list_status: "ready", list_created_by: "Server", list_sort: "updated" }));
+
+    let resolveSave!: (value: { default_view: "list"; list_status: "ready"; list_created_by: "Server"; list_sort: "updated" }) => void;
+    preferenceApi.saveRequirementWorkspacePreferences.mockReturnValue(new Promise((resolve) => { resolveSave = resolve; }));
+    await click('[aria-label="Save as default"]');
+    await click('[aria-label="Save as default"]');
+    expect(preferenceApi.saveRequirementWorkspacePreferences).toHaveBeenCalledTimes(1);
+    await click('[aria-label="Edit preferences"]');
+    await act(async () => resolveSave({ default_view: "list", list_status: "ready", list_created_by: "Server", list_sort: "updated" }));
+    expect(container?.querySelector('[data-testid="list-preferences"]')?.textContent).toBe("draft|Local edit|updated");
+    expect(container?.textContent).not.toContain("已儲存個人預設");
+  });
+
   it("shows an error when saving preferences fails", async () => {
     preferenceApi.saveRequirementWorkspacePreferences.mockRejectedValue(
       new Error("network failure"),
     );
 
     await renderWorkspace();
+    await click('[aria-label="List"]');
+    await click('[aria-label="Edit preferences"]');
     await click('[aria-label="Save as default"]');
+    expect(container?.querySelector('[data-testid="list-preferences"]')?.textContent).toBe("draft|Local edit|updated");
     expect(container?.querySelector('[role="alert"]')?.textContent).toContain(
       "無法儲存個人預設",
     );

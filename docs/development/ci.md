@@ -64,6 +64,12 @@ finalization waits for both image publications; GHCR failure leaves draft privat
 
 Only `publish-semver-images` receives `packages: write`; main and manual qualification have no GHCR publisher permission. Draft upload and finalization jobs receive `contents: write` only; no publisher receives TLS secrets. The SemVer publisher accepts an existing tag only when its registry digest matches the qualified OCI digest. Workflow dispatch with a full `source_sha` qualifies only. Strict tag validation rejects prereleases and build metadata. GHCR visibility remains an owner setting; operators should pin registry digests. Signing, provenance, and SBOM remain deferred. Operator installation, archive verification, `north setup`, and daemon lifecycle commands are documented in [`docs/deployment/self-hosted.md`](../deployment/self-hosted.md).
 
+## OpenWiki update workflow
+
+The scheduled OpenWiki workflow (`.github/workflows/openwiki-update.yml`) can read repository files, including `.git/config`. Keep full history with `fetch-depth: 0`, but set `persist-credentials: false` so checkout does not leave its token in repository configuration. Do not pass the GitHub publishing token to OpenWiki through environment variables or files. The later `peter-evans/create-pull-request` action must receive `token: ${{ secrets.GITHUB_TOKEN }}` explicitly.
+
+OpenWiki and its Mermaid/jsdom helpers are pinned in `.github/openwiki-tools/package.json` and `.github/openwiki-tools/package-lock.json`. Install them with `npm ci --prefix .github/openwiki-tools`; run `.github/openwiki-tools/node_modules/.bin/openwiki` from the repository root. Do not use a global or unlocked install. Architecture coverage in `tests/architecture/tests/architecture.rs` enforces credential ordering and locked tool installation.
+
 ## PR-Agent advisory review
 
 North includes an advisory PR-Agent workflow at

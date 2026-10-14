@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "sem": {
+      "source": "Ataraxy-Labs/sem",
+      "sourceType": "github",
+      "skillPath": "agent-skill/SKILL.md",
+      "computedHash": "8090e00bac2d8df808e339bfa8166be8fd85d1a1061031adc1d8a3e9195199f1"
+    }
+  }
+}

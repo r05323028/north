@@ -2,7 +2,7 @@
 
 ## Context
 
-See `proposal.md` for motivation and scope. Current main has real PostgreSQL integration, server-owned clarification/readiness/review paths, a daemon-initiated WebSocket protocol, browser EventSource refetch logic, and mocked-route Playwright coverage. It does not have a runnable `north-server` binary, a built-release smoke path, a production package contract, or a release workflow. `migrations/README.md` records the consolidated `0001_initial_schema.sql` baseline; `fresh_install` verifies an empty install, while unsupported historical-upgrade coverage is removed. `validate.sh smoke` exits as unsupported. Browser SSE remains partially enforced because existing Playwright routes fulfill `/events` and API responses in-process rather than using a live server/database.
+See `proposal.md` for motivation and scope. Current main has real PostgreSQL integration, server-owned clarification/readiness/review paths, a daemon-initiated WebSocket protocol, browser EventSource refetch logic, and mocked-route Playwright coverage. It does not have a runnable `north-server` binary, a built-release smoke path, a production package contract, or a release workflow. `north-persistence` embeds the full current schema as one compiled SeaORM baseline in `crates/north-persistence/src/initial_schema.rs`; its recorded head is `m0001_initial_schema`. `fresh_install` verifies an empty install and no longer supports intermediate-schema upgrades. `validate.sh smoke` exits as unsupported. Browser SSE remains partially enforced because existing Playwright routes fulfill `/events` and API responses in-process rather than using a live server/database.
 
 The design must preserve these boundaries:
 

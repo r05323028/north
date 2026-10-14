@@ -28,16 +28,26 @@ Draft ──▶ Discussing ──▶ Ready ──▶ Accepted
 The board groups Requirements in lifecycle order: Draft, Discussing, Ready,
 Accepted, Rejected. Within each status column, persisted presentation rank
 controls card order. New Requirements and successful status transitions append
-to their destination column; migration backfill preserves deterministic
-creation order within each existing column.
+to their destination column. The 0.1.0 baseline is installed only on an empty
+schema, so it has no existing Requirements to rank or historical ranks to
+backfill.
 
-Drag-and-drop is same-column only. `POST /requirements/{id}/reorder` carries
-`expected_state_version` plus immediate neighbors after removing the moved card:
-`before_id` is its predecessor and `after_id` its successor; `null` marks a
-column boundary. Stale versions, non-adjacent neighbors, or cross-column moves
-conflict. Reordering changes presentation rank only: requirement content,
-`revision`, `state_version`, and readiness evidence stay unchanged. The additive
-`sort=board` collection order does not replace existing updated-time sorting.
+Same-column drag-and-drop uses `POST /requirements/{id}/reorder`, which remains
+same-column-only. It carries `expected_state_version` plus immediate neighbors
+after removing the moved card: `before_id` is its predecessor and `after_id`
+its successor; `null` marks a column boundary. Stale versions, non-adjacent
+neighbors, or cross-column reorder requests conflict.
+
+Board cross-column drags are limited to existing domain API transitions:
+Draft → Discussing invokes begin-discussion; reviewer-only Rejected → Discussing
+invokes reopen. Server authorization and domain validation still govern both.
+Discussing → Ready cannot be dragged: readiness assessment alone promotes it.
+Ready accept, reject, and request-changes decisions stay in the review panel and
+require the current assessment/review identity and applicable human-review or
+feedback requirements. Accepted is terminal. No drag directly mutates stored
+state. Reordering changes presentation rank only: requirement content, `revision`,
+`state_version`, and readiness evidence stay unchanged. The additive `sort=board`
+collection order does not replace existing updated-time sorting.
 
 ## Version semantics
 

@@ -1,6 +1,6 @@
--- North 0.1.0 initial schema baseline.
--- Consolidated from unreleased migrations in original version order.
--- After first public release, keep this file immutable and append later versions.
+-- Independent SQL reference for the complete North 0.1.0 clean-install schema.
+-- Includes the former SQL baseline and unreleased workspace tables.
+-- This fixture is a catalog oracle, not a runtime migration.
 
 -- Consolidated source: 0001_email_auth.sql
 CREATE TABLE users (
@@ -807,3 +807,24 @@ UPDATE verification_codes
 SET used_at = CURRENT_TIMESTAMP
 WHERE used_at IS NULL
   AND expires_at > CURRENT_TIMESTAMP;
+
+-- Current 0.1.0 workspace tables; formerly separate unpublished migrations.
+CREATE TABLE requirement_board_positions (
+    requirement_id TEXT PRIMARY KEY
+        REFERENCES requirements(id) ON DELETE CASCADE,
+    rank BIGINT NOT NULL
+);
+
+CREATE TABLE user_requirement_preferences (
+    user_id TEXT PRIMARY KEY
+        REFERENCES users(id) ON DELETE CASCADE,
+    default_view TEXT NOT NULL DEFAULT 'board'
+        CHECK (default_view IN ('board', 'list')),
+    list_status TEXT
+        CHECK (list_status IS NULL OR list_status IN ('draft', 'discussing', 'ready', 'accepted', 'rejected')),
+    list_created_by TEXT
+        CHECK (list_created_by IS NULL OR CHAR_LENGTH(BTRIM(list_created_by)) BETWEEN 1 AND 256),
+    list_sort TEXT NOT NULL DEFAULT 'updated'
+        CHECK (list_sort IN ('updated', 'updated_asc')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

@@ -8,36 +8,27 @@ Defines reconnect-safe server-to-daemon command delivery and daemon-to-server ev
 
 ### Requirement: Commands cross a durable idempotency boundary
 
-Every server command SHALL carry a stable `command_id`, `session_id`, and
-monotonic `server_command_seq`. The server SHALL durably persist a command
-before dispatching it and SHALL retain it until a daemon `command_ack`
-acknowledges durable receipt. Delivery SHALL be at least once. The daemon SHALL
-persist an inbox/processed-command record keyed by daemon identity and
-`command_id` before sending `command_ack`.
-
-`command_ack` means the command is durably recorded for processing; it
-MUST NOT be interpreted as runtime completion. Runtime completion and failure
-remain facts/events handled by server execution policy. The daemon's local
-command-journal terminal outcome describes processing or dispatching that one
-command (`dispatch_succeeded`, `dispatch_failed`, or `unknown`; existing
-`completed`/`failed` labels may be aliases). It does not mean the execution
-session is terminal: `session.start` dispatch may succeed while the session
-remains Running, with a later `session.completed` or `session.failed` event.
-
-The durable command coordinator SHALL decide journal state and idempotency before
-crossing a narrow internal dispatch/execution seam that accepts stable command
-and runtime-operation identity. Durable-delivery tests MAY use a deterministic
-fake executor. The landed `clarification-runtime` capability provides the real
-runtime adapter; this delivery contract does not define agent prompting, SDK
-behavior, tool choice, repository inspection, or readiness judgment.
-A duplicate command MUST return the same acceptance outcome and MUST NOT
-invoke the runtime again or duplicate a side effect. In particular, one
-`message.send` command SHALL submit its user message to the agent at most once.
+Every server command SHALL carry stable `command_id`, `session_id`, and monotonic `server_command_seq`. The server SHALL persist it before at-least-once dispatch and retain it until durable daemon `command_ack`. The daemon SHALL persist an inbox identity keyed by daemon identity and `command_id` before ACK. ACK means durable receipt, not runtime completion. The coordinator SHALL gate dispatch with idempotency; duplicates SHALL not repeat side effects or submit `message.send` twice.
 
 #### Scenario: Reconnect retries one message safely
 
 - **WHEN** a `message.send` frame is lost after server outbox persistence and the server resends the same `command_id`
 - **THEN** the daemon durably accepts the id once, submits the message at most once, and acknowledges duplicate delivery without another runtime submission
+
+#### Scenario: Duplicate delivery preserves acceptance
+
+- **WHEN** the daemon receives a command ID again after durable acceptance
+- **THEN** it returns the same acceptance outcome without another side effect or runtime invocation; one `message.send` is submitted at most once
+
+#### Scenario: Command acknowledgement is not runtime completion
+
+- **WHEN** a `session.start` dispatch is acknowledged while its runtime continues
+- **THEN** `command_ack` means durable recording only; the command journal records `dispatch_succeeded`, `dispatch_failed`, or `unknown` (`completed`/`failed` may be aliases) for that command, while the session remains Running until server execution policy handles later `session.completed` or `session.failed` facts/events
+
+#### Scenario: Durable coordinator owns the dispatch seam
+
+- **WHEN** the durable command coordinator prepares runtime dispatch
+- **THEN** it decides journal state and idempotency before a narrow internal seam accepting stable command and runtime-operation identity; tests MAY use a deterministic fake executor and `clarification-runtime` provides the real adapter. This contract does not define agent prompting, SDK behavior, tool choice, repository inspection, or readiness judgment.
 
 #### Scenario: Accepted command survives daemon restart
 
@@ -46,14 +37,7 @@ invoke the runtime again or duplicate a side effect. In particular, one
 
 ### Requirement: Processed-command history has a safe compaction boundary
 
-The daemon SHALL NOT remove a processed-command identity while its session is
-active or while the server can resend the command. After a session reaches a
-terminal execution state and reconciliation confirms a contiguous command
-watermark, the daemon MAY replace individual records through that watermark
-with a durable per-session `processed_through_seq` tombstone. Sparse records
-above the watermark SHALL remain. The watermark SHALL be retained for the
-life of the durable session, so a late duplicate at or below it remains a
-no-op. North 0.1.0 SHALL NOT expire this tombstone by time alone.
+Daemon SHALL retain processed-command identities while a session is active or the server can resend. After terminal execution and reconciliation confirms a contiguous command watermark, it MAY replace records through it with a durable per-session `processed_through_seq`; sparse records above remain. Keep the watermark for the durable-session lifetime; North 0.1.0 SHALL NOT expire it by time alone.
 
 #### Scenario: Terminal session compacts without reopening a side effect
 
@@ -62,23 +46,12 @@ no-op. North 0.1.0 SHALL NOT expire this tombstone by time alone.
 
 ### Requirement: Directional sequence spaces reconcile gaps
 
-For each session, server command sequences and daemon event sequences SHALL be
-independent, monotonic, and persisted before transmission. The daemon SHALL
-replay buffered events in `daemon_event_seq` order. The server SHALL process
-events in contiguous order, buffer or request replay for a gap, and commit
-business effects before acknowledging the event sequence. Each
-`SessionReconcileState` in the connection-level snapshot SHALL carry command and
-event contiguous watermarks and MAY carry a canonical `event_ack_sparse` list
-when processing is non-contiguous. When present, the list SHALL contain only
-values above `event_ack_through_seq`, contain no duplicates, and be strictly
-ascending.
+Server-command and daemon-event sequences SHALL be independent, monotonic, persisted before send; daemon SHALL replay in order. Server SHALL process events contiguously, buffer/replay gaps, and commit effects before ACK. Connection snapshots carry both watermarks and MAY include sparse ACKs. Duplicate ID+sequence is harmless and re-ACKed; the same sequence with another ID is a protocol error; late ACKed frames are inert; out-of-order events SHALL wait for gap closure before effects.
 
-An id identifies one delivery for idempotency; a sequence orders deliveries
-and detects gaps. A duplicate with the same id and sequence SHALL be harmless
-and re-acknowledged. The same sequence with a different id SHALL be a protocol
-error. A late frame at or below an acknowledged contiguous sequence SHALL have
-no business effect. An out-of-order frame MAY be durably buffered but SHALL
-NOT be applied to business state until its gap is reconciled.
+#### Scenario: Sparse event acknowledgements are canonical
+
+- **WHEN** a connection snapshot includes non-contiguous event acknowledgements for a session
+- **THEN** each `SessionReconcileState` carries command and event contiguous watermarks; optional `event_ack_sparse` contains only unique ascending values above `event_ack_through_seq`
 
 #### Scenario: Event gap blocks premature promotion
 
@@ -92,13 +65,7 @@ NOT be applied to business state until its gap is reconciled.
 
 ### Requirement: Reconciliation is a connection-level snapshot
 
-The server SHALL send one finite `ReconcileSnapshot` per authenticated daemon
-connection. The snapshot MAY contain zero sessions or SHALL contain one unique
-`SessionReconcileState` for each session pinned to that daemon. Each state SHALL
-carry command/event contiguous ACK watermarks and a canonical `event_ack_sparse`
-list. The wire contract SHALL reject empty session IDs, sparse values at or below
-`event_ack_through_seq`, duplicate sparse values, non-ascending sparse values,
-and duplicate session IDs.
+Server SHALL send one finite `ReconcileSnapshot` per authenticated daemon connection: zero sessions or one unique `SessionReconcileState` per pinned session. Each state carries command/event ACK watermarks and canonical `event_ack_sparse`. Wire validation SHALL reject empty/duplicate session IDs, duplicate or non-ascending sparse values, and sparse values at or below `event_ack_through_seq`.
 
 #### Scenario: Empty reconciliation is explicit
 
@@ -112,23 +79,17 @@ and duplicate session IDs.
 
 ### Requirement: Compatible peers and unknown frames fail deterministically
 
-Daemon hello/registration and the server welcome SHALL carry exact
-`protocol_version` `0.1`. Each frame SHALL carry `schema_version` `1` for the
-0.1.0 catalog. A peer with no exact protocol-version match SHALL receive a
-`protocol.error` with an incompatibility code and the connection SHALL close
-before session traffic. An unknown command/event type or unsupported schema
-version on an otherwise compatible connection SHALL receive an explicit
-`protocol.error`, SHALL have no side effect, and SHALL close that connection. A
-`protocol.error` has no severity discriminator and is terminal to the current
-connection; the host decides whether a future connection may be attempted.
-Unacknowledged durable messages remain eligible for reconciliation after an
-upgrade. North 0.1.x SHALL not negotiate plugin ranges or silently reinterpret
-unknown payloads.
+Daemon hello and server welcome SHALL use exact `protocol_version` `0.1`; each frame SHALL use `schema_version` `1`. Version mismatch SHALL send incompatibility `protocol.error` and close before session traffic. Unknown command/event types or unsupported schema SHALL send explicit error, cause no effect, and close. Unacknowledged durable messages remain reconcilable after upgrades; North 0.1.x SHALL NOT negotiate plugin ranges or reinterpret unknown payloads.
 
 #### Scenario: Incompatible daemon cannot start work
 
 - **WHEN** a daemon registers protocol version `0.2` with a 0.1 server
 - **THEN** the server sends an incompatibility protocol error, refuses registration, and starts no session
+
+#### Scenario: Protocol error terminates one connection
+
+- **WHEN** a peer receives `protocol.error`
+- **THEN** the error has no severity discriminator and ends the current connection; the host determines whether a future connection may be attempted
 
 #### Scenario: Unknown frame is never guessed
 

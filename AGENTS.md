@@ -358,19 +358,27 @@ Keep the kernel for a normal install. `rig daemon start --no-kernel` is for auto
 omit its startup, including the operator that helps the person start a team.
 Read `rig status` and `rig ps --nodes --rig kernel`: started is not ready. The view may open
 while agents finish starting; report their actual state and use the guide's existing recovery routes when needed.
-Ask the person: **“Open the OpenRig view now?”** Yes opens a new terminal space using installed herdr, else cmux,
-else the guide's exact new-terminal command. No gives the command to open it later. Over SSH, give the exact
-connection/attach command. Never attach into your own terminal or take over an existing space; no new provider install.
-No, SSH and headless use are valid background outcomes. For herdr, open or attach the actual session and check what
-the person sees; creating a workspace or running the CLI in a new OS window is not proof that its view is visible.
-Use `rig terminal open saved:kernel --provider herdr` (or `--provider cmux`); the default view needs no YAML edit.
-Show TUI | advisor | operator in that order for Claude-only, Codex-only and mixed kernels.
-Keep the queue worker off the first view and accessible through the TUI. Reuse the existing conversations and accounts.
-`rig tui --shared` is the team dashboard, not the operator's conversation. Without herdr or cmux, find the
-`operator.agent` row with `rig ps --nodes --rig kernel --json`. Give the person
-`env -u TMUX tmux attach-session -t '=<canonicalSessionName>'`, with that row's actual name filled in, for a new terminal on
-the same host and user (over SSH, connect there first). This shows the existing operator conversation and accepts
-their answers; Ctrl-b, then d detaches without stopping it. Do not attach in your own terminal.
+Right after OpenRig is installed or started, and whenever the person wants to see their agents or OpenRig again,
+open the OpenRig TUI and operator for them: say so, then run `rig terminal open saved:kernel --window --json` on the
+daemon's desktop. Don't wait for particular words. The command opens a new terminal tab/window using
+installed herdr, otherwise plain tmux; inside Herdr it opens a space there. It preserves existing conversations. The default view
+needs no YAML edit. Below 120 measured columns (or unknown width), show the operator alone first; from 120,
+show dashboard and operator equally side by side. The advisor always has a separate tab or tmux window.
+This applies to Claude-only, Codex-only and mixed kernels.
+Keep the queue worker off the first view and accessible through the TUI. Reuse existing conversations and accounts.
+Inspect the result and visible content using authorized desktop tools, or report that visibility is unconfirmed.
+Herdr is visible only inside a terminal the person can see. Creating a workspace or switching the shared TUI
+to `:terminals` does not open that terminal. A window request or CLI success alone is not visual proof. On a
+desktop, do not finish by showing a table or suggesting a command instead of opening the requested view.
+Only if the window cannot open, `rig tui --shared` is the named dashboard-only fallback, not the operator's
+conversation. Explain the failure and help with the chosen fallback; do not attach in your own terminal.
+Over headless SSH, explain that no visible terminal opened; tell the person to open a new terminal window or
+tab and give one complete connection and attachment command using the current Herdr endpoint, as in the guide.
+No, SSH and headless use are valid background outcomes. If the person chooses a manual operator attachment after
+a failure, find the `operator.agent` row with
+`rig ps --nodes --rig kernel --json --fields logicalId,canonicalSessionName,tmuxAttachCommand`. Give `env -u TMUX` followed by
+that row's `tmuxAttachCommand`, exactly as listed (it names the daemon's tmux server when that isn't the default
+one), for a new terminal on the same host and user (over SSH, connect there first). Ctrl-b, then d detaches without stopping it.
 Ask the person's goal and project folder, then hand them to the ready operator; do not implement the project yourself.
 Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
 `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'`,
@@ -403,3 +411,20 @@ were handed and what counts as done. If you are setting up a world pack for your
 `rig context get world-example` has a fill-in template.
 
 <!-- END OpenRig MANAGED BLOCK: openrig-onboarding-02.md -->
+
+<!-- OPENWIKI:START -->
+
+## OpenWiki
+
+This repository has a generated `openwiki/` evidence index. It is optional just-in-time context, not required startup reading.
+
+- Do not enumerate, preload, or search wikis at task start. Use retrieval when the user asks for it, when unfamiliar architecture or dependency behavior materially affects the task, or when source inspection leaves an important uncertainty. Stop once the question is grounded.
+- When those conditions apply and OpenWiki retrieval tools are available, use `openwiki_search` for just-in-time context and `openwiki_read` for the relevant complete sections. If search returns `workspace_required`, ask which listed workspace to use and retry with its ID.
+- Use `openwiki_list_workspaces` or `openwiki_list_wikis` when workspace membership itself needs to be discovered.
+- If the retrieval tools are unavailable, read `openwiki/quickstart.md` and follow its links to the relevant pages.
+- Treat source code and tests as authoritative. A brief's unknowns and review items are verification gaps, not automatic requirements.
+- Prefer the narrowest quiet validation that proves the changed behavior. Preserve complete failure output.
+
+The scheduled OpenWiki GitHub Actions workflow refreshes the repository wiki. Do not hand-edit generated OpenWiki pages unless explicitly asked; prefer updating source code/docs and letting OpenWiki regenerate.
+
+<!-- OPENWIKI:END -->

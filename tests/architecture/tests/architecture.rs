@@ -978,6 +978,28 @@ fn requirement_board_stays_presentation_only() {
         "owner",
         "assignee",
     ];
+    let board = fs::read_to_string(root.join("apps/web/components/requirement-board.tsx"))
+        .expect("read Requirement Board drag policy");
+    assert!(board.contains("beginRequirementDiscussion(source.id, source.state_version)"));
+    assert!(board.contains(
+        "reopenRequirement(source.id, { expected_state_version: source.state_version })"
+    ));
+    assert!(board.contains("source.status === \"accepted\""));
+    assert!(board.contains("initialStatus !== destinationStatus"));
+    assert!(board.contains(r#"source.status === "draft" && destinationStatus === "discussing""#));
+    assert!(board.contains(r#"source.status === "rejected" && destinationStatus === "discussing""#));
+    assert!(board.contains("reorderRequirement(source.id"));
+    for forbidden_review_call in [
+        "acceptRequirement(",
+        "rejectRequirement(",
+        "requestRequirementChanges(",
+        "readyRequirement(",
+    ] {
+        assert!(
+            !board.contains(forbidden_review_call),
+            "Board must not call Ready or direct review API `{forbidden_review_call}`"
+        );
+    }
     let mut violations = Vec::new();
     for relative in source_paths {
         let path = root.join(relative);
@@ -989,7 +1011,11 @@ fn requirement_board_stays_presentation_only() {
             if relative == "apps/web/lib/requirement-events.ts" && marker == "activity" {
                 continue;
             }
-            if text.contains(marker) {
+            let allowed_board_drag = relative == "apps/web/components/requirement-board.tsx"
+                && matches!(marker, "onDrag" | "draggable");
+            let allowed_begin_discussion =
+                relative == "apps/web/lib/requirements.ts" && marker == "/begin-discussion";
+            if !allowed_board_drag && !allowed_begin_discussion && text.contains(marker) {
                 violations.push(format!("{relative} contains `{marker}`"));
             }
         }
@@ -999,6 +1025,121 @@ fn requirement_board_stays_presentation_only() {
         "Board frontend must stay HTTP/SSE presentation-only:\n{}",
         violations.join("\n")
     );
+}
+
+fn named_workflow_step<'a>(workflow: &'a str, name: &str) -> &'a str {
+    let marker = format!("\n      - name: {name}\n");
+    let start = workflow
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing workflow step `{name}`"))
+        + 1;
+    let remaining = &workflow[start..];
+    let end = remaining.find("\n      - name:").unwrap_or(remaining.len());
+    &remaining[..end]
+}
+
+/// The model-facing OpenWiki workflow must not expose checkout credentials.
+#[test]
+fn openwiki_update_workflow_preserves_credentials_boundary() {
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/openwiki-update.yml"))
+        .expect("read .github/workflows/openwiki-update.yml");
+    let checkout = named_workflow_step(&workflow, "Check out repository");
+    let install = named_workflow_step(&workflow, "Install OpenWiki");
+    let openwiki = named_workflow_step(&workflow, "Run OpenWiki");
+    let create_pr = named_workflow_step(&workflow, "Create OpenWiki update pull request");
+
+    assert!(
+        install.contains("npm ci --prefix .github/openwiki-tools"),
+        "OpenWiki tools must install from their committed lockfile"
+    );
+    assert!(
+        !workflow.contains("npm install --global"),
+        "OpenWiki dependencies must not be globally and unlocked-installed"
+    );
+    assert!(
+        openwiki.contains(".github/openwiki-tools/node_modules/.bin/openwiki"),
+        "the workflow must invoke the repository-local OpenWiki binary"
+    );
+
+    let checkout_position = workflow
+        .find("- name: Check out repository")
+        .expect("checkout step exists");
+    let openwiki_position = workflow
+        .find("- name: Run OpenWiki")
+        .expect("OpenWiki step exists");
+    let create_pr_position = workflow
+        .find("- name: Create OpenWiki update pull request")
+        .expect("PR action step exists");
+
+    assert_eq!(
+        workflow.matches("uses: actions/checkout@").count(),
+        1,
+        "the OpenWiki workflow must have exactly one checkout"
+    );
+    assert!(checkout_position < openwiki_position);
+    assert!(openwiki_position < create_pr_position);
+    assert!(checkout.contains("fetch-depth: 0"));
+    assert!(
+        checkout.contains("persist-credentials: false"),
+        "checkout credentials must not persist in repository config"
+    );
+    assert!(
+        create_pr.contains("token: ${{ secrets.GITHUB_TOKEN }}"),
+        "the later PR action must receive its token explicitly"
+    );
+    assert_eq!(
+        workflow.matches("secrets.GITHUB_TOKEN").count(),
+        1,
+        "the publishing token must appear only in the PR action"
+    );
+
+    for forbidden in [
+        "secrets.GITHUB_TOKEN",
+        "github.token",
+        "GITHUB_TOKEN",
+        "git config",
+        "extraheader",
+        "token:",
+    ] {
+        assert!(
+            !workflow[..openwiki_position].contains(forbidden),
+            "GitHub credentials must not be configured before OpenWiki: `{forbidden}`"
+        );
+    }
+    for forbidden in [
+        "secrets.GITHUB_TOKEN",
+        "github.token",
+        "GITHUB_TOKEN",
+        "token:",
+    ] {
+        assert!(
+            !openwiki.contains(forbidden),
+            "OpenWiki must not receive a publishing token: `{forbidden}`"
+        );
+    }
+
+    let tools_dir = repo_root().join(".github/openwiki-tools");
+    let manifest = fs::read_to_string(tools_dir.join("package.json"))
+        .expect("read OpenWiki tools package manifest");
+    let lockfile = fs::read_to_string(tools_dir.join("package-lock.json"))
+        .expect("read OpenWiki tools lockfile");
+    assert!(lockfile.contains("\"lockfileVersion\": 3"));
+    for (package, version) in [
+        ("openwiki", "0.7.2"),
+        ("mermaid", "11.16.0"),
+        ("jsdom", "29.1.1"),
+    ] {
+        assert!(
+            manifest.contains(&format!("\"{package}\": \"{version}\"")),
+            "the tool manifest must pin {package}@{version}"
+        );
+        assert!(
+            lockfile.contains(&format!(
+                "\"node_modules/{package}\": {{\n      \"version\": \"{version}\""
+            )),
+            "the npm lockfile must resolve {package}@{version}"
+        );
+    }
 }
 
 /// Trusted provider configuration for the `pull_request_target` PR-Agent job.

@@ -44,7 +44,10 @@ const navSections: NavSection[] = [
   },
   {
     label: "System",
-    items: [{ label: "成員", href: "/admin/users", icon: "members" }],
+    items: [
+      { label: "成員", href: "/admin/users", icon: "members" },
+      { label: "個人資料", href: "/profile", icon: "members" },
+    ],
   },
 ];
 
@@ -273,17 +276,37 @@ export function NorthShell({ children }: { children: ReactNode }) {
   const isAuthRoute = pathname === "/login" || pathname === "/signup";
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [verifiedPath, setVerifiedPath] = useState<string | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authError, setAuthError] = useState(false);
+
+  useEffect(() => {
+    const invalidate = () => {
+      setCurrentUser(null);
+      setVerifiedPath(null);
+      setAuthChecked(false);
+    };
+    window.addEventListener("north:logout", invalidate);
+    return () => window.removeEventListener("north:logout", invalidate);
+  }, []);
 
   useEffect(() => {
     if (isAuthRoute) return;
     let active = true;
     void getCurrentUser()
       .then((user) => {
-        if (active) setCurrentUser(user);
+        if (active) {
+          setCurrentUser(user);
+          setAuthError(false);
+          setVerifiedPath(pathname);
+          setAuthChecked(true);
+        }
       })
       .catch((cause: unknown) => {
         if (!active) return;
         setCurrentUser(null);
+        setAuthChecked(true);
+        setAuthError(true);
         if (cause instanceof ApiError && cause.status === 401) {
           window.location.replace(new URL("/login", window.location.href).href);
         }
@@ -291,7 +314,7 @@ export function NorthShell({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
-  }, [isAuthRoute]);
+  }, [isAuthRoute, pathname]);
 
   useEffect(() => {
     if (!sidebarOpen) return;
@@ -308,6 +331,15 @@ export function NorthShell({ children }: { children: ReactNode }) {
   }, [sidebarOpen]);
 
   if (isAuthRoute) return <>{children}</>;
+  if (!authChecked || verifiedPath !== pathname || !currentUser) {
+    return (
+      <main className="north-auth-gate">
+        <p role={authError ? "alert" : "status"}>
+          {authError ? "無法確認登入狀態，請重新整理重試。" : "正在確認登入狀態…"}
+        </p>
+      </main>
+    );
+  }
 
   return (
     <div className="north-app">

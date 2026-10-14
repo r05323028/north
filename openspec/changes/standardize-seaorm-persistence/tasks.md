@@ -28,7 +28,7 @@
 ## 5. Packaging, docs, and obsolete-code removal
 
 - [x] 5.1 Embed compiled migrations in the packaged server and remove raw SQL migration assets from release packaging; verify the packaged binary can migrate an isolated database when run outside the checkout.
-- [x] 5.2 Update deployment, persistence, testing, invariant, and release-qualification docs to describe automatic startup migrations, required DDL privilege, shared lock, and optional explicit CLI.
+- [x] 5.2 Update deployment, persistence, testing, invariant, and release-qualification docs to describe automatic startup migrations, required DDL privilege, shared lock, and optional explicit CLI; sync the existing server-runtime delta into canonical `openspec/specs/server-runtime/spec.md` and verify startup, no-op, failure, and optional CLI semantics agree.
 - [x] 5.3 Remove obsolete SQLx migration macros, raw migration files, and direct SQLx dependencies where no production/test code still uses them; verify dependency/reference searches show SeaORM as the only application database API.
 - [ ] 5.4 Run `./scripts/validate.sh fast`, architecture checks, strict OpenSpec validation, packaged release verification, `./scripts/validate.sh ci` with `NORTH_TEST_DATABASE_URL`, and required pre-push validation; record unavailable PostgreSQL/release evidence as incomplete rather than passing.
 

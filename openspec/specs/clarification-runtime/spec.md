@@ -12,14 +12,7 @@ daemon.
 
 ### Requirement: Consume the existing North protocol contract
 
-The clarification runtime SHALL use the existing `north-protocol` command/event
-families: `session.start`, `session.cancel`, `session.resume`, `message.send`,
-`session.started`, `agent.message`, `agent.activity`,
-`requirement.assessed`, `session.completed`, and `session.failed`. It SHALL
-reuse existing envelope IDs, directional sequences, ACK-after-commit,
-reconciliation, and identity-conflict behavior. It SHALL NOT introduce a
-second wire schema, alternate ACK names, daemon-event cursors in
-`session.resume`, or protocol types in the domain crate.
+The clarification runtime SHALL use existing `north-protocol` frames: `session.start`, `session.cancel`, `session.resume`, `message.send`, `session.started`, `agent.message`, `agent.activity`, `requirement.assessed`, `session.completed`, and `session.failed`. Reuse envelope IDs, directional sequences, ACK-after-commit, reconciliation, and identity-conflict rules. Add no schema, alternate ACK names, `session.resume` event cursors, or domain-crate protocol types.
 
 #### Scenario: Runtime work uses established delivery
 
@@ -28,69 +21,23 @@ second wire schema, alternate ACK names, daemon-event cursors in
 
 ### Requirement: Server assembles and pins each run context
 
-A valid `clarification/start` MAY resolve the latest run only for its sequential
-create/reuse/idempotency decision because the operation creates or returns
-the run identity.
-The latest run MAY be reused only when all of these are true:
-`phase=awaiting_assignment`, `daemon_id = null`, no `session.start` was
-successfully created or dispatched, it has not been cancelled or closed; the
-request is the same logical start attempt; and the incoming `message_id` equals
-its recorded `start_message_id`. In this case the
-server SHALL reuse the run identity and attempt daemon selection again. A
-different message while that unassigned attempt is reusable SHALL return the
-canonical conflict. If a matching `start_message_id` already has a committed run identity for an
-unclosed start attempt, concurrent or retried same-message starts SHALL resolve
-to that run and its existing command identities: one serialized request may complete
-conditional assignment for an awaiting run, but no request creates a second run
-or performs a second assignment, lifecycle transition, or `session.start`. The
-state-version precondition gates a new start mutation; it does not turn a
-matching idempotent retry into a second mutation.
+North SHALL own each Requirement's sequential slot, run identity, same-message idempotency, and atomic assignment. New runs bind the current Requirement/revision, repository set, and North-selected persisted context under fixed message-count/UTF-8-byte bounds, always including the start message. `run_id=session_id` (no duplicate field); replay cannot retarget. No Pi tokenizer; credentials, checkout paths, DB handles, and `north-domain` types stay server-side.
 
-If the latest run is `phase=active` (assigned and non-terminal, including a
-pinned daemon that is operationally unavailable or a run with cancellation
-requested), a different start message SHALL return the canonical conflict and
-SHALL create no second run or `session.start` command. Later requester messages
-use the explicit run-scoped dispatch operation. If the latest run is
-`phase=terminal`, a new persisted eligible start message SHALL create a new run
-identity rather than retargeting the prior run.
+#### Scenario: Context accounting stays provider-neutral
 
-When a daemon is selected for a new or reused run, assignment is valid only
-while the run remains the authoritative non-terminal `phase=awaiting_assignment`
-occupant and has not been cancelled or closed. The server SHALL atomically verify
-that eligibility while persisting the run's immutable `daemon_id`, Requirement
-binding, repository IDs, complete `session.start` command, `phase=active`, and
-`status=starting`; if eligibility is lost before commit, assignment SHALL fail
-without persisting a daemon pin, binding, context, or command and SHALL not
-reactivate the run. The operation occupies the sequential clarification slot;
-`session.started` is not required to acquire the sequential clarification slot. A new run SHALL
-receive the current Requirement snapshot and
-revision, its own `run_id`/`session_id` identity, `start_message_id`, repository
-set, and command/event sequence. `session.start` SHALL contain the immutable
-Requirement snapshot, a deterministic bounded excerpt selected by North from
-canonical persisted conversation history, and enabled repository metadata only.
-The excerpt SHALL always include `start_message_id`; North's fixed configured
-selection/truncation policy is authoritative. For North 0.1, the context bound
-and size accounting SHALL use a fixed message count and/or UTF-8 byte size.
-Token-based accounting is deferred unless a later change defines a canonical
-provider-independent tokenizer and tokenizer version as part of the selection
-configuration; no Pi tokenizer or tokenizer abstraction is introduced here.
-The envelope's `session_id` is the same identity as application `run_id`; the
-payload SHALL NOT gain a duplicate session field. Credentials, checkout paths, database handles, and
-`north-domain` types SHALL NOT cross the daemon boundary. A run's repository set,
-start message, selected context, and snapshot SHALL NOT be silently retargeted on
-later command replay. Any user-driven Draft → Discussing transition used by
-start orchestration SHALL honor `expected_state_version`; `revision` is the
-content snapshot token, not the write precondition.
+- **WHEN** North applies the configured `session.start` context policy
+- **THEN** fixed message-count and/or UTF-8-byte bounds use deterministic persisted order and always retain `start_message_id`
+- **AND** token accounting is deferred unless a later change defines a canonical provider-independent tokenizer and version in the selection configuration; North 0.1 adds no Pi tokenizer or tokenizer abstraction
 
 #### Scenario: Start sees server context, not storage
 
 - **WHEN** the server dispatches `session.start`
-- **THEN** the daemon receives the server-selected Requirement, deterministic conversation excerpt, and repository context, with no credential or persistence access
+- **THEN** `session.start` contains the current immutable Requirement/revision snapshot, North-selected persisted excerpt including `start_message_id`, and enabled repository metadata for the pinned repository set; credentials, checkout paths, database handles, and persistence access stay server-side
 
 #### Scenario: Assignment acquires the sequential clarification slot before runtime startup
 
 - **GIVEN** run A is `phase=awaiting_assignment`, `status=unavailable`, and has no daemon pin
-- **WHEN** North atomically selects daemon D, persists D's pin, the Requirement/run binding, immutable run context, and complete `session.start` command
+- **WHEN** North atomically selects daemon D, persists D's pin, the Requirement/run binding, repository IDs, immutable run context, and complete `session.start` command
 - **THEN** A becomes `phase=active`, `status=starting`, and occupies the sequential clarification slot before dispatch
 - **AND** another clarification start conflicts even though `session.started` has not arrived; that event only retains `phase=active` and changes status to `running`
 
@@ -158,7 +105,7 @@ content snapshot token, not the write precondition.
 
 - **GIVEN** an immutable run has a persisted North-selected `session.start` context
 - **WHEN** the server replays or reconstructs that run with the same canonical state and context configuration
-- **THEN** it sends the same selected conversation excerpt and `start_message_id` without provider-dependent reselection
+- **THEN** replay preserves the Requirement revision, daemon pin, repository set, `start_message_id`, selected context, `run_id`/`session_id`, and sequence without provider-dependent reselection
 
 #### Scenario: Provider cannot select canonical context
 
@@ -194,78 +141,25 @@ content snapshot token, not the write precondition.
 
 ### Requirement: Authenticated HTTP mutations separate history from execution intent
 
-The server SHALL expose these authenticated application operations without
-introducing a generic command API:
+The server SHALL persist authenticated messages as history only. Only start accepts `{message_id, expected_state_version}` and creates/reuses a run; per-Requirement slot/idempotency rules precede the new-start `state_version` gate, while `revision` identifies content. Bodyless explicit-run dispatch/cancel verify Requirement/run binding and never retarget latest; no generic command API. Assigned starts return 202; unavailable starts return 503; unknown/mismatched run IDs return generic 404.
 
-- `POST /requirements/{requirement_id}/conversation/messages` accepts the
-  existing requester message body, persists one canonical conversation message,
-  and returns its `message_id`. It SHALL not start a run, select a daemon, or
-  create a runtime command.
-- `POST /requirements/{requirement_id}/clarification/start` accepts
-  `{ "message_id": string, "expected_state_version": u64 }`. After normal
-  authentication/authorization, it validates that the message belongs to this
-  Requirement's conversation and is eligible as the start message, enters the
-  per-Requirement sequential-slot arbitration, and inspects the authoritative
-  non-terminal occupant. If an occupant's `start_message_id` matches, the
-  request is a same logical start retry: it reuses that `run_id` and existing
-  command identities, creates no run, does not reapply Draft → Discussing, and
-  does not reapply the original `expected_state_version` as a new-mutation
-  precondition. If the message differs, it returns the canonical existing-run
-  sequential-slot conflict, preserves the persisted message, and creates no
-  Requirement mutation, run, daemon assignment, or `session.start`. Only an
-  unoccupied slot is a genuinely new logical start. For that new start, the
-  server atomically validates `expected_state_version`; a stale token returns
-  canonical `409` before any new-run or command mutation while preserving the
-  already-persisted message. A current token applies Draft → Discussing when
-  required, then creates a new run with a new `run_id` and current Requirement
-  snapshot. An assigned start returns `202` with canonical Requirement/run data
-  including `run_id` and `start_message_id`; no eligible daemon returns `503
-  clarification_unavailable` with the unassigned `phase=awaiting_assignment`,
-  `status=unavailable` run projection. Sequential-slot arbitration therefore
-  decides reuse, different-message conflict, or genuinely new start before the
-  new-start state-version precondition is applied. The state version protects
-  creation of a new logical clarification start and its associated Requirement
-  transition; it does not invalidate an already-committed matching logical start
-  during idempotent replay or concurrent same-message arbitration.
-- `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`
-  has no message body. It SHALL verify that `run_id` exists, belongs to the
-  Requirement in the URL, is `phase=active` with `cancel_requested=false` and
-  an assigned non-terminal run (including a pinned daemon that is operationally
-  unavailable), and that the
-  persisted requester message belongs to this Requirement's canonical
-  conversation, is eligible for that run, and is not the recorded start message.
-  It then creates or reuses exactly one durable `message.send` command for that
-  explicit run and message. An `awaiting_assignment` or terminal run returns its
-  run-scoped conflict/unavailability result without a command. A pinned offline
-  daemon retains the command for replay. It SHALL never create a second
-  conversation message or resolve a newer latest run.
-- `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel` has
-  no message body. It SHALL verify that `run_id` exists, belongs to the
-  Requirement in the URL, and is an unassigned not-yet-started run or an
-  assigned `phase=active` run with a non-terminal execution (including pinned
-  operational unavailability); repeated cancellation of the same run remains
-  idempotent. It SHALL persist `cancel_requested` and return that run's public
-  projection. If the run is unassigned with no `session.start` execution, it
-  immediately sets `phase=terminal`, creates no `session.cancel` or other daemon
-  command identity, and makes the run ineligible for reuse. If the run is
-  assigned, it creates or reuses exactly one durable `session.cancel` for the
-  pinned daemon but remains `phase=active` and continues to occupy the
-  sequential clarification slot until `session.completed` or `session.failed` is durably
-  projected. A `command_ack` only means the daemon recorded the command; it is
-  not cancellation completion. Cancellation SHALL not mutate Requirement
-  lifecycle, content, revision, or state_version.
+#### Scenario: HTTP mutations use canonical routes and explicit identity
 
-`clarification/start` is the only identity-creating exception and returns the
-public `run_id` and `start_message_id`. After a run ID is known, dispatch and
-cancellation SHALL always include it explicitly. The latest-run
-`GET /requirements/{requirement_id}/session` read may guide UI presentation but
-MUST NOT determine mutation identity. A stale client targeting run A after run B
-becomes latest is evaluated only against A; it is never silently retargeted to B.
-An unknown or Requirement-mismatched run ID on an explicit run-scoped route
-returns HTTP `404` with generic error code `not_found` after normal
-authorization checks, without revealing cross-Requirement run existence. An
-ineligible target returns its run-scoped canonical conflict or persisted
-idempotent result without creating a command for another run.
+- **WHEN** an authenticated requester persists a message, starts clarification, dispatches a later message, or cancels a run
+- **THEN** persistence uses `POST /requirements/{requirement_id}/conversation/messages`; start uses `POST /requirements/{requirement_id}/clarification/start` with `{ "message_id": string, "expected_state_version": u64 }`; dispatch uses `POST /requirements/{requirement_id}/clarification/runs/{run_id}/messages/{message_id}/dispatch`; cancellation uses `POST /requirements/{requirement_id}/clarification/runs/{run_id}/cancel`
+- **AND** dispatch/cancel have no body and name explicit run IDs; dispatch requires an eligible persisted non-start message from that Requirement's conversation and an assigned active non-cancelled run, retaining a command for replay if its pinned daemon is unavailable; awaiting/terminal dispatch targets conflict without a command
+- **AND** cancellation targets only an eligible unassigned not-yet-started or assigned active run and returns that run's public projection; only start creates/reuses run identity, and the latest session read is display-only, never mutation identity
+
+#### Scenario: Start returns the canonical assignment result
+
+- **WHEN** a genuinely new start uses the current `expected_state_version`
+- **THEN** an assigned start returns HTTP `202` with canonical Requirement/run data including `run_id` and `start_message_id`
+- **AND** if no daemon is eligible, it returns HTTP `503` `clarification_unavailable` with `phase=awaiting_assignment`, `status=unavailable`
+
+#### Scenario: Unknown or cross-Requirement run IDs remain private
+
+- **WHEN** an authenticated explicit run route names an unknown or other-Requirement `run_id`
+- **THEN** after normal authorization the server returns HTTP `404` with generic `not_found`, creates no command or state change, and reveals no cross-Requirement run existence
 
 #### Scenario: Posting history does not invoke runtime
 
@@ -325,7 +219,7 @@ idempotent result without creating a command for another run.
 
 #### Scenario: Active phase rejects concurrent start
 
-- **WHEN** run A is `phase=active` and a requester attempts `/clarification/start` with another persisted message, including after `session.cancel` receives `command_ack`
+- **WHEN** run A is `phase=active`, including a pinned operationally unavailable daemon, and a requester attempts `/clarification/start` with another persisted message or after `session.cancel` receives `command_ack`
 - **THEN** the server returns the canonical conflict, creates no second run or `session.start` command, and keeps A in the sequential clarification slot until terminal runtime projection
 
 #### Scenario: New run after completion
@@ -346,7 +240,7 @@ idempotent result without creating a command for another run.
 #### Scenario: Assigned cancellation remains active after acknowledgement
 
 - **WHEN** an assigned `phase=active` run A is cancelled through `/clarification/runs/A/cancel` and its `session.cancel` receives `command_ack`
-- **THEN** the server creates or reuses exactly one durable `session.cancel` for A, leaves A `phase=active`, and does not permit a new run until `session.completed` or `session.failed` is durably projected
+- **THEN** the server creates or reuses exactly one durable `session.cancel` for A, leaves A `phase=active`, does not mutate Requirement lifecycle/content/revision/`state_version`, and permits no new run until `session.completed` or `session.failed` is durably projected
 
 #### Scenario: Stale dispatch cannot target a newer run
 
@@ -371,20 +265,7 @@ idempotent result without creating a command for another run.
 
 ### Requirement: Requester messages are durable before runtime dispatch
 
-For every requester message that is sent to a runtime, the server SHALL first
-commit it through the canonical conversation persistence path and obtain its
-stable message identity. Only then SHALL it create or reuse one durable
-`message.send` command containing that identity and content. Dispatch/replay
-SHALL use existing server outbox and daemon journal identity mapping. A
-duplicate/replayed command SHALL submit the logical message to the runtime at
-most once. If dispatch is unavailable after message commit, the message SHALL
-remain in canonical history and the run SHALL report operational
-unavailability separately.
-
-The first requester message that starts a run SHALL be included in
-`session.start` conversation context and SHALL NOT also be sent as
-`message.send`. Later messages in that run SHALL use `message.send`; if no run
-exists, the next explicit start treats its first message as start context.
+Before runtime dispatch, requester messages SHALL commit to canonical conversation history with stable IDs. Only then create/reuse one durable `message.send` with that ID/content through existing outbox/journal mapping, ensuring at-most-once submission. Unavailable dispatch preserves history and reports runtime unavailability separately. The first start message appears only in `session.start`; later messages use `message.send`, and a new explicit start treats its first message as context.
 
 #### Scenario: Message cannot exist only at daemon
 
@@ -403,63 +284,14 @@ exists, the next explicit start treats its first message as start context.
 
 ### Requirement: Pi Agent is North 0.1 reference clarification runtime adapter
 
-North 0.1 SHALL implement exactly one concrete clarification runtime adapter:
-`PiClarificationAdapter` inside `north-daemon`, backed by Pi Agent. Pi Agent is
-North's reference clarification runtime adapter and first end-to-end runtime
-vertical slice. This is a deliberate validation slice, not a multi-provider
-runtime framework or provider-selection feature.
+North 0.1 SHALL use only Pi Agent's reference `PiClarificationAdapter` in `north-daemon`, behind a daemon-private, North-defined provider-neutral `ClarificationRuntime`. Pi APIs/lifecycle/event/session/tool/config types, raw output, and reasoning stay adapter-private; SDK deps stay in `north-daemon` only. Only North-neutral facts leave; server owns canonical state. Daemon-local reconnect/journal recovery/reattachment remain. No provider registry, selection API, or framework.
 
-The daemon SHALL invoke `PiClarificationAdapter` through a daemon-private,
-North-owned `ClarificationRuntime` seam. The seam SHALL be defined from North's
-clarification execution needs rather than copied from Pi Agent's API or
-lifecycle, and SHALL remain provider-neutral. Its conceptual North-owned inputs
-SHALL be limited to:
+#### Scenario: Runtime seam uses only North-owned inputs and facts
 
-- stable operation identity;
-- session/run identity;
-- immutable Requirement snapshot;
-- deterministic persisted conversation context;
-- authorized, run-bound repository inspection handles/context; and
-- cancellation/control intent.
-
-Its conceptual North-owned outputs SHALL be limited to:
-
-- agent message;
-- coarse product-visible activity;
-- readiness assessment;
-- completion; and
-- operational failure.
-
-The seam SHALL NOT carry or expose:
-
-- Pi SDK types;
-- Pi event names;
-- Pi session objects;
-- Pi tool-call schemas;
-- provider-specific lifecycle state;
-- raw tool output;
-- chain-of-thought or reasoning; or
-- Pi-specific configuration structures.
-
-All Pi-specific mapping SHALL remain inside `PiClarificationAdapter`. The
-adapter SHALL translate Pi callbacks/results into existing North-neutral
-runtime facts or drop details with no North meaning. `north-daemon` SHALL emit
-only existing North protocol events; no Pi event SHALL be mirrored as a new
-protocol frame. Pi-specific APIs, lifecycle concepts, configuration, event
-types, and SDK types MUST remain confined to the adapter within
-`north-daemon` and MUST NOT become North protocol, domain, persistence, server,
-or browser concepts. SDK dependencies SHALL not appear in
-`north-server`, `north-domain`, or `north-protocol`.
-
-The daemon and adapter SHALL report runtime facts only. They SHALL NOT mutate
-Requirement state, apply Requirement business transitions, or access server
-persistence directly. `north-server` remains responsible for canonical
-conversation, readiness, and session projections through North's existing
-domain and persistence paths. The daemon SHALL retain only local transport
-reconnect, journal recovery, and runtime reattachment authority. This change
-introduces no provider registry, provider-selection API, or abstraction for a
-hypothetical runtime; it defines only the smallest seam needed to support Pi
-cleanly.
+- **WHEN** the daemon invokes the adapter for an authorized run
+- **THEN** inputs are limited to stable operation identity, session/run identity, immutable Requirement snapshot, deterministic persisted conversation context, authorized run-bound repository inspection handles/context, and cancellation/control intent
+- **AND** outputs are limited to agent message, coarse product-visible activity, readiness assessment, completion, or operational failure
+- **AND** the adapter translates details into existing North-neutral facts or drops them; it emits no Pi types, and the daemon emits only existing North protocol events without mirroring Pi events
 
 #### Scenario: Pi proves the runtime seam end to end
 
@@ -497,30 +329,7 @@ cleanly.
 
 ### Requirement: Runtime events project canonically after durable handling
 
-For well-formed session-bound runtime events, North SHALL retain existing event
-identity/sequence validation and ACK only after one idempotent server
-projection commits. `session.failed` is an execution-attempt fact, not an
-unconditionally terminal logical-run fact. A known failure with retry policy
-budget remaining clears/closes the failed current attempt, persists safe failure
-classification and `next_retry_at`, and leaves the logical run
-`phase=active,status=retrying`. Exhaustion, `execution_outcome_unknown`,
-owner invalidation, or cancellation terminalizes the logical run as
-`phase=terminal,status=failed`. A retrying run retains the sequential slot; a
-terminal run releases it. Raw runtime/provider details remain private.
-
-Coarse `agent.activity` telemetry is ephemeral. Each accepted activity row
-carries an expiry written from the configured retention window and may be
-removed by bounded retention sweeps. Durable coordination state — event
-dedupe/outcome records, ACK watermarks and sparse ACK lists, execution
-attempts, retry scheduling, and failure classification — is never a retention
-target. Replaying an already-acknowledged activity event remains deduplicated
-and does not recreate purged telemetry.
-
-`session.completed` remains successful terminal completion. Duplicate/replayed
-facts return their recorded ACK/outcome without repeating effects. A terminal
-unknown-outcome run can never receive `session.resume`; later execution starts a
-new logical run with a new run/protocol session identity and normal start/slot
-rules.
+The server SHALL validate event ID/sequence; ACK only after idempotent projection commit. Retryable failure closes attempt, stores safe class/`next_retry_at`, keeps active/retrying slot. Exhaustion, `execution_outcome_unknown`, invalid owner, or cancellation failure yields terminal/failed. Activity expires; dedupe/ACK/attempt/retry state persists, replay inert. Raw details SHALL stay private. `session.completed` is successful terminal; unknown outcome needs new identity, never `session.resume`.
 
 #### Scenario: Agent message becomes canonical history
 
@@ -549,23 +358,14 @@ rules.
 
 #### Scenario: Expired activity stays deduplicated
 
-- **WHEN** an accepted `agent.activity` event is replayed after its telemetry row expired and was purged
-- **THEN** the server returns the recorded duplicate outcome without reinserting a row or changing watermarks or dedupe state
+- **GIVEN** accepted `agent.activity` rows carry expiry from the configured retention window
+- **WHEN** a bounded retention sweep purges a telemetry row and the event is replayed
+- **THEN** telemetry may expire, but durable event dedupe/outcome records, ACK watermarks/sparse lists, attempts, retry scheduling, and failure classification are not retention targets
+- **AND** the server returns the recorded duplicate outcome without reinserting telemetry or changing coordination state
 
 ### Requirement: Assessment handling is revision-bound and atomic
 
-For `requirement.assessed`, the server SHALL use the existing typed conversion
-and canonical persistence/domain path. It SHALL validate session/Requirement
-binding, event identity and sequence, repository identity/run membership, and
-`requirement_revision` against the current Requirement revision before
-applying domain readiness gates. Accepted evidence, any valid `Discussing` →
-`Ready` transition, dedupe state, and the accepted Ready-generation
-`state_version` SHALL commit atomically before `event_ack(status=accepted)`.
-A well-formed, sequence-valid stale or domain-gated assessment SHALL commit
-durable rejection evidence and `event_ack(status=rejected)` without changing
-Requirement status, revision, or `state_version`. Malformed payloads, identity
-conflicts, and sequence gaps retain the existing protocol-error/no-ACK rules.
-Duplicate accepted/rejected assessment events SHALL be inert.
+The server SHALL use existing typed conversion/domain paths and validate session/Requirement binding, event identity/sequence, repository membership, and `requirement_revision` before readiness gates. Accepted evidence, Ready transition, dedupe, and `state_version` commit atomically before accepted ACK. Stale/gated assessments durably reject with rejected ACK, without changing status, revision, or version. Malformed/conflicting/gapped events retain protocol-error/no-ACK; duplicates are inert.
 
 #### Scenario: Edit makes an in-flight assessment stale
 
@@ -579,14 +379,7 @@ Duplicate accepted/rejected assessment events SHALL be inert.
 
 ### Requirement: Completion and failure facts have explicit semantics
 
-A normal completion SHALL remain a valid terminal session fact even without an
-assessment and never changes Requirement content, lifecycle, revision, readiness,
-or state version. A failure fact is processed once and then follows server
-retry policy. Known retryable failure keeps the logical run active and
-slot-occupying; retry exhaustion, unknown outcome, invalid owner, or terminal
-cancellation failure
-produces safe terminal failed state. Successful cancellation uses the existing
-completion fact. The daemon `recoverable` value is a local fact only.
+Completion SHALL remain valid without assessment and never changes Requirement content, lifecycle, revision, readiness, or state_version. Process each failure once: retryable failures retain the active slot; exhaustion, unknown outcome, invalid owner, or terminal cancellation failure becomes safely terminal/failed. Successful cancellation uses `session.completed`; daemon `recoverable` is local only.
 
 #### Scenario: Failure before assessment leaves business truth intact
 
@@ -663,14 +456,7 @@ and cannot block or mutate a newer run.
 
 ### Requirement: Canonical read models are server-owned
 
-The existing session read SHALL remain the only public run projection. It retains
-`awaiting_assignment`/`active`/`terminal` phases and adds safe
-`attempt_count`, nullable `next_retry_at`, and bounded `failure_reason` as
-available. A policy retry reads `phase=active,status=retrying`; terminal
-execution failure, cancellation, owner invalidation, or unknown outcome reads
-`phase=terminal,status=failed`. The projection never exposes retry limits,
-remaining budget, daemon/provider identity, raw runtime errors, credentials, or
-operation IDs.
+The existing session read SHALL remain the only public run projection, retaining `awaiting_assignment`/`active`/`terminal` and safe `attempt_count`, nullable `next_retry_at`, and bounded `failure_reason`. Retrying runs read active/retrying; terminal failures read terminal/failed. Never expose retry limits, remaining budget, daemon/provider identity, raw errors, credentials, or operation IDs.
 
 #### Scenario: Browser reads persisted agent output
 
@@ -703,17 +489,7 @@ operation IDs.
 
 ### Requirement: Clarification extends Board-owned browser SSE
 
-`introduce-requirement-board` SHALL own the single authenticated `GET /events`
-SSE endpoint and base `requirement.changed` category. This change SHALL extend
-that same producer after clarification canonical transactions with lightweight
-`conversation.changed`, `readiness.changed`, `activity.changed`, and
-`session.changed` notifications containing Requirement identity and
-non-authoritative metadata only. It SHALL not create another endpoint, event
-bus, browser event store, or WebSocket path. SSE SHALL not be a durable browser
-event log, Requirement source of truth, or required replay mechanism.
-`Last-Event-ID` SHALL not be required for correctness; missed, duplicate,
-delayed, out-of-order, or reconnect-delivered hints SHALL be harmless because
-clients refetch canonical HTTP reads.
+Board SHALL extend authenticated `GET /events` (`requirement.changed`) after canonical transactions with `conversation.changed`, `readiness.changed`, `activity.changed`, and `session.changed` hints containing only Requirement identity and non-authoritative metadata. No new endpoint, bus, browser store, WebSocket, durable event log, truth, or replay. `Last-Event-ID` is not required: lost/duplicate/delayed/reordered/reconnect hints are harmless; clients refetch canonical HTTP reads.
 
 #### Scenario: Clarification hint is repaired by HTTP
 

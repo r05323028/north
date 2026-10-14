@@ -83,7 +83,7 @@ pending-quota interaction, generic 429s, no-resource rejection, and durable quot
 server integration paths. PostgreSQL restart/concurrency proofs run in
 `retry_authority` and require `NORTH_TEST_DATABASE_URL`.
 
-PostgreSQL integration exercises keyed OTP issuance/verification, key rotation rejection, public endpoint quota/HTTP boundaries, readiness invariants, and runtime-retention sweeps/amnesia. The ignored `fresh_install` suite compares the compiled SeaORM migration catalog with the former SQL baseline in isolated schemas, verifies fresh and repeat `up`, rejects SQLx history and partial schemas without mutation, and checks the packaged `migrate` command without OTP configuration. `./scripts/validate.sh integration` and `ci` include these tests; `cargo test --workspace` alone does not execute ignored PostgreSQL proofs. Upgrades and data backfills from pre-0.1.0 schemas are intentionally unsupported; retention integration tests operate on rows they create.
+PostgreSQL integration exercises keyed OTP issuance/verification, key rotation rejection, public endpoint quota/HTTP boundaries, readiness invariants, and runtime-retention sweeps/amnesia. The ignored `fresh_install` suite compares the compiled SeaORM migration catalog with the former SQL baseline in isolated schemas, verifies fresh and repeat `up`, and checks the packaged `migrate` command without OTP configuration. It also rejects SQLx history, an unmarked reused `m0001_initial_schema`, unregistered pre-release versions, and an empty ledger paired with partial schema without mutation; the startup probe confirms failure before listener bind. `./scripts/validate.sh integration` and `ci` include these tests; `cargo test --workspace` alone does not execute ignored PostgreSQL proofs. Upgrades and data backfills from pre-0.1.0 schemas are intentionally unsupported; retention integration tests operate on rows they create.
 
 ## Coverage matrix
 
@@ -140,7 +140,10 @@ fork them casually. Frontend unit tests use Vitest (`npm test`) and run through
 Playwright (`npm run test:e2e`) and run in merge-gate job `web-e2e` on
 `ubuntu-latest`; this mocked-route suite does not prove assembled server/browser
 behavior. Install its browser locally with `npx playwright install chromium`.
-Assembled release E2E targets the North proxy and runs with
+The default suite uses its configured `webServer` on `NORTH_WEB_E2E_PORT` for both
+server launch and `baseURL`, and never reuses an existing process; a port
+collision fails rather than attaching to a stale server. Assembled release E2E
+targets the North proxy and runs with
 `cd apps/web && npm run test:e2e:release`. Set `NORTH_RELEASE_BASE_URL` and
 provide either `NORTH_RELEASE_STORAGE_STATE` or `NORTH_RELEASE_OTP_CODE` (with
 optional `NORTH_RELEASE_EMAIL`) in the local environment. Keep storage state and
